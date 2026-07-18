@@ -8,10 +8,12 @@ import (
 
 // FakeResult scripts one dispatch outcome for deterministic fixtures.
 type FakeResult struct {
-	Structured map[string]any
-	Invalid    []string
-	Err        error
-	TimedOut   bool
+	Structured    map[string]any
+	Invalid       []string
+	Err           error
+	TimedOut      bool
+	StartFailure  bool // child never started (no attempt consumed)
+	ModelMismatch bool
 }
 
 // FakeAdapter is the deterministic test double: it honors the real
@@ -68,7 +70,12 @@ func (f *FakeAdapter) Dispatch(ctx context.Context, req Request, handles *Handle
 
 	raw, _ := json.Marshal(fr.Structured)
 	res := &Result{Stdout: raw, Stderr: nil, ExitCode: 0, Structured: fr.Structured,
-		Invalid: fr.Invalid, TimedOut: fr.TimedOut}
+		Invalid: fr.Invalid, TimedOut: fr.TimedOut, Started: !fr.StartFailure}
+	res.Provenance.ModelMismatch = fr.ModelMismatch
+	if fr.StartFailure {
+		res.ExitCode = -1
+		return res, fmt.Errorf("fake process never started (pre-dispatch failure, no attempt consumed)")
+	}
 	if fr.TimedOut {
 		return res, fmt.Errorf("hard-cap timeout: execution UNKNOWN, re-dispatch forbidden")
 	}
@@ -84,7 +91,9 @@ func (f *FakeAdapter) Dispatch(ctx context.Context, req Request, handles *Handle
 		}
 		sessionRef, newSession = ref, true
 	}
+	mm := res.Provenance.ModelMismatch
 	res.Provenance = Provenance{
+		ModelSelection: modelSelection(req.Model), ModelMismatch: mm,
 		RequestedModel: req.Model, ModelState: ObsAttested,
 		RequestedEffort: req.Effort,
 		ManifestCLIVersion: "fake-1", ObservedCLIVersion: "fake-1",

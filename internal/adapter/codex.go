@@ -182,8 +182,8 @@ func (a CodexAdapter) Dispatch(ctx context.Context, req Request, handles *Handle
 	cmd.Stdin = bytes.NewReader([]byte(req.Prompt))
 	runErr := cmd.Run()
 
-	res := &Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: exitCode(cmd)}
-	if cmd.ProcessState == nil {
+	res := &Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: exitCode(cmd), Started: cmd.ProcessState != nil}
+	if !res.Started {
 		return res, fmt.Errorf("codex process never started (pre-dispatch failure, no attempt consumed): %v", runErr)
 	}
 	if tctx.Err() == context.DeadlineExceeded {
@@ -230,6 +230,7 @@ func (a CodexAdapter) Dispatch(ctx context.Context, req Request, handles *Handle
 	res.Provenance = Provenance{
 		// requested value is the only attestation source: nothing resolved
 		// is observable on the public stream.
+		ModelSelection: modelSelection(req.Model),
 		RequestedModel: req.Model, ResolvedModel: "", ModelState: ObsAttested,
 		RequestedEffort: req.Effort, EffortState: effortState,
 		ManifestCLIVersion: a.Capability().CLIVersionChecked, ObservedCLIVersion: observedVersion,

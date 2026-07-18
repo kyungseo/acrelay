@@ -140,8 +140,8 @@ func (a ClaudeAdapter) Dispatch(ctx context.Context, req Request, handles *Handl
 	cmd.Stdin = bytes.NewReader([]byte(req.Prompt))
 	runErr := cmd.Run()
 
-	res := &Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: exitCode(cmd)}
-	if cmd.ProcessState == nil {
+	res := &Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: exitCode(cmd), Started: cmd.ProcessState != nil}
+	if !res.Started {
 		return res, fmt.Errorf("claude process never started (pre-dispatch failure, no attempt consumed): %v", runErr)
 	}
 	if tctx.Err() == context.DeadlineExceeded {
@@ -153,6 +153,9 @@ func (a ClaudeAdapter) Dispatch(ctx context.Context, req Request, handles *Handl
 		return res, fmt.Errorf("dispatch capture failed (runErr=%v): %w", runErr, perr)
 	}
 	res.Diagnostic = diag
+	if env.Type != "result" || env.Subtype != "success" {
+		return res, fmt.Errorf("claude envelope is not a terminal success (type=%s subtype=%s): fail-closed", env.Type, env.Subtype)
+	}
 	if env.IsError {
 		return res, fmt.Errorf("claude reported error in envelope (exit=%d): FAILED", res.ExitCode)
 	}
@@ -183,6 +186,7 @@ func (a ClaudeAdapter) Dispatch(ctx context.Context, req Request, handles *Handl
 		effortState = ObsAttested // accepted pre-validated flag; no echo on success path
 	}
 	res.Provenance = Provenance{
+		ModelSelection: modelSelection(req.Model),
 		RequestedModel: req.Model, ResolvedModel: resolved, ModelState: modelState, ModelMismatch: mismatch,
 		RequestedEffort: req.Effort, EffortState: effortState,
 		ManifestCLIVersion: a.Capability().CLIVersionChecked, ObservedCLIVersion: observedVersion,

@@ -239,6 +239,44 @@ func (r *Round) OpenConfirmation(notConfirmedIDs []string) (*ConfirmationCycle, 
 	return r.Confirmation, nil
 }
 
+// RehydrateConfirmation rebuilds a persisted cycle under validation:
+// outstanding must be a subset of the immutable initial set and the
+// counters must be within contract bounds. Used only by the relay's
+// persistence layer (R1-CX-F4).
+func RehydrateConfirmation(initial, outstanding []string, validAttempts, preconditionFailures int, escalated bool) (*ConfirmationCycle, error) {
+	initSet, err := validateIDSet(initial)
+	if err != nil {
+		return nil, fmt.Errorf("rehydrate confirmation initial: %w", err)
+	}
+	outSet := map[string]bool{}
+	if len(outstanding) > 0 {
+		outSet, err = validateIDSet(outstanding)
+		if err != nil {
+			return nil, fmt.Errorf("rehydrate confirmation outstanding: %w", err)
+		}
+		for id := range outSet {
+			if !initSet[id] {
+				return nil, fmt.Errorf("rehydrate confirmation: outstanding %q outside initial set: fail-closed", id)
+			}
+		}
+	}
+	if validAttempts < 0 || validAttempts > MaxValidConfirmationRetries || preconditionFailures < 0 {
+		return nil, fmt.Errorf("rehydrate confirmation: counters out of contract: fail-closed")
+	}
+	return &ConfirmationCycle{initial: initSet, outstanding: outSet,
+		ValidAttempts: validAttempts, PreconditionFailures: preconditionFailures, Escalated: escalated}, nil
+}
+
+// Initial returns the sorted immutable closed set.
+func (c *ConfirmationCycle) Initial() []string {
+	var out []string
+	for id := range c.initial {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Outstanding returns the sorted not-confirmed IDs.
 func (c *ConfirmationCycle) Outstanding() []string {
 	var out []string

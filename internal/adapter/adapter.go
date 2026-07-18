@@ -109,6 +109,7 @@ type Request struct {
 
 // Provenance records what was requested and what was observed.
 type Provenance struct {
+	ModelSelection     string // "explicit" or "platform-default" (R1-CX-N2)
 	RequestedModel     string
 	ResolvedModel      string
 	ModelState         ObservationState
@@ -126,6 +127,7 @@ type Provenance struct {
 type Result struct {
 	Stdout     []byte
 	Stderr     []byte
+	Started    bool // child process actually started (R1-CX-F7)
 	ExitCode   int // -1 when the process never started
 	Structured map[string]any
 	Diagnostic string   // e.g. non-JSON prefix note — preserved, never dropped
@@ -212,6 +214,14 @@ func newGroupCmd(ctx context.Context, grace time.Duration, name string, args ...
 	}
 	cmd.WaitDelay = grace + 2*time.Second // backstop for the direct child
 	return cmd
+}
+
+// modelSelection classifies the request kind for provenance.
+func modelSelection(requested string) string {
+	if requested == "" {
+		return "platform-default"
+	}
+	return "explicit"
 }
 
 // exitCode reads the exit code defensively: a process that never started

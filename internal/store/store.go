@@ -78,46 +78,81 @@ func EncodeBlock(label string, b []byte) string {
 		label, Digest(b), len(b), f, enc, f)
 }
 
+// Block is one relay-managed evidence block found OUTSIDE any fence.
+type Block struct {
+	Label    string
+	Encoding string
+	Claimed  string // recorded sha256
+	Body     string // fenced body text (base64 text or verbatim UTF-8)
+}
+
+var blockHead = regexp.MustCompile(`^- (.+): encoding=(utf-8|base64) sha256=([0-9a-f]{64}) bytes=\d+$`)
+var fenceLine = regexp.MustCompile(`^~{4,}$`)
+
+// ListBlocks walks the document fence-aware: content inside a block's fence
+// (including raw reviewer output) is never scanned for headers, so forged
+// headers inside raw evidence cannot shadow relay-managed blocks (R1-CX-F2).
+func ListBlocks(doc string) []Block {
+	lines := strings.Split(doc, "\n")
+	var out []Block
+	for i := 0; i < len(lines); i++ {
+		m := blockHead.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		if i+1 >= len(lines) || !fenceLine.MatchString(lines[i+1]) {
+			continue // header without fence: not a well-formed block
+		}
+		fence := lines[i+1]
+		var body []string
+		closed := false
+		j := i + 2
+		for ; j < len(lines); j++ {
+			if lines[j] == fence {
+				closed = true
+				break
+			}
+			body = append(body, lines[j])
+		}
+		if !closed {
+			break // unterminated block: stop scanning, fail closed downstream
+		}
+		out = append(out, Block{Label: m[1], Encoding: m[2], Claimed: m[3], Body: strings.Join(body, "\n")})
+		i = j // skip past the fenced body entirely
+	}
+	return out
+}
+
 // ExtractBlock re-reads a stored block and returns the original bytes after
-// verifying the recomputed digest against the recorded one. Any mismatch or
-// malformed block fails closed.
+// verifying the recomputed digest against the recorded one. Lookup is
+// fence-aware; duplicate labels outside fences fail closed as ambiguous.
 func ExtractBlock(stored, label string) ([]byte, error) {
-	// Go regexp (RE2) has no backreferences, so the closing fence is located
-	// by exact string search for the opening fence. Because the fence is
-	// strictly longer than any run inside the content, "\n<fence>\n" cannot
-	// occur within the content itself.
-	head := regexp.MustCompile(`- ` + regexp.QuoteMeta(label) +
-		`: encoding=(utf-8|base64) sha256=([0-9a-f]{64}) bytes=\d+\n(~{4,})\n`)
-	all := head.FindAllStringSubmatchIndex(stored, -1)
-	if len(all) == 0 {
+	var found []Block
+	for _, b := range ListBlocks(stored) {
+		if b.Label == label {
+			found = append(found, b)
+		}
+	}
+	if len(found) == 0 {
 		return nil, fmt.Errorf("block %q not found or malformed: fail-closed", label)
 	}
-	if len(all) > 1 {
-		return nil, fmt.Errorf("block %q is ambiguous (%d occurrences — labels must be unique per scope, forged headers fail closed)", label, len(all))
+	if len(found) > 1 {
+		return nil, fmt.Errorf("block %q is ambiguous (%d occurrences — labels must be unique per scope)", label, len(found))
 	}
-	m := all[0]
-	encoding := stored[m[2]:m[3]]
-	claimed := stored[m[4]:m[5]]
-	fence := stored[m[6]:m[7]]
-	rest := stored[m[1]:]
-	end := strings.Index(rest, "\n"+fence+"\n")
-	if end < 0 {
-		return nil, fmt.Errorf("block %q closing fence missing: fail-closed", label)
-	}
-	body := rest[:end]
+	b := found[0]
 	var raw []byte
-	if encoding == "base64" {
-		dec, err := base64.StdEncoding.DecodeString(body)
+	if b.Encoding == "base64" {
+		dec, err := base64.StdEncoding.DecodeString(b.Body)
 		if err != nil {
 			return nil, fmt.Errorf("block %q base64 decode: %w", label, err)
 		}
 		raw = dec
 	} else {
-		raw = []byte(body)
+		raw = []byte(b.Body)
 	}
-	if Digest(raw) != claimed {
+	if Digest(raw) != b.Claimed {
 		return nil, fmt.Errorf("block %q digest mismatch (stored %s, recomputed %s): fail-closed",
-			label, claimed[:12], Digest(raw)[:12])
+			label, b.Claimed[:12], Digest(raw)[:12])
 	}
 	return raw, nil
 }

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/kyungseo/acrelay/internal/adapter"
 	"github.com/kyungseo/acrelay/internal/kernel"
@@ -44,7 +45,7 @@ func fail(err error) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, `usage: acrelay <init|review|disposition|close|terminate|status> [flags]
+		fmt.Fprintln(os.Stderr, `usage: acrelay <init|review|confirm|disposition|close|terminate|reconcile|status> [flags]
 The canonical record is private local storage: keep it outside shared/synced/
 published paths. Sharing requires a redacted export (not provided in v1).`)
 		os.Exit(2)
@@ -55,15 +56,15 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 		fs := flag.NewFlagSet("init", flag.ExitOnError)
 		canonical := fs.String("canonical", "", "canonical record path (private storage)")
 		question := fs.String("question", "", "review objective question")
-		targetRev := fs.String("target-rev", "", "target manifest revision")
+		target := fs.String("target", "", "target file (evidence pointer: location + raw digest)")
 		prior := fs.String("prior", "", "prior objective ID (same-target follow-up)")
 		diff := fs.String("material-diff", "", "material difference vs prior objective")
 		seen := fs.Bool("seen-before", false, "target manifest was reviewed before")
 		fs.Parse(args)
-		if *canonical == "" || *question == "" || *targetRev == "" {
-			fail(fmt.Errorf("init requires -canonical, -question, -target-rev"))
+		if *canonical == "" || *question == "" || *target == "" {
+			fail(fmt.Errorf("init requires -canonical, -question, -target"))
 		}
-		st, err := relay.Init(*canonical, *question, *targetRev, *prior, *diff, *seen)
+		st, err := relay.Init(*canonical, *question, *target, *prior, *diff, *seen)
 		if err != nil {
 			fail(err)
 		}
@@ -79,6 +80,8 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 		effort := fs.String("effort", "", "explicit effort (default: omitted, no flag sent)")
 		handles := fs.String("handles", defaultHandles(), "session handle store path")
 		workdir := fs.String("workdir", "", "reviewer working directory (default: current)")
+		resetMode := fs.String("session-reset", "", "second-opinion|context-reset|resume-failure|unrelated")
+		resetReason := fs.String("session-reset-reason", "", "reason for the session reset")
 		fs.Parse(args)
 		if *canonical == "" || *reviewer == "" {
 			fail(fmt.Errorf("review requires -canonical, -reviewer"))
@@ -99,6 +102,9 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 			fail(err)
 		}
 		s := &relay.Session{Adapter: a, Handles: &adapter.HandleStore{Path: *handles}, Canonical: *canonical}
+		if *resetMode != "" || *resetReason != "" {
+			s.Reset = &relay.SessionReset{Mode: *resetMode, Reason: *resetReason}
+		}
 		fmt.Fprintf(os.Stderr, "progress: started reviewer=%s\n", *reviewer)
 		st, outcome, err := s.Review(context.Background(), p,
 			adapter.Request{Model: *model, Effort: *effort, WorkingDir: *workdir})
@@ -154,6 +160,59 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 			fail(err)
 		}
 		fmt.Printf("objective %s %s\n", st.ObjectiveID, st.Governance)
+
+	case "confirm":
+		fs := flag.NewFlagSet("confirm", flag.ExitOnError)
+		canonical := fs.String("canonical", "", "canonical record path")
+		round := fs.Int("round", -1, "formal round index (R0=0)")
+		open := fs.String("open", "", "comma-separated closed finding IDs to open a cycle")
+		submit := fs.String("submit", "", "comma-separated IDs for a valid attempt")
+		confirmed := fs.String("confirmed", "", "comma-separated confirmed IDs (subset of -submit)")
+		expected := fs.String("expected-target-rev", "", "exact target revision (precondition)")
+		fs.Parse(args)
+		split := func(v string) []string {
+			if strings.TrimSpace(v) == "" {
+				return nil
+			}
+			parts := strings.Split(v, ",")
+			for i := range parts {
+				parts[i] = strings.TrimSpace(parts[i])
+			}
+			return parts
+		}
+		switch {
+		case *open != "":
+			st, err := relay.OpenConfirmation(*canonical, *round, split(*open))
+			if err != nil {
+				fail(err)
+			}
+			fmt.Printf("confirmation cycle open R%d: %s\n", *round, *open)
+			_ = st
+		case *submit != "":
+			st, done, err := relay.SubmitConfirmation(*canonical, *round, *expected, split(*submit), split(*confirmed))
+			if err != nil {
+				fail(err)
+			}
+			for _, c := range st.Confirmations {
+				if c.RoundIndex == *round {
+					fmt.Printf("R%d: valid_attempts=%d precondition_failures=%d outstanding=%v escalated=%v done=%v\n",
+						*round, c.ValidAttempts, c.PreconditionFailures, c.Outstanding, c.Escalated, done)
+				}
+			}
+		default:
+			fail(fmt.Errorf("confirm requires -open or -submit"))
+		}
+
+	case "reconcile":
+		fs := flag.NewFlagSet("reconcile", flag.ExitOnError)
+		canonical := fs.String("canonical", "", "canonical record path")
+		recovery := fs.String("recovery", "", "recovery transaction path")
+		fs.Parse(args)
+		st, err := relay.Reconcile(*canonical, *recovery)
+		if err != nil {
+			fail(err)
+		}
+		fmt.Printf("reconciled: rounds=%d governance=%s\n", len(st.Rounds), st.Governance)
 
 	case "status":
 		fs := flag.NewFlagSet("status", flag.ExitOnError)

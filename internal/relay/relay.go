@@ -1,16 +1,20 @@
 // Package relay wires the kernel, review profile, store, and adapters into
 // the one-shot review flow. The wiring order follows R0-CX-F3:
-// preflight → revision snapshot → attempt commit → dispatch → validate →
-// append. State lives inside the canonical Markdown as relay-managed,
-// sequence-numbered JSON blocks — the canonical document stays the single
-// writable artifact (DR-811 §2).
+// preflight → revision snapshots (canonical AND target) → attempt commit →
+// dispatch → validate → append. State lives inside the canonical Markdown as
+// relay-managed, sequence-numbered blocks parsed fence-aware (R1-CX-F2) —
+// the canonical document stays the single writable artifact (DR-811 §2).
 package relay
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"regexp"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,20 +29,35 @@ import (
 // reviewer (DR-811 §5).
 const ReviewSchema = `{"type":"object","properties":{"verdict":{"type":"string","enum":["approve","changes-requested"]},"findings":{"type":"array","items":{"type":"string"}}},"required":["verdict","findings"],"additionalProperties":false}`
 
+// Format versions (DR-811 §8). Unknown persisted versions fail closed.
+const (
+	KernelVersion  = "kernel v0.1"
+	ProfileVersion = "review-profile v0.1"
+	StoreVersion   = "store-md v0.1"
+)
+
 // State is the machine-readable snapshot appended after every mutation.
 // The highest sequence number wins; history stays in the document.
 type State struct {
-	Seq             int              `json:"seq"`
-	CollaborationID string           `json:"collaboration_id"`
-	ObjectiveID     string           `json:"objective_id"`
-	Question        string           `json:"question"`
+	Seq             int    `json:"seq"`
+	KernelVersion   string `json:"kernel_version"`
+	ProfileVersion  string `json:"profile_version"`
+	StoreVersion    string `json:"store_version"`
+	CollaborationID string `json:"collaboration_id"`
+	ObjectiveID     string `json:"objective_id"`
+	Question        string `json:"question"`
+	// Target is an evidence pointer: location + raw-byte digest (R1-CX-F3).
+	TargetLocation  string           `json:"target_location"`
 	TargetRevision  string           `json:"target_revision"`
+	TargetResolved  string           `json:"target_resolved,omitempty"` // symlink resolution fact
 	Governance      string           `json:"governance"`
 	TerminalArbiter string           `json:"terminal_arbiter,omitempty"`
 	TerminalReason  string           `json:"terminal_reason,omitempty"`
 	SessionRef      string           `json:"session_ref,omitempty"`
 	Vendor          string           `json:"vendor,omitempty"`
+	SessionChanges  []SessionChange  `json:"session_changes,omitempty"`
 	Rounds          []RoundState     `json:"rounds"`
+	Confirmations   []ConfState      `json:"confirmations,omitempty"`
 	Findings        []review.Finding `json:"findings"`
 	PriorObjective  string           `json:"prior_objective,omitempty"`
 	MaterialDiff    string           `json:"material_difference,omitempty"`
@@ -47,9 +66,39 @@ type State struct {
 // RoundState mirrors one committed round.
 type RoundState struct {
 	Index    int      `json:"index"`
-	Attempts []string `json:"attempts"` // execution states in commit order
+	Attempts []string `json:"attempts"`
 	Verdict  string   `json:"verdict,omitempty"`
 	Outcome  string   `json:"outcome,omitempty"`
+	Stale    bool     `json:"stale,omitempty"` // target changed mid-dispatch
+}
+
+// ConfState persists one round's confirmation cycle (R1-CX-F4).
+type ConfState struct {
+	RoundIndex           int      `json:"round_index"`
+	Initial              []string `json:"initial"`
+	Outstanding          []string `json:"outstanding"`
+	ValidAttempts        int      `json:"valid_attempts"`
+	PreconditionFailures int      `json:"precondition_failures"`
+	Escalated            bool     `json:"escalated"`
+}
+
+// SessionChange records an explicit reviewer-session reset (R1-CX-F6).
+type SessionChange struct {
+	FromRef  string `json:"from_ref"`
+	ToVendor string `json:"to_vendor"`
+	Mode     string `json:"mode"` // second-opinion | context-reset | resume-failure | unrelated
+	Reason   string `json:"reason"`
+}
+
+// SessionReset authorizes a reviewer/session change. Without it a vendor
+// switch on an existing session fails closed — never a silent new session.
+type SessionReset struct {
+	Mode   string
+	Reason string
+}
+
+var validResetModes = map[string]bool{
+	"second-opinion": true, "context-reset": true, "resume-failure": true, "unrelated": true,
 }
 
 // Session binds one adapter+handle store to one canonical document.
@@ -57,12 +106,27 @@ type Session struct {
 	Adapter   adapter.Adapter
 	Handles   *adapter.HandleStore
 	Canonical string
+	Reset     *SessionReset // required to switch vendor/session
 }
 
-var stateHead = regexp.MustCompile(`- acrelay_state_(\d+): encoding=utf-8`)
+// TargetSnapshot computes the evidence-pointer digest of the target's raw
+// bytes, recording symlink resolution as a fact.
+func TargetSnapshot(location string) (digest, resolved string, err error) {
+	resolved = location
+	if r, lerr := filepath.EvalSymlinks(location); lerr == nil {
+		resolved = r
+	}
+	b, err := os.ReadFile(resolved)
+	if err != nil {
+		return "", "", fmt.Errorf("target %s unreadable: %w", location, err)
+	}
+	return store.Digest(b), resolved, nil
+}
 
-// LoadState returns the highest-sequence state block, or nil when the
-// canonical has no state yet.
+const statePrefix = "acrelay_state_"
+
+// LoadState returns the highest-sequence state block. Parsing is
+// fence-aware: forged headers inside raw evidence are invisible (R1-CX-F2).
 func LoadState(canonical string) (*State, error) {
 	doc, err := store.ReadAll(canonical)
 	if err != nil {
@@ -71,26 +135,53 @@ func LoadState(canonical string) (*State, error) {
 	if doc == "" {
 		return nil, nil
 	}
-	matches := stateHead.FindAllStringSubmatch(doc, -1)
-	if len(matches) == 0 {
-		return nil, nil
-	}
-	max := -1
-	for _, m := range matches {
-		n, _ := strconv.Atoi(m[1])
-		if n > max {
-			max = n
+	maxSeq, found := -1, false
+	for _, b := range store.ListBlocks(doc) {
+		if !strings.HasPrefix(b.Label, statePrefix) {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimPrefix(b.Label, statePrefix))
+		if err != nil {
+			return nil, fmt.Errorf("state label %q malformed: fail-closed", b.Label)
+		}
+		if n > maxSeq {
+			maxSeq, found = n, true
 		}
 	}
-	raw, err := store.ExtractBlock(doc, fmt.Sprintf("acrelay_state_%d", max))
+	if !found {
+		return nil, nil
+	}
+	raw, err := store.ExtractBlock(doc, fmt.Sprintf("%s%d", statePrefix, maxSeq))
 	if err != nil {
-		return nil, fmt.Errorf("state block %d unreadable: %w", max, err)
+		return nil, fmt.Errorf("state block %d unreadable: %w", maxSeq, err)
 	}
 	var st State
 	if err := json.Unmarshal(raw, &st); err != nil {
-		return nil, fmt.Errorf("state block %d corrupt: fail-closed: %w", max, err)
+		return nil, fmt.Errorf("state block %d corrupt: fail-closed: %w", maxSeq, err)
 	}
-	return &st, nil
+	return &st, validateState(&st, maxSeq)
+}
+
+// validateState enforces persisted-state integrity (R1-CX-F2).
+func validateState(st *State, labelSeq int) error {
+	if st.Seq != labelSeq {
+		return fmt.Errorf("state seq %d does not match block label %d: fail-closed", st.Seq, labelSeq)
+	}
+	if st.KernelVersion != KernelVersion || st.ProfileVersion != ProfileVersion || st.StoreVersion != StoreVersion {
+		return fmt.Errorf("state format versions %q/%q/%q not supported (want %q/%q/%q): fail-closed",
+			st.KernelVersion, st.ProfileVersion, st.StoreVersion, KernelVersion, ProfileVersion, StoreVersion)
+	}
+	for i, r := range st.Rounds {
+		if r.Index != i {
+			return fmt.Errorf("round index %d at position %d breaks continuity: fail-closed", r.Index, i)
+		}
+	}
+	for _, c := range st.Confirmations {
+		if c.RoundIndex < 0 || c.RoundIndex >= len(st.Rounds) {
+			return fmt.Errorf("confirmation for unknown round %d: fail-closed", c.RoundIndex)
+		}
+	}
+	return nil
 }
 
 func stateSection(st *State) (string, error) {
@@ -99,7 +190,7 @@ func stateSection(st *State) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return store.EncodeBlock(fmt.Sprintf("acrelay_state_%d", st.Seq), b), nil
+	return store.EncodeBlock(fmt.Sprintf("%s%d", statePrefix, st.Seq), b), nil
 }
 
 // rehydrate rebuilds a kernel objective from persisted state by replaying
@@ -158,25 +249,27 @@ func replaySteps(final kernel.ExecutionState) []kernel.ExecutionState {
 		return nil
 	case kernel.ExecRunning:
 		return []kernel.ExecutionState{kernel.ExecRunning}
-	case kernel.ExecSucceeded, kernel.ExecFailed, kernel.ExecCanceled, kernel.ExecUnknown:
-		if final == kernel.ExecFailed {
-			// dispatch-level failure may have skipped RUNNING
-			return []kernel.ExecutionState{kernel.ExecFailed}
-		}
+	case kernel.ExecFailed:
+		return []kernel.ExecutionState{kernel.ExecFailed}
+	case kernel.ExecSucceeded, kernel.ExecCanceled, kernel.ExecUnknown:
 		return []kernel.ExecutionState{kernel.ExecRunning, final}
 	}
 	return []kernel.ExecutionState{final}
 }
 
 // Init creates the collaboration/objective and writes the first canonical
-// section. A same-target objective must carry the prior pointer.
-func Init(canonical, question, targetRevision, priorObjective, materialDiff string, targetSeenBefore bool) (*State, error) {
+// section. The target is an evidence pointer (location + raw digest).
+func Init(canonical, question, targetLocation, priorObjective, materialDiff string, targetSeenBefore bool) (*State, error) {
 	prev, err := LoadState(canonical)
 	if err != nil {
 		return nil, err
 	}
 	if prev != nil && !kernel.IsGovTerminal(kernel.GovernanceState(prev.Governance)) {
 		return nil, fmt.Errorf("canonical already tracks objective %s in state %s: close or terminate it first", prev.ObjectiveID, prev.Governance)
+	}
+	targetDigest, resolved, err := TargetSnapshot(targetLocation)
+	if err != nil {
+		return nil, err
 	}
 	collabID, err := kernel.NewID("collab")
 	if err != nil {
@@ -191,20 +284,23 @@ func Init(canonical, question, targetRevision, priorObjective, materialDiff stri
 		collabID = prev.CollaborationID // same collaboration continues across objectives
 		// DR-811 §1: related objectives keep the same reviewer session.
 		carrySessionRef, carryVendor = prev.SessionRef, prev.Vendor
-		// the state sequence is monotonic across the whole collaboration —
-		// a restarted sequence would resurrect the previous objective's
-		// state as "latest" (defect caught by the objective-transition fixture).
+		// monotonic across the collaboration — a restarted sequence would
+		// resurrect the previous objective's state as "latest".
 		carrySeq = prev.Seq
 	}
-	o := kernel.NewObjective(objID, collabID, question, targetRevision)
+	o := kernel.NewObjective(objID, collabID, question, targetDigest)
 	o.PriorObjective, o.MaterialDifference = priorObjective, materialDiff
 	if err := o.ValidateSameTargetLink(targetSeenBefore); err != nil {
 		return nil, err
 	}
 	st := &State{
-		Seq:             carrySeq,
+		Seq:            carrySeq,
+		KernelVersion:  KernelVersion,
+		ProfileVersion: ProfileVersion,
+		StoreVersion:   StoreVersion,
 		CollaborationID: collabID, ObjectiveID: objID, Question: question,
-		TargetRevision: targetRevision, Governance: string(kernel.GovOpen),
+		TargetLocation: targetLocation, TargetRevision: targetDigest, TargetResolved: resolved,
+		Governance:     string(kernel.GovOpen),
 		PriorObjective: priorObjective, MaterialDiff: materialDiff,
 		SessionRef: carrySessionRef, Vendor: carryVendor,
 	}
@@ -216,17 +312,27 @@ func Init(canonical, question, targetRevision, priorObjective, materialDiff stri
 	if err != nil {
 		return nil, err
 	}
-	section := fmt.Sprintf("\n## objective %s\n- collaboration: %s\n- question: %s\n- target_revision: %s\n%s",
-		objID, collabID, question, targetRevision, block)
+	section := fmt.Sprintf("\n## objective %s\n- collaboration: %s\n- question: %s\n- target: %s sha256=%s\n%s",
+		objID, collabID, question, targetLocation, targetDigest, block)
 	if _, err := store.AppendAtomic(canonical, section, rev); err != nil {
 		return nil, err
 	}
 	return st, nil
 }
 
-// Review runs one formal round: snapshot → commit → dispatch → validate →
+// pendingRecoveries lists unreconciled recovery transactions (R1-CX-F5).
+func pendingRecoveries(canonical string) ([]string, error) {
+	return filepath.Glob(canonical + ".recovery-*")
+}
+
+// Review runs one formal round: snapshots → commit → dispatch → validate →
 // append. It returns the updated state and the dispatch outcome.
 func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request) (*State, review.Outcome, error) {
+	if recs, err := pendingRecoveries(s.Canonical); err != nil {
+		return nil, "", err
+	} else if len(recs) > 0 {
+		return nil, "", fmt.Errorf("pending recovery transactions %v: reconcile before dispatching again (duplicate-execution guard)", recs)
+	}
 	st, err := LoadState(s.Canonical)
 	if err != nil {
 		return nil, "", err
@@ -238,10 +344,30 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	if err != nil {
 		return nil, "", err
 	}
-	// session continuity: reuse the stored session_ref unless the caller
-	// explicitly overrides (never silently fall back to new).
-	if req.ResumeRef == "" && st.SessionRef != "" && st.Vendor == s.Adapter.Vendor() {
-		req.ResumeRef = st.SessionRef
+	// Session continuity (R1-CX-F6): an existing session binds the vendor.
+	// Switching requires an explicit reset with mode+reason — never silent.
+	sessionChanged := false
+	if st.SessionRef != "" && s.Reset == nil {
+		switch {
+		case st.Vendor == s.Adapter.Vendor():
+			if req.ResumeRef == "" {
+				req.ResumeRef = st.SessionRef
+			} else if req.ResumeRef != st.SessionRef {
+				return nil, "", fmt.Errorf("explicit resume_ref differs from stored session %s: session reset with mode+reason required", st.SessionRef)
+			}
+		default:
+			return nil, "", fmt.Errorf("stored reviewer session belongs to %s: switching to %s requires an explicit session reset (mode+reason) — silent new-session fallback is forbidden", st.Vendor, s.Adapter.Vendor())
+		}
+	}
+	if s.Reset != nil {
+		if !validResetModes[s.Reset.Mode] || strings.TrimSpace(s.Reset.Reason) == "" {
+			return nil, "", fmt.Errorf("session reset requires a valid mode (second-opinion|context-reset|resume-failure|unrelated) and a reason")
+		}
+		st.SessionChanges = append(st.SessionChanges, SessionChange{
+			FromRef: st.SessionRef, ToVendor: s.Adapter.Vendor(), Mode: s.Reset.Mode, Reason: s.Reset.Reason,
+		})
+		req.ResumeRef = "" // authorized new session; round counters are untouched
+		sessionChanged = true
 	}
 	req.Prompt = prompt
 	req.SchemaJSON = ReviewSchema
@@ -253,13 +379,20 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	attempt := round.PrepareAttempt()
 	// 1. non-consuming preflight
 	if err := s.Adapter.PreDispatch(ctx, req, s.Handles); err != nil {
-		_ = attempt.Transition(kernel.ExecFailed) // prepared-only, never committed
+		_ = attempt.Transition(kernel.ExecFailed)
 		return nil, "", fmt.Errorf("pre-dispatch failure (no round/attempt consumed): %w", err)
 	}
-	// 2. pre-dispatch canonical revision snapshot
+	// 2. pre-dispatch snapshots: canonical AND target (R1-CX-F3)
 	snapshot, err := store.Revision(s.Canonical)
 	if err != nil {
 		return nil, "", err
+	}
+	targetNow, _, err := TargetSnapshot(st.TargetLocation)
+	if err != nil {
+		return nil, "", fmt.Errorf("pre-dispatch target snapshot: %w", err)
+	}
+	if targetNow != st.TargetRevision {
+		return nil, "", fmt.Errorf("target %s changed since objective init (stale): open a follow-up objective with a prior pointer", st.TargetLocation)
 	}
 	// 3. commit the attempt at the dispatch boundary
 	if err := round.CommitDispatch(attempt); err != nil {
@@ -267,6 +400,11 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	}
 	// 4. dispatch
 	res, dispatchErr := s.Adapter.Dispatch(ctx, req, s.Handles)
+	// child never started → the attempt is NOT persisted (R1-CX-F7): the
+	// in-memory commit is discarded with this rehydrated objective.
+	if res != nil && !res.Started {
+		return nil, "", fmt.Errorf("child start failure (no round/attempt persisted): %w", dispatchErr)
+	}
 	var outcome review.Outcome
 	switch {
 	case res != nil && res.TimedOut:
@@ -286,8 +424,9 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	var newFindings []review.Finding
 	if attempt.State == kernel.ExecSucceeded {
 		vErrs := review.ValidateResult(res.Structured)
-		for _, note := range res.Invalid {
-			vErrs = append(vErrs, note)
+		vErrs = append(vErrs, res.Invalid...)
+		if res.Provenance.ModelMismatch {
+			vErrs = append(vErrs, "model-mismatch") // observable mismatch never reaches result-valid (R1-CX-F7)
 		}
 		outcome = review.ClassifyOutcome(kernel.ExecSucceeded, vErrs)
 		if outcome == review.OutcomeResultValid {
@@ -302,25 +441,31 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 			}
 		}
 	}
+	// post-dispatch target re-check: change marks the result stale (DR-811)
+	stale := false
+	if after, _, terr := TargetSnapshot(st.TargetLocation); terr != nil || after != st.TargetRevision {
+		stale = true
+	}
 
-	// 5. append raw evidence + updated state under the pre-dispatch snapshot
 	if res != nil && res.Provenance.SessionRef != "" {
 		st.SessionRef, st.Vendor = res.Provenance.SessionRef, s.Adapter.Vendor()
 	}
 	st.Findings = append(st.Findings, newFindings...)
 	st.Rounds = append(st.Rounds, RoundState{
 		Index: round.Index, Attempts: []string{string(attempt.State)},
-		Verdict: verdict, Outcome: string(outcome),
+		Verdict: verdict, Outcome: string(outcome), Stale: stale,
 	})
-	switch {
-	case outcome == review.OutcomeResultValid && verdict == string(review.VerdictApprove) && review.ClosureCheck(st.Findings) == nil:
+	if !stale && outcome == review.OutcomeResultValid && verdict == string(review.VerdictApprove) && review.ClosureCheck(st.Findings) == nil {
 		st.Governance = string(kernel.GovClosable)
-	default:
+	} else {
 		st.Governance = string(kernel.GovDecisionRequired)
 	}
 
 	label := fmt.Sprintf("r%da%d", round.Index, attempt.Index)
-	section := fmt.Sprintf("\n## round R%d attempt A%d\n- outcome: %s\n- verdict: %s\n", round.Index, attempt.Index, outcome, verdict)
+	section := fmt.Sprintf("\n## round R%d attempt A%d\n- outcome: %s\n- verdict: %s\n- stale: %v\n", round.Index, attempt.Index, outcome, verdict, stale)
+	if sessionChanged {
+		section += fmt.Sprintf("- session_change: mode=%s reason=%q\n", s.Reset.Mode, s.Reset.Reason)
+	}
 	if res != nil {
 		prov, _ := json.Marshal(res.Provenance)
 		section += fmt.Sprintf("- provenance: %s\n- diagnostic: %q\n", prov, res.Diagnostic)
@@ -336,9 +481,142 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	}
 	section += block
 	if _, err := store.AppendAtomic(s.Canonical, section, snapshot); err != nil {
-		return nil, "", fmt.Errorf("append after dispatch: %w (raw preserved in memory only — record manually)", err)
+		// R1-CX-F5: never lose the raw or the dispatch fact — persist an
+		// owner-only recovery transaction and block further dispatches.
+		rpath, rerr := writeRecovery(s.Canonical, section)
+		if rerr != nil {
+			return nil, "", fmt.Errorf("append conflict AND recovery write failed: %v / %v", err, rerr)
+		}
+		return nil, "", fmt.Errorf("append conflict: %v — raw and dispatch fact preserved in recovery transaction %s (noncanonical, non-resumable); run reconcile before any further dispatch", err, rpath)
 	}
 	return st, outcome, nil
+}
+
+// writeRecovery persists the unappended section as an owner-only recovery
+// transaction (noncanonical, non-resumable).
+func writeRecovery(canonical, section string) (string, error) {
+	suffix := make([]byte, 4)
+	if _, err := rand.Read(suffix); err != nil {
+		return "", err
+	}
+	path := fmt.Sprintf("%s.recovery-%d-%s", canonical, os.Getpid(), hex.EncodeToString(suffix))
+	payload, err := json.Marshal(map[string]string{
+		"note":    "noncanonical recovery transaction — reconcile appends it to the canonical; it cannot be used for session resume or revision comparison",
+		"section": base64.StdEncoding.EncodeToString([]byte(section)),
+	})
+	if err != nil {
+		return "", err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if _, err := f.Write(payload); err != nil {
+		return "", err
+	}
+	return path, f.Sync()
+}
+
+// Reconcile appends a pending recovery transaction to the canonical under a
+// fresh snapshot and removes the transaction file.
+func Reconcile(canonical, recoveryPath string) (*State, error) {
+	b, err := os.ReadFile(recoveryPath)
+	if err != nil {
+		return nil, err
+	}
+	var payload struct {
+		Section string `json:"section"`
+	}
+	if err := json.Unmarshal(b, &payload); err != nil {
+		return nil, fmt.Errorf("recovery transaction corrupt: fail-closed: %w", err)
+	}
+	section, err := base64.StdEncoding.DecodeString(payload.Section)
+	if err != nil {
+		return nil, fmt.Errorf("recovery transaction corrupt: fail-closed: %w", err)
+	}
+	rev, err := store.Revision(canonical)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := store.AppendAtomic(canonical, string(section), rev); err != nil {
+		return nil, err
+	}
+	if err := os.Remove(recoveryPath); err != nil {
+		return nil, err
+	}
+	return LoadState(canonical)
+}
+
+// OpenConfirmation starts the bounded confirmation cycle for a round.
+func OpenConfirmation(canonical string, roundIndex int, ids []string) (*State, error) {
+	st, err := LoadState(canonical)
+	if err != nil {
+		return nil, err
+	}
+	if st == nil {
+		return nil, fmt.Errorf("no objective in canonical")
+	}
+	if roundIndex < 0 || roundIndex >= len(st.Rounds) {
+		return nil, fmt.Errorf("round R%d does not exist", roundIndex)
+	}
+	for _, c := range st.Confirmations {
+		if c.RoundIndex == roundIndex {
+			return nil, fmt.Errorf("confirmation cycle already exists for round R%d (max 1 per round)", roundIndex)
+		}
+	}
+	r := &kernel.Round{Index: roundIndex}
+	cyc, err := r.OpenConfirmation(ids)
+	if err != nil {
+		return nil, err
+	}
+	st.Confirmations = append(st.Confirmations, ConfState{
+		RoundIndex: roundIndex, Initial: cyc.Initial(), Outstanding: cyc.Outstanding(),
+	})
+	return st, appendState(canonical, st, fmt.Sprintf("\n## confirmation open R%d\n- ids: %s\n", roundIndex, strings.Join(ids, ", ")))
+}
+
+// SubmitConfirmation applies one confirmation attempt. The precondition is
+// the exact target revision (CP contract): a mismatch records a
+// precondition failure and consumes no valid attempt.
+func SubmitConfirmation(canonical string, roundIndex int, expectedTargetRev string, ids, confirmed []string) (*State, bool, error) {
+	st, err := LoadState(canonical)
+	if err != nil {
+		return nil, false, err
+	}
+	if st == nil {
+		return nil, false, fmt.Errorf("no objective in canonical")
+	}
+	var cs *ConfState
+	for i := range st.Confirmations {
+		if st.Confirmations[i].RoundIndex == roundIndex {
+			cs = &st.Confirmations[i]
+		}
+	}
+	if cs == nil {
+		return nil, false, fmt.Errorf("no confirmation cycle for round R%d: open it first", roundIndex)
+	}
+	cyc, err := kernel.RehydrateConfirmation(cs.Initial, cs.Outstanding, cs.ValidAttempts, cs.PreconditionFailures, cs.Escalated)
+	if err != nil {
+		return nil, false, err
+	}
+	targetNow, _, terr := TargetSnapshot(st.TargetLocation)
+	if terr != nil || expectedTargetRev != st.TargetRevision || targetNow != st.TargetRevision {
+		cyc.RecordPreconditionFailure()
+		cs.PreconditionFailures = cyc.PreconditionFailures
+		return st, false, appendState(canonical, st,
+			fmt.Sprintf("\n## confirmation precondition-failure R%d\n- expected: %s\n- state: %s\n", roundIndex, expectedTargetRev, st.TargetRevision))
+	}
+	if err := cyc.SubmitValidAttempt(ids, confirmed); err != nil {
+		return nil, false, err
+	}
+	cs.Outstanding = cyc.Outstanding()
+	cs.ValidAttempts = cyc.ValidAttempts
+	cs.Escalated = cyc.Escalated
+	done := cyc.Done()
+	return st, done, appendState(canonical, st,
+		fmt.Sprintf("\n## confirmation attempt R%d\n- submitted: %s\n- confirmed: %s\n- outstanding: %s\n- escalated: %v\n",
+			roundIndex, strings.Join(ids, ", "), strings.Join(confirmed, ", "), strings.Join(cs.Outstanding, ", "), cs.Escalated))
 }
 
 // Disposition records the driver's response to a finding and persists it.
@@ -364,13 +642,25 @@ func Disposition(canonical, findingID string, d review.Disposition, decision *re
 	if !found {
 		return nil, fmt.Errorf("finding %s not found", findingID)
 	}
-	if review.ClosureCheck(st.Findings) == nil && st.Governance == string(kernel.GovDecisionRequired) {
+	// Promotion to CLOSABLE happens here and only here (R1-CX-F1) — and only
+	// when at least one round produced a valid, non-stale result.
+	if st.Governance == string(kernel.GovDecisionRequired) && hasValidRound(st) && review.ClosureCheck(st.Findings) == nil {
 		st.Governance = string(kernel.GovClosable)
 	}
 	return st, appendState(canonical, st, fmt.Sprintf("\n## disposition %s\n- decision: %s\n", findingID, d))
 }
 
-// Close ends the objective through the fail-closed gate.
+func hasValidRound(st *State) bool {
+	for _, r := range st.Rounds {
+		if r.Outcome == string(review.OutcomeResultValid) && !r.Stale {
+			return true
+		}
+	}
+	return false
+}
+
+// Close ends the objective through the fail-closed gate. It never promotes:
+// only a persisted CLOSABLE state can close (R1-CX-F1).
 func Close(canonical string) (*State, error) {
 	st, err := LoadState(canonical)
 	if err != nil {
@@ -379,19 +669,12 @@ func Close(canonical string) (*State, error) {
 	if st == nil {
 		return nil, fmt.Errorf("no objective in canonical")
 	}
+	if st.Governance != string(kernel.GovClosable) {
+		return nil, fmt.Errorf("close refused: governance is %s, not CLOSABLE (a valid review result and complete dispositions are required)", st.Governance)
+	}
 	o, err := rehydrate(st)
 	if err != nil {
 		return nil, err
-	}
-	if o.Governance() == kernel.GovDecisionRequired || o.Governance() == kernel.GovOpen {
-		if err := review.ClosureCheck(st.Findings); err != nil {
-			return nil, err
-		}
-		if o.Governance() != kernel.GovClosable {
-			if err := o.MarkClosable(); err != nil {
-				return nil, err
-			}
-		}
 	}
 	if err := o.Close(func() error { return review.ClosureCheck(st.Findings) }); err != nil {
 		return nil, err
@@ -445,8 +728,9 @@ func Status(canonical string) (string, error) {
 		return "no objective", nil
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "objective %s (%s)\ngovernance: %s\nrounds: %d/%d\n",
-		st.ObjectiveID, st.Question, st.Governance, len(st.Rounds), kernel.MaxRoundsPerObjective)
+	fmt.Fprintf(&b, "objective %s (%s)\ngovernance: %s\nrounds: %d/%d\ntarget: %s sha256=%s\n",
+		st.ObjectiveID, st.Question, st.Governance, len(st.Rounds), kernel.MaxRoundsPerObjective,
+		st.TargetLocation, st.TargetRevision[:12])
 	var open []string
 	for _, f := range st.Findings {
 		if f.Blocking && f.Disposition == "" {
@@ -456,6 +740,9 @@ func Status(canonical string) (string, error) {
 	sort.Strings(open)
 	if len(open) > 0 {
 		fmt.Fprintf(&b, "undispositioned blocking findings: %s\n", strings.Join(open, ", "))
+	}
+	if recs, _ := pendingRecoveries(canonical); len(recs) > 0 {
+		fmt.Fprintf(&b, "PENDING RECOVERY: %s (reconcile required before dispatch)\n", strings.Join(recs, ", "))
 	}
 	return b.String(), nil
 }
