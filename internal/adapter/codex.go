@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -173,21 +174,34 @@ func (a CodexAdapter) Dispatch(ctx context.Context, req Request, handles *Handle
 	// never be parsed as a flag.
 	args = append(args, "-")
 
-	tctx, cancel := context.WithTimeout(ctx, timeouts.HardCap)
-	defer cancel()
+	hctx, hcancel := context.WithTimeout(ctx, timeouts.HardCap)
+	defer hcancel()
+	tctx, tcancel := context.WithCancelCause(hctx)
+	defer tcancel(nil)
 	cmd := newGroupCmd(tctx, timeouts.Grace, "codex", args...)
 	cmd.Dir = req.WorkingDir
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	stdout := newWatchdogBuffer()
+	var stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = stdout, &stderr
 	cmd.Stdin = bytes.NewReader([]byte(req.Prompt))
+	// Event-stream mode: startup and idle are observable-output timers wired
+	// to the JSONL stream (DR-811 §7).
+	go superviseTimeouts(tctx, tcancel, stdout.activity, timeouts)
 	runErr := cmd.Run()
 
 	res := &Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: exitCode(cmd), Started: cmd.ProcessState != nil}
 	if !res.Started {
 		return res, fmt.Errorf("codex process never started (pre-dispatch failure, no attempt consumed): %v", runErr)
 	}
-	if tctx.Err() == context.DeadlineExceeded {
-		res.TimedOut = true
+	switch cause := context.Cause(tctx); {
+	case errors.Is(cause, ErrStartupTimeout):
+		res.TimedOut, res.TimeoutKind = true, TimeoutStartup
+		return res, fmt.Errorf("startup timeout after %v: FAILED(timeout:startup), no automatic retry", timeouts.Startup)
+	case errors.Is(cause, ErrIdleTimeout):
+		res.TimedOut, res.TimeoutKind = true, TimeoutIdle
+		return res, fmt.Errorf("idle timeout after %v of stream silence: FAILED(timeout:idle), no automatic retry", timeouts.Idle)
+	case hctx.Err() == context.DeadlineExceeded:
+		res.TimedOut, res.TimeoutKind = true, TimeoutHardCap
 		return res, fmt.Errorf("hard-cap timeout: execution UNKNOWN, re-dispatch forbidden")
 	}
 	capd, perr := parseCodexJSONL(stdout.Bytes())

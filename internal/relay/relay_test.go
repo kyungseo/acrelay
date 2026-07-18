@@ -215,6 +215,33 @@ func TestE2ETimeoutUnknown(t *testing.T) {
 	}
 }
 
+// Timeout kind splits execution state at the relay (owner cross-check item
+// 3): startup/idle expiry is FAILED — no terminal output was captured —
+// while hard-cap stays UNKNOWN (covered above).
+func TestE2ETimeoutKindSplitsExecutionState(t *testing.T) {
+	for _, kind := range []string{adapter.TimeoutStartup, adapter.TimeoutIdle} {
+		s, _, _ := newSession(t, []adapter.FakeResult{{TimedOut: true, TimeoutKind: kind}})
+		st, outcome, err := s.Review(context.Background(), "x", adapter.Request{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if outcome != review.OutcomeFailed || st.Rounds[0].Attempts[0] != string(kernel.ExecFailed) {
+			t.Fatalf("%s timeout must record FAILED, got %+v", kind, st.Rounds[0])
+		}
+		if _, err := Close(s.Canonical); err == nil {
+			t.Fatalf("%s timeout round must not be closable", kind)
+		}
+	}
+	s, _, _ := newSession(t, []adapter.FakeResult{{TimedOut: true, TimeoutKind: adapter.TimeoutHardCap}})
+	st, _, err := s.Review(context.Background(), "x", adapter.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Rounds[0].Attempts[0] != string(kernel.ExecUnknown) {
+		t.Fatalf("hard-cap timeout must record UNKNOWN, got %+v", st.Rounds[0])
+	}
+}
+
 // needs-input: schema-valid dispatch with invalid semantic content.
 func TestE2ENeedsInput(t *testing.T) {
 	s, _, _ := newSession(t, []adapter.FakeResult{
@@ -664,5 +691,126 @@ func TestCP2ReconcileSectionLineage(t *testing.T) {
 	}
 	if len(st.Rounds) != 1 {
 		t.Fatal("reconciled round missing")
+	}
+}
+
+// Leg-5 negative fixture (FEAT-20260718-003): a target edited AFTER a valid
+// round result but BEFORE close must not close as if the reviewed revision
+// were current. Mid-dispatch edits are already caught (post-dispatch
+// re-check); this covers the result→disposition→close window.
+func TestPostResultTargetEditBlocksClose(t *testing.T) {
+	s, _, dir := newSession(t, []adapter.FakeResult{changesRequested("finding one")})
+	if _, _, err := s.Review(context.Background(), "review", adapter.Request{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetPath(dir), []byte("edited after result"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Governance == string(kernel.GovClosable) {
+		t.Fatal("disposition must not promote to CLOSABLE over an edited target")
+	}
+	if _, err := Close(s.Canonical); err == nil {
+		t.Fatal("close must be refused when the target changed after the reviewed round")
+	}
+}
+
+// A persisted CLOSABLE is re-verified at close time: an edit landing after
+// promotion still blocks closure (Gate A-3).
+func TestPersistedClosableReVerifiedAtClose(t *testing.T) {
+	s, _, dir := newSession(t, []adapter.FakeResult{approve()})
+	st, _, err := s.Review(context.Background(), "review", adapter.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Governance != string(kernel.GovClosable) {
+		t.Fatalf("approve must persist CLOSABLE: %s", st.Governance)
+	}
+	if err := os.WriteFile(targetPath(dir), []byte("edited after closable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Close(s.Canonical); err == nil {
+		t.Fatal("close must re-verify the target revision even from persisted CLOSABLE")
+	}
+}
+
+// Gate A-1: the authorized advancement continues the review→revise→re-review
+// loop inside one objective — R0 findings dispositioned, target revised,
+// advance, R1 reviews the advanced revision, close succeeds.
+func TestAdvanceEnablesSameObjectiveChain(t *testing.T) {
+	s, fake, dir := newSession(t, []adapter.FakeResult{changesRequested("finding one"), approve()})
+	if _, _, err := s.Review(context.Background(), "review", adapter.Request{}); err != nil {
+		t.Fatal(err)
+	}
+	// advance before dispositions must fail closed
+	if _, err := Advance(s.Canonical, "premature"); err == nil {
+		t.Fatal("advance with undispositioned blocking findings must be refused")
+	}
+	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
+		t.Fatal(err)
+	}
+	// unchanged target: advance is never silent busywork
+	if _, err := Advance(s.Canonical, "no-op"); err == nil {
+		t.Fatal("advance with an unchanged target must be refused")
+	}
+	if err := os.WriteFile(targetPath(dir), []byte("revised per R0-F1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Advance(s.Canonical, "applied R0-F1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Advances) != 1 || st.Advances[0].AfterRound != 0 {
+		t.Fatalf("advance record missing/incorrect: %+v", st.Advances)
+	}
+	// advanced revision is un-reviewed: not closable yet
+	if _, err := Close(s.Canonical); err == nil {
+		t.Fatal("close after advance without a new round must be refused")
+	}
+	st2, outcome, err := s.Review(context.Background(), "re-review the revision", adapter.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome != review.OutcomeResultValid || len(st2.Rounds) != 2 || st2.Rounds[1].Index != 1 {
+		t.Fatalf("R1 must run in the same objective: outcome=%s rounds=%+v", outcome, st2.Rounds)
+	}
+	if fake.Dispatched != 2 {
+		t.Fatalf("expected 2 dispatches in one objective, got %d", fake.Dispatched)
+	}
+	st3, err := Close(s.Canonical)
+	if err != nil {
+		t.Fatalf("close after R1 over the advanced revision must succeed: %v", err)
+	}
+	if st3.Governance != string(kernel.GovClosed) {
+		t.Fatalf("got %s", st3.Governance)
+	}
+}
+
+// Advance from persisted CLOSABLE drops the objective back to
+// DECISION_REQUIRED (kernel-legal transition) — an approved-but-revised
+// target must be re-reviewed before closing.
+func TestAdvanceFromClosableRequiresReReview(t *testing.T) {
+	s, _, dir := newSession(t, []adapter.FakeResult{approve(), approve()})
+	if _, _, err := s.Review(context.Background(), "review", adapter.Request{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetPath(dir), []byte("revised after approve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Advance(s.Canonical, "post-approve revision")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Governance != string(kernel.GovDecisionRequired) {
+		t.Fatalf("advance from CLOSABLE must drop to DECISION_REQUIRED: %s", st.Governance)
+	}
+	if _, _, err := s.Review(context.Background(), "re-review", adapter.Request{}); err != nil {
+		t.Fatal(err)
+	}
+	if st2, err := Close(s.Canonical); err != nil || st2.Governance != string(kernel.GovClosed) {
+		t.Fatalf("close after re-review must succeed: %v", err)
 	}
 }

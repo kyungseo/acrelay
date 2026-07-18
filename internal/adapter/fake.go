@@ -12,7 +12,8 @@ type FakeResult struct {
 	Invalid       []string
 	Err           error
 	TimedOut      bool
-	StartFailure  bool // child never started (no attempt consumed)
+	TimeoutKind   string // TimeoutStartup | TimeoutIdle | TimeoutHardCap ("" defaults to hard-cap)
+	StartFailure  bool   // child never started (no attempt consumed)
 	ModelMismatch bool
 }
 
@@ -77,7 +78,14 @@ func (f *FakeAdapter) Dispatch(ctx context.Context, req Request, handles *Handle
 		return res, fmt.Errorf("fake process never started (pre-dispatch failure, no attempt consumed)")
 	}
 	if fr.TimedOut {
-		return res, fmt.Errorf("hard-cap timeout: execution UNKNOWN, re-dispatch forbidden")
+		res.TimeoutKind = fr.TimeoutKind
+		if res.TimeoutKind == "" {
+			res.TimeoutKind = TimeoutHardCap
+		}
+		if res.TimeoutKind == TimeoutHardCap {
+			return res, fmt.Errorf("hard-cap timeout: execution UNKNOWN, re-dispatch forbidden")
+		}
+		return res, fmt.Errorf("%s timeout: FAILED(timeout:%s), no automatic retry", res.TimeoutKind, res.TimeoutKind)
 	}
 	if fr.Err != nil {
 		return res, fr.Err

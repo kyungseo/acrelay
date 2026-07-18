@@ -62,6 +62,7 @@ type State struct {
 	Findings        []review.Finding `json:"findings"`
 	PriorObjective  string           `json:"prior_objective,omitempty"`
 	MaterialDiff    string           `json:"material_difference,omitempty"`
+	Advances        []AdvanceState   `json:"advances,omitempty"`
 }
 
 // RoundState mirrors one committed round.
@@ -70,7 +71,19 @@ type RoundState struct {
 	Attempts []string `json:"attempts"`
 	Verdict  string   `json:"verdict,omitempty"`
 	Outcome  string   `json:"outcome,omitempty"`
-	Stale    bool     `json:"stale,omitempty"` // target changed mid-dispatch
+	Stale    bool     `json:"stale,omitempty"`    // target changed mid-dispatch
+	Revision string   `json:"revision,omitempty"` // target revision this round reviewed (Gate A-3)
+}
+
+// AdvanceState records one authorized target-revision advancement inside the
+// objective (Gate A-1): the explicit continuation of the
+// review→revise→re-review loop. Prior rounds keep their reviewed revision;
+// the linkage is AfterRound.
+type AdvanceState struct {
+	FromRevision string `json:"from_revision"`
+	ToRevision   string `json:"to_revision"`
+	AfterRound   int    `json:"after_round"`
+	Note         string `json:"note,omitempty"`
 }
 
 // ConfState persists one round's confirmation cycle (R1-CX-F4).
@@ -441,7 +454,14 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	switch {
 	case res != nil && res.TimedOut:
 		_ = attempt.Transition(kernel.ExecRunning)
-		_ = attempt.Transition(kernel.ExecUnknown)
+		// Timeout kind splits the execution state (DR-811 §7): startup/idle
+		// expiry means no terminal output was ever captured → FAILED;
+		// hard-cap expiry cut the invocation mid-flight → UNKNOWN.
+		if res.TimeoutKind == adapter.TimeoutStartup || res.TimeoutKind == adapter.TimeoutIdle {
+			_ = attempt.Transition(kernel.ExecFailed)
+		} else {
+			_ = attempt.Transition(kernel.ExecUnknown)
+		}
 		outcome = review.OutcomeFailed
 	case dispatchErr != nil:
 		_ = attempt.Transition(kernel.ExecRunning)
@@ -486,6 +506,7 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	st.Rounds = append(st.Rounds, RoundState{
 		Index: round.Index, Attempts: []string{string(attempt.State)},
 		Verdict: verdict, Outcome: string(outcome), Stale: stale,
+		Revision: st.TargetRevision, // pre-dispatch check guaranteed disk == this
 	})
 	if !stale && outcome == review.OutcomeResultValid && verdict == string(review.VerdictApprove) && review.ClosureCheck(st.Findings) == nil {
 		st.Governance = string(kernel.GovClosable)
@@ -901,8 +922,10 @@ func Disposition(canonical, findingID string, d review.Disposition, decision *re
 		return nil, fmt.Errorf("finding %s not found", findingID)
 	}
 	// Promotion to CLOSABLE happens here and only here (R1-CX-F1) — and only
-	// when at least one round produced a valid, non-stale result.
-	if st.Governance == string(kernel.GovDecisionRequired) && hasValidRound(st) && review.ClosureCheck(st.Findings) == nil {
+	// when a valid, non-stale round reviewed the target bytes on disk right
+	// now (Gate A-3: a post-result target edit blocks promotion).
+	if st.Governance == string(kernel.GovDecisionRequired) && review.ClosureCheck(st.Findings) == nil &&
+		closableAgainstDisk(st) == nil {
 		st.Governance = string(kernel.GovClosable)
 	}
 	return st, appendState(canonical, st, fmt.Sprintf("\n## disposition %s\n- decision: %s\n", findingID, d))
@@ -915,6 +938,27 @@ func hasValidRound(st *State) bool {
 		}
 	}
 	return false
+}
+
+// closableAgainstDisk is the fail-closed closure precondition (Gate A-3):
+// some valid, non-stale round must have reviewed exactly the target bytes
+// that are on disk right now. A target edited after the reviewed round can
+// never close as if the reviewed revision were current — the driver either
+// advances the objective (and reviews again) or opens a follow-up.
+func closableAgainstDisk(st *State) error {
+	diskNow, _, err := TargetSnapshot(st.TargetLocation)
+	if err != nil {
+		return fmt.Errorf("closure target snapshot: %w", err)
+	}
+	if diskNow != st.TargetRevision {
+		return fmt.Errorf("target %s changed after the reviewed round (stale): advance the objective or open a follow-up", st.TargetLocation)
+	}
+	for _, r := range st.Rounds {
+		if r.Outcome == string(review.OutcomeResultValid) && !r.Stale && r.Revision == diskNow {
+			return nil
+		}
+	}
+	return fmt.Errorf("no valid non-stale round reviewed the current target revision: fail-closed")
 }
 
 // Close ends the objective through the fail-closed gate. It never promotes:
@@ -930,6 +974,11 @@ func Close(canonical string) (*State, error) {
 	if st.Governance != string(kernel.GovClosable) {
 		return nil, fmt.Errorf("close refused: governance is %s, not CLOSABLE (a valid review result and complete dispositions are required)", st.Governance)
 	}
+	// Close-time re-verification (Gate A-3): a persisted CLOSABLE is not
+	// enough — the target on disk must still be the reviewed revision.
+	if err := closableAgainstDisk(st); err != nil {
+		return nil, fmt.Errorf("close refused: %w", err)
+	}
 	o, err := rehydrate(st)
 	if err != nil {
 		return nil, err
@@ -939,6 +988,52 @@ func Close(canonical string) (*State, error) {
 	}
 	st.Governance = string(kernel.GovClosed)
 	return st, appendState(canonical, st, "\n## closure\n- result: CLOSED\n")
+}
+
+// Advance authorizes the objective's expected target revision to move to
+// the bytes currently on disk — the explicit continuation of the
+// review→revise→re-review loop inside one objective (Gate A-1). It is never
+// silent: it refuses when the target is unchanged, when no valid non-stale
+// round exists to advance from, or when any blocking finding is
+// undispositioned. The advanced revision is un-reviewed, so the objective
+// drops out of CLOSABLE and only a new round over the advanced revision can
+// make it closable again. Advancing consumes no round.
+func Advance(canonical, note string) (*State, error) {
+	st, err := LoadState(canonical)
+	if err != nil {
+		return nil, err
+	}
+	if st == nil {
+		return nil, fmt.Errorf("no objective in canonical")
+	}
+	switch st.Governance {
+	case string(kernel.GovClosed), string(kernel.GovSuperseded), string(kernel.GovAbandoned):
+		return nil, fmt.Errorf("advance refused: objective is terminal (%s)", st.Governance)
+	}
+	if !hasValidRound(st) {
+		return nil, fmt.Errorf("advance refused: no valid non-stale round to advance from")
+	}
+	if err := review.ClosureCheck(st.Findings); err != nil {
+		return nil, fmt.Errorf("advance refused: blocking findings are not fully dispositioned: %w", err)
+	}
+	diskNow, resolved, err := TargetSnapshot(st.TargetLocation)
+	if err != nil {
+		return nil, err
+	}
+	if diskNow == st.TargetRevision {
+		return nil, fmt.Errorf("advance refused: target unchanged — nothing to advance")
+	}
+	from := st.TargetRevision
+	afterRound := st.Rounds[len(st.Rounds)-1].Index
+	st.Advances = append(st.Advances, AdvanceState{
+		FromRevision: from, ToRevision: diskNow, AfterRound: afterRound, Note: note,
+	})
+	st.TargetRevision, st.TargetResolved = diskNow, resolved
+	if st.Governance == string(kernel.GovClosable) {
+		st.Governance = string(kernel.GovDecisionRequired) // kernel-legal: CLOSABLE → DECISION_REQUIRED
+	}
+	return st, appendState(canonical, st, fmt.Sprintf(
+		"\n## advance after R%d\n- from: %s\n- to: %s\n- note: %s\n", afterRound, from, diskNow, note))
 }
 
 // Terminate ends the objective as SUPERSEDED or ABANDONED with arbiter

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // HandleStore maps opaque random session references to native vendor resume
@@ -16,11 +17,29 @@ import (
 // merge-preserving writes. References are 128-bit cryptographically random
 // values — never derived from the native handle (DR-811 §3).
 //
-// v1 constraint: the store assumes a single-process writer (the relay CLI
-// is a one-shot foreground process). Concurrent multi-process mutation is
-// out of contract; a lock/CAS scheme is a release-gate follow-up (R0-CX-F9).
+// Mutations are serialized across processes by an exclusive advisory lock on
+// a sidecar lock file: a concurrent writer blocks for the (millisecond-scale)
+// critical section instead of losing the other writer's update. The claim
+// boundary is serialization, not lock-free CAS (R1-CX-F4).
 type HandleStore struct {
 	Path string
+}
+
+// withExclusiveLock runs fn while holding an exclusive flock on the sidecar
+// lock file. The lock is advisory but every mutation path in this package
+// goes through it, so two acrelay processes can never interleave
+// load→mutate→save and drop each other's entries.
+func (h *HandleStore) withExclusiveLock(fn func() error) error {
+	fd, err := os.OpenFile(h.Path+".lock", os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer fd.Close()
+	if err := syscall.Flock(int(fd.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("handle store lock failed: fail-closed, refusing unserialized mutation: %w", err)
+	}
+	defer syscall.Flock(int(fd.Fd()), syscall.LOCK_UN)
+	return fn()
 }
 
 type handleFile struct {
@@ -124,19 +143,24 @@ func (h *HandleStore) Register(vendor, nativeHandle string) (string, error) {
 	if err := validateEntry(vendor, nativeHandle); err != nil {
 		return "", err
 	}
-	f, err := h.load()
-	if err != nil {
-		return "", err
-	}
-	ref, err := newRef(f.Entries)
-	if err != nil {
-		return "", err
-	}
-	f.Entries[ref] = handleEntry{Vendor: vendor, Handle: nativeHandle}
-	if err := h.save(f); err != nil {
-		return "", err
-	}
-	return ref, nil
+	var ref string
+	err := h.withExclusiveLock(func() error {
+		f, err := h.load()
+		if err != nil {
+			return err
+		}
+		r, err := newRef(f.Entries)
+		if err != nil {
+			return err
+		}
+		f.Entries[r] = handleEntry{Vendor: vendor, Handle: nativeHandle}
+		if err := h.save(f); err != nil {
+			return err
+		}
+		ref = r
+		return nil
+	})
+	return ref, err
 }
 
 // Lookup resolves a reference. A missing reference fails closed — the
@@ -161,38 +185,45 @@ func (h *HandleStore) Rotate(oldRef, vendor, newHandle string) (string, error) {
 	if err := validateEntry(vendor, newHandle); err != nil {
 		return "", err
 	}
-	f, err := h.load()
-	if err != nil {
-		return "", err
-	}
-	old, ok := f.Entries[oldRef]
-	if !ok {
-		return "", fmt.Errorf("session_ref %s not found for rotation: fail-closed", oldRef)
-	}
-	if old.Vendor != vendor {
-		return "", fmt.Errorf("rotation vendor mismatch: ref %s belongs to %s, not %s: fail-closed", oldRef, old.Vendor, vendor)
-	}
-	delete(f.Entries, oldRef)
-	ref, err := newRef(f.Entries)
-	if err != nil {
-		return "", err
-	}
-	f.Entries[ref] = handleEntry{Vendor: vendor, Handle: newHandle}
-	if err := h.save(f); err != nil {
-		return "", err
-	}
-	return ref, nil
+	var ref string
+	err := h.withExclusiveLock(func() error {
+		f, err := h.load()
+		if err != nil {
+			return err
+		}
+		old, ok := f.Entries[oldRef]
+		if !ok {
+			return fmt.Errorf("session_ref %s not found for rotation: fail-closed", oldRef)
+		}
+		if old.Vendor != vendor {
+			return fmt.Errorf("rotation vendor mismatch: ref %s belongs to %s, not %s: fail-closed", oldRef, old.Vendor, vendor)
+		}
+		delete(f.Entries, oldRef)
+		r, err := newRef(f.Entries)
+		if err != nil {
+			return err
+		}
+		f.Entries[r] = handleEntry{Vendor: vendor, Handle: newHandle}
+		if err := h.save(f); err != nil {
+			return err
+		}
+		ref = r
+		return nil
+	})
+	return ref, err
 }
 
 // Delete removes a reference (collaboration retention cleanup).
 func (h *HandleStore) Delete(ref string) error {
-	f, err := h.load()
-	if err != nil {
-		return err
-	}
-	if _, ok := f.Entries[ref]; !ok {
-		return fmt.Errorf("session_ref %s not found for deletion", ref)
-	}
-	delete(f.Entries, ref)
-	return h.save(f)
+	return h.withExclusiveLock(func() error {
+		f, err := h.load()
+		if err != nil {
+			return err
+		}
+		if _, ok := f.Entries[ref]; !ok {
+			return fmt.Errorf("session_ref %s not found for deletion", ref)
+		}
+		delete(f.Entries, ref)
+		return h.save(f)
+	})
 }

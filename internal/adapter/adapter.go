@@ -5,10 +5,14 @@
 package adapter
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -95,6 +99,98 @@ func (t Timeouts) Validate() (Timeouts, error) {
 	return t, nil
 }
 
+// Startup/idle timers are observable-output timers: they only exist where the
+// CLI emits an event stream (IdleTimeoutMode "event-stream"). Final-envelope
+// CLIs produce no observable output before the terminal envelope, so startup
+// and idle are both undefined there and only the hard-cap applies (DR-811 §7
+// declares the idle carve-out; startup follows the same observability rule).
+// Startup/idle expiry is FAILED(timeout:*) — no terminal output was captured
+// and no automatic retry happens. Hard-cap expiry stays UNKNOWN.
+var (
+	ErrStartupTimeout = errors.New("startup timeout: no observable output before deadline")
+	ErrIdleTimeout    = errors.New("idle timeout: event stream went silent past deadline")
+)
+
+// watchdogBuffer is a bytes.Buffer that reports event activity to the
+// timeout supervisor. Activity means a complete, parseable JSONL event
+// (newline-terminated JSON object) — DR-811 defines idle as silence between
+// *events*, so a partial-line byte trickle or malformed fragment never
+// resets the timers. The activity channel is buffered and never blocks the
+// child's output pipe.
+type watchdogBuffer struct {
+	mu       sync.Mutex
+	buf      bytes.Buffer
+	line     []byte // partial-line accumulator for event detection
+	activity chan struct{}
+}
+
+func newWatchdogBuffer() *watchdogBuffer {
+	return &watchdogBuffer{activity: make(chan struct{}, 1)}
+}
+
+func (w *watchdogBuffer) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n, err := w.buf.Write(p)
+	w.line = append(w.line, p[:n]...)
+	for {
+		i := bytes.IndexByte(w.line, '\n')
+		if i < 0 {
+			break
+		}
+		candidate := bytes.TrimSpace(w.line[:i])
+		w.line = append([]byte(nil), w.line[i+1:]...)
+		if len(candidate) > 0 && candidate[0] == '{' && json.Valid(candidate) {
+			select {
+			case w.activity <- struct{}{}:
+			default:
+			}
+		}
+	}
+	return n, err
+}
+
+func (w *watchdogBuffer) Bytes() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Bytes()
+}
+
+// superviseTimeouts cancels the dispatch context with ErrStartupTimeout when
+// no output arrives within t.Startup, then with ErrIdleTimeout whenever the
+// stream stays silent longer than t.Idle. It exits when ctx ends.
+func superviseTimeouts(ctx context.Context, cancel context.CancelCauseFunc, activity <-chan struct{}, t Timeouts) {
+	startup := time.NewTimer(t.Startup)
+	defer startup.Stop()
+	select {
+	case <-ctx.Done():
+		return
+	case <-startup.C:
+		cancel(ErrStartupTimeout)
+		return
+	case <-activity:
+	}
+	idle := time.NewTimer(t.Idle)
+	defer idle.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-idle.C:
+			cancel(ErrIdleTimeout)
+			return
+		case <-activity:
+			if !idle.Stop() {
+				select {
+				case <-idle.C:
+				default:
+				}
+			}
+			idle.Reset(t.Idle)
+		}
+	}
+}
+
 // Request is one reviewer invocation. SchemaJSON is mandatory: schema
 // enforcement is part of dispatch, not an option (DR-811 §5).
 type Request struct {
@@ -123,17 +219,29 @@ type Provenance struct {
 	NewSession         bool
 }
 
+// TimeoutKind distinguishes which deadline expired. Startup/idle expiry is
+// FAILED — no terminal output was ever captured. Hard-cap expiry is UNKNOWN —
+// the invocation was cut at the wall clock and may have progressed (DR-811
+// §7). The relay maps execution state from this kind, never from the bare
+// TimedOut flag.
+const (
+	TimeoutStartup = "startup"
+	TimeoutIdle    = "idle"
+	TimeoutHardCap = "hard-cap"
+)
+
 // Result is the transport-level outcome of one dispatch.
 type Result struct {
-	Stdout     []byte
-	Stderr     []byte
-	Started    bool // child process actually started (R1-CX-F7)
-	ExitCode   int // -1 when the process never started
-	Structured map[string]any
-	Diagnostic string   // e.g. non-JSON prefix note — preserved, never dropped
-	Invalid    []string // validation notes that classify the outcome as needs-input
-	Provenance Provenance
-	TimedOut   bool
+	Stdout      []byte
+	Stderr      []byte
+	Started     bool // child process actually started (R1-CX-F7)
+	ExitCode    int  // -1 when the process never started
+	Structured  map[string]any
+	Diagnostic  string   // e.g. non-JSON prefix note — preserved, never dropped
+	Invalid     []string // validation notes that classify the outcome as needs-input
+	Provenance  Provenance
+	TimedOut    bool
+	TimeoutKind string // TimeoutStartup | TimeoutIdle | TimeoutHardCap, "" when !TimedOut
 }
 
 // Adapter is one platform binding.

@@ -263,3 +263,183 @@ func TestGroupKillGraceEscalation(t *testing.T) {
 		t.Fatalf("grandchildren survived grace escalation: %q", out)
 	}
 }
+
+func TestWatchdogBufferSignalsOnCompleteJSONLEventsOnly(t *testing.T) {
+	w := newWatchdogBuffer()
+	// complete JSONL events signal activity; repeated writes must not block
+	// (channel capacity is 1)
+	for i := 0; i < 10; i++ {
+		if _, err := w.Write([]byte("{\"type\":\"event\"}\n")); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+	select {
+	case <-w.activity:
+	default:
+		t.Fatal("expected pending activity signal after complete JSONL events")
+	}
+	// event split across writes signals only once the newline lands
+	w2 := newWatchdogBuffer()
+	w2.Write([]byte("{\"type\":"))
+	select {
+	case <-w2.activity:
+		t.Fatal("partial line must not signal")
+	default:
+	}
+	w2.Write([]byte("\"done\"}\n"))
+	select {
+	case <-w2.activity:
+	default:
+		t.Fatal("completed event must signal")
+	}
+}
+
+func TestWatchdogBufferPartialTrickleNeverSignals(t *testing.T) {
+	w := newWatchdogBuffer()
+	// byte trickle without a newline, malformed lines, and non-object JSON
+	// must never count as events (owner cross-check item 4)
+	for _, chunk := range []string{"garbage ", "not json\n", "123\n", "{broken\n", "{\"open\":"} {
+		w.Write([]byte(chunk))
+	}
+	select {
+	case <-w.activity:
+		t.Fatal("trickle/malformed input must not reset timers")
+	default:
+	}
+}
+
+func TestSuperviseStartupTimeout(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	tmo := Timeouts{Startup: 30 * time.Millisecond, Idle: time.Second, HardCap: time.Minute, Grace: 10 * time.Millisecond}
+	done := make(chan struct{})
+	go func() { superviseTimeouts(ctx, cancel, make(chan struct{}), tmo); close(done) }()
+	select {
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervisor never fired startup timeout")
+	}
+	if cause := context.Cause(ctx); cause != ErrStartupTimeout {
+		t.Fatalf("cause = %v, want ErrStartupTimeout", cause)
+	}
+	<-done
+}
+
+func TestSuperviseIdleTimeoutAfterActivity(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	tmo := Timeouts{Startup: time.Second, Idle: 40 * time.Millisecond, HardCap: time.Minute, Grace: 10 * time.Millisecond}
+	activity := make(chan struct{}, 1)
+	activity <- struct{}{} // first output arrives promptly, then the stream goes silent
+	done := make(chan struct{})
+	go func() { superviseTimeouts(ctx, cancel, activity, tmo); close(done) }()
+	select {
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervisor never fired idle timeout")
+	}
+	if cause := context.Cause(ctx); cause != ErrIdleTimeout {
+		t.Fatalf("cause = %v, want ErrIdleTimeout", cause)
+	}
+	<-done
+}
+
+func TestSuperviseSteadyActivityStaysAlive(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	tmo := Timeouts{Startup: 200 * time.Millisecond, Idle: 200 * time.Millisecond, HardCap: time.Minute, Grace: 10 * time.Millisecond}
+	activity := make(chan struct{}, 1)
+	go superviseTimeouts(ctx, cancel, activity, tmo)
+	for i := 0; i < 6; i++ { // keep the stream chatty well past startup+idle windows
+		select {
+		case activity <- struct{}{}:
+		default:
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("supervisor cancelled a live stream: cause=%v", context.Cause(ctx))
+	}
+	cancel(nil)
+}
+
+func TestHandleStoreConcurrentRegisterLosesNothing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "handles.json")
+	const n = 12
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			// separate HandleStore values → separate lock fds, like separate processes
+			s := &HandleStore{Path: path}
+			_, err := s.Register("codex", "thread-"+string(rune('a'+i)))
+			errs <- err
+		}(i)
+	}
+	for i := 0; i < n; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent register: %v", err)
+		}
+	}
+	s := &HandleStore{Path: path}
+	f, err := s.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Entries) != n { // without the exclusive lock, interleaved load→save drops entries
+		t.Fatalf("lost updates: %d entries survived, want %d", len(f.Entries), n)
+	}
+	st, err := os.Stat(path + ".lock")
+	if err != nil {
+		t.Fatalf("lock file: %v", err)
+	}
+	if st.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("lock file permission %o exposes group/other", st.Mode().Perm())
+	}
+}
+
+// Helper entry for the multi-process flock fixture: real child processes
+// (not goroutines) register one handle each. Gated by env so the normal
+// suite run skips it.
+func TestHandleStoreHelperProcessRegister(t *testing.T) {
+	if os.Getenv("ACRELAY_HELPER_PATH") == "" {
+		t.Skip("helper process entry — driven by TestHandleStoreConcurrentProcessesLoseNothing")
+	}
+	s := &HandleStore{Path: os.Getenv("ACRELAY_HELPER_PATH")}
+	if _, err := s.Register("codex", os.Getenv("ACRELAY_HELPER_HANDLE")); err != nil {
+		t.Fatalf("helper register: %v", err)
+	}
+}
+
+func TestHandleStoreConcurrentProcessesLoseNothing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "handles.json")
+	const n = 12
+	cmds := make([]*exec.Cmd, n)
+	outs := make([]*strings.Builder, n)
+	for i := range cmds { // separate OS processes: this exercises real cross-process flock
+		cmd := exec.Command(os.Args[0], "-test.run=TestHandleStoreHelperProcessRegister$", "-test.v")
+		cmd.Env = append(os.Environ(),
+			"ACRELAY_HELPER_PATH="+path,
+			"ACRELAY_HELPER_HANDLE=thread-proc-"+string(rune('a'+i)))
+		outs[i] = &strings.Builder{}
+		cmd.Stdout, cmd.Stderr = outs[i], outs[i]
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		cmds[i] = cmd
+	}
+	for i, cmd := range cmds {
+		if err := cmd.Wait(); err != nil {
+			t.Fatalf("helper process %d failed: %v\n%s", i, err, outs[i].String())
+		}
+	}
+	s := &HandleStore{Path: path}
+	f, err := s.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Entries) != n {
+		t.Fatalf("cross-process lost updates: %d entries survived, want %d", len(f.Entries), n)
+	}
+}

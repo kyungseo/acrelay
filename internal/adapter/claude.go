@@ -9,7 +9,10 @@ import (
 )
 
 // ClaudeAdapter binds the Claude Code CLI (`claude -p`) in final-envelope
-// mode. Idle timeout is unsupported in this mode and declared so.
+// mode. There is no observable output before the terminal envelope, so both
+// startup and idle timers are unsupported in this mode and declared so —
+// only the hard-cap bounds the invocation (DR-811 §7, amended 2026-07-18:
+// the final-envelope exception covers startup as well as idle).
 type ClaudeAdapter struct{}
 
 func (ClaudeAdapter) Vendor() string { return "claude" }
@@ -145,7 +148,7 @@ func (a ClaudeAdapter) Dispatch(ctx context.Context, req Request, handles *Handl
 		return res, fmt.Errorf("claude process never started (pre-dispatch failure, no attempt consumed): %v", runErr)
 	}
 	if tctx.Err() == context.DeadlineExceeded {
-		res.TimedOut = true
+		res.TimedOut, res.TimeoutKind = true, TimeoutHardCap
 		return res, fmt.Errorf("hard-cap timeout: execution UNKNOWN, re-dispatch forbidden")
 	}
 	env, diag, perr := parseClaudeEnvelope(stdout.Bytes())

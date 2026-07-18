@@ -45,7 +45,7 @@ func fail(err error) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, `usage: acrelay <init|review|confirm|disposition|close|terminate|reconcile|status> [flags]
+		fmt.Fprintln(os.Stderr, `usage: acrelay <init|review|confirm|disposition|advance|close|terminate|reconcile|status> [flags]
 The canonical record is private local storage: keep it outside shared/synced/
 published paths. Sharing requires a redacted export (not provided in v1).`)
 		os.Exit(2)
@@ -147,6 +147,18 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 			fail(err)
 		}
 		fmt.Printf("objective %s CLOSED\n", st.ObjectiveID)
+
+	case "advance":
+		fs := flag.NewFlagSet("advance", flag.ExitOnError)
+		canonical := fs.String("canonical", "", "canonical record path")
+		note := fs.String("note", "", "what changed in the target (delta summary)")
+		fs.Parse(args)
+		st, err := relay.Advance(*canonical, *note)
+		if err != nil {
+			fail(err)
+		}
+		a := st.Advances[len(st.Advances)-1]
+		fmt.Printf("objective %s advanced after R%d (governance=%s)\n", st.ObjectiveID, a.AfterRound, st.Governance)
 
 	case "terminate":
 		fs := flag.NewFlagSet("terminate", flag.ExitOnError)
