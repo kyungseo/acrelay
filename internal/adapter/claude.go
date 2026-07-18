@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // ClaudeAdapter binds the Claude Code CLI (`claude -p`) in final-envelope
@@ -26,10 +27,11 @@ func (ClaudeAdapter) Capability() Capability {
 	}
 }
 
+// Preflight validates effort (the CLI silently ignores unknown values —
+// observed 2026-07-18 — so validation is never delegated), mandatory
+// schema, and timeout structure.
 func (a ClaudeAdapter) Preflight(req Request) error {
-	// Explicit effort must be validated here: the CLI silently ignores
-	// unknown values (observed 2026-07-18), so validation is never delegated.
-	return ValidateEffort(a.Capability(), req.Effort)
+	return validateCommonRequest(a.Capability(), req)
 }
 
 // claudeEnvelope is the subset of the final JSON envelope the relay reads.
@@ -58,25 +60,41 @@ func parseClaudeEnvelope(stdout []byte) (*claudeEnvelope, string, error) {
 	if err := json.Unmarshal(stdout[i:], &env); err != nil {
 		return nil, "", fmt.Errorf("claude envelope malformed after %d-byte prefix: %w", i, err)
 	}
-	diag := fmt.Sprintf("non-JSON prefix %d bytes before envelope", i)
-	return &env, diag, nil
+	return &env, fmt.Sprintf("non-JSON prefix %d bytes before envelope", i), nil
+}
+
+// detectClaudeVersion parses `claude --version` ("2.1.214 (Claude Code)").
+func detectClaudeVersion(ctx context.Context) (string, error) {
+	banner, err := probeVersion(ctx, "claude", "--version")
+	if err != nil {
+		return "", err
+	}
+	return firstNonEmptyLineField(banner, 0), nil
 }
 
 func (a ClaudeAdapter) Dispatch(ctx context.Context, req Request, handles *HandleStore) (*Result, error) {
 	if err := a.Preflight(req); err != nil {
 		return nil, err
 	}
-	args := []string{"-p", "--output-format", "json"}
+	timeouts, err := req.Timeouts.Validate()
+	if err != nil {
+		return nil, err
+	}
+	observedVersion, err := detectClaudeVersion(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := PreflightVersion(a.Capability(), observedVersion); err != nil {
+		return nil, err
+	}
+
+	args := []string{"-p", "--output-format", "json", "--json-schema", req.SchemaJSON}
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
 	}
 	if req.Effort != "" {
 		args = append(args, "--effort", req.Effort)
 	}
-	if req.SchemaJSON != "" {
-		args = append(args, "--json-schema", req.SchemaJSON)
-	}
-	var resumeHandle string
 	if req.ResumeRef != "" {
 		vendor, h, err := handles.Lookup(req.ResumeRef)
 		if err != nil {
@@ -85,20 +103,22 @@ func (a ClaudeAdapter) Dispatch(ctx context.Context, req Request, handles *Handl
 		if vendor != "claude" {
 			return nil, fmt.Errorf("session_ref %s belongs to %s, not claude: fail-closed", req.ResumeRef, vendor)
 		}
-		resumeHandle = h
-		args = append(args, "--resume", resumeHandle)
+		args = append(args, "--resume", h)
 	}
 
-	tctx, cancel := context.WithTimeout(ctx, req.Timeouts.HardCap)
+	tctx, cancel := context.WithTimeout(ctx, timeouts.HardCap)
 	defer cancel()
-	cmd := newGroupCmd(tctx, "claude", args...)
+	cmd := newGroupCmd(tctx, timeouts.Grace, "claude", args...)
 	cmd.Dir = req.WorkingDir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	cmd.Stdin = bytes.NewReader([]byte(req.Prompt))
 	runErr := cmd.Run()
 
-	res := &Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: cmd.ProcessState.ExitCode()}
+	res := &Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: exitCode(cmd)}
+	if cmd.ProcessState == nil {
+		return res, fmt.Errorf("claude process never started (pre-dispatch failure, no attempt consumed): %v", runErr)
+	}
 	if tctx.Err() == context.DeadlineExceeded {
 		res.TimedOut = true
 		return res, fmt.Errorf("hard-cap timeout: execution UNKNOWN, re-dispatch forbidden")
@@ -107,11 +127,17 @@ func (a ClaudeAdapter) Dispatch(ctx context.Context, req Request, handles *Handl
 	if perr != nil {
 		return res, fmt.Errorf("dispatch capture failed (runErr=%v): %w", runErr, perr)
 	}
-	_ = diag // recorded by the caller alongside raw bytes
+	res.Diagnostic = diag
 	if env.IsError {
 		return res, fmt.Errorf("claude reported error in envelope (exit=%d): FAILED", res.ExitCode)
 	}
+	if strings.TrimSpace(env.SessionID) == "" {
+		return res, fmt.Errorf("claude envelope has no session_id: fail-closed (empty handles are never stored)")
+	}
 	res.Structured = env.Structured
+	if env.Structured == nil {
+		res.Invalid = append(res.Invalid, "missing-structured-output")
+	}
 
 	sessionRef := req.ResumeRef
 	newSession := false
@@ -122,19 +148,20 @@ func (a ClaudeAdapter) Dispatch(ctx context.Context, req Request, handles *Handl
 		}
 		sessionRef, newSession = ref, true
 	}
-	resolved, modelState := "", ObsUnverified
+	resolved, modelState := "", ObservationState(ObsUnverified)
 	for k := range env.ModelUsage {
 		resolved, modelState = k, ObsVerified
 	}
-	effortState := ObsUnsupported
+	mismatch := req.Model != "" && resolved != "" && !strings.Contains(resolved, req.Model)
+	effortState := ObservationState("")
 	if req.Effort != "" {
 		effortState = ObsAttested // accepted pre-validated flag; no echo on success path
 	}
 	res.Provenance = Provenance{
-		RequestedModel: req.Model, ResolvedModel: resolved, ModelState: modelState,
+		RequestedModel: req.Model, ResolvedModel: resolved, ModelState: modelState, ModelMismatch: mismatch,
 		RequestedEffort: req.Effort, EffortState: effortState,
-		CLIVersion: a.Capability().CLIVersionChecked, WorkingDir: req.WorkingDir,
-		SessionRef: sessionRef, NewSession: newSession,
+		ManifestCLIVersion: a.Capability().CLIVersionChecked, ObservedCLIVersion: observedVersion,
+		WorkingDir: req.WorkingDir, SessionRef: sessionRef, NewSession: newSession,
 	}
 	return res, nil
 }

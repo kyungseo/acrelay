@@ -6,6 +6,7 @@ package review
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/kyungseo/acrelay/internal/kernel"
 )
@@ -38,6 +39,30 @@ const (
 	DispositionNeedsUser Disposition = "needs-user"
 )
 
+// ValidDisposition reports whether d is one of the contract's dispositions.
+func ValidDisposition(d Disposition) bool {
+	switch d {
+	case DispositionAccept, DispositionRevise, DispositionDefend, DispositionNeedsUser:
+		return true
+	}
+	return false
+}
+
+// ArbiterDecision records who decided a needs-user finding and why. A bare
+// boolean is not evidence (R0-CX-F4).
+type ArbiterDecision struct {
+	Arbiter string
+	Reason  string
+}
+
+// Validate rejects decisions without an identity or rationale.
+func (d ArbiterDecision) Validate() error {
+	if strings.TrimSpace(d.Arbiter) == "" || strings.TrimSpace(d.Reason) == "" {
+		return fmt.Errorf("arbiter decision requires identity and reason: fail-closed")
+	}
+	return nil
+}
+
 // Finding is one reviewer finding. Severity is impact; Blocking is whether
 // current policy blocks closure — the two are never conflated.
 type Finding struct {
@@ -45,8 +70,8 @@ type Finding struct {
 	Severity    string
 	Blocking    bool
 	Summary     string
-	Disposition Disposition // empty until the driver responds
-	Decided     bool        // arbiter decision recorded for needs-user
+	Disposition Disposition      // empty until the driver responds
+	Decision    *ArbiterDecision // required when Disposition is needs-user
 }
 
 // ReviewResult is the canonical structured reviewer output.
@@ -87,7 +112,7 @@ func ValidateResult(m map[string]any) []string {
 	}
 	for i, f := range arr {
 		s, isStr := f.(string)
-		if !isStr || s == "" {
+		if !isStr || strings.TrimSpace(s) == "" {
 			errs = append(errs, fmt.Sprintf("empty-finding:%d", i))
 		}
 	}
@@ -120,8 +145,16 @@ func ClosureCheck(findings []Finding) error {
 		if f.Disposition == "" {
 			return fmt.Errorf("blocking finding %s has no disposition: governance stays decision-required", f.ID)
 		}
-		if f.Disposition == DispositionNeedsUser && !f.Decided {
-			return fmt.Errorf("blocking finding %s awaits arbiter decision: governance stays decision-required", f.ID)
+		if !ValidDisposition(f.Disposition) {
+			return fmt.Errorf("blocking finding %s has invalid disposition %q: fail-closed", f.ID, f.Disposition)
+		}
+		if f.Disposition == DispositionNeedsUser {
+			if f.Decision == nil {
+				return fmt.Errorf("blocking finding %s awaits arbiter decision: governance stays decision-required", f.ID)
+			}
+			if err := f.Decision.Validate(); err != nil {
+				return fmt.Errorf("blocking finding %s: %w", f.ID, err)
+			}
 		}
 	}
 	return nil

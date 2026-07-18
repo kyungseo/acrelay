@@ -19,6 +19,7 @@ func TestValidateResultParityFixtures(t *testing.T) {
 		{"approve-empty", `{"verdict":"approve","findings":[]}`, nil},
 		{"bad-verdict", `{"verdict":"maybe","findings":["x"]}`, []string{"verdict-enum:maybe"}},
 		{"empty-finding-string", `{"verdict":"approve","findings":[""]}`, []string{"empty-finding:0"}},
+		{"whitespace-finding-string", `{"verdict":"approve","findings":["  "]}`, []string{"empty-finding:0"}},
 		{"missing-field", `{"verdict":"approve"}`, []string{"missing:findings"}},
 		{"unknown-property", `{"verdict":"approve","findings":[],"extra":1}`, []string{"unknown-property:extra"}},
 		{"changes-requested-empty", `{"verdict":"changes-requested","findings":[]}`, []string{"changes-requested-needs-finding"}},
@@ -63,11 +64,19 @@ func TestClosureCheckFailClosed(t *testing.T) {
 	if err := ClosureCheck(findings); err == nil {
 		t.Fatal("undispositioned blocking finding must block closure")
 	}
+	findings[0].Disposition = Disposition("bogus")
+	if err := ClosureCheck(findings); err == nil {
+		t.Fatal("invalid disposition must block closure (R0-CX-F4)")
+	}
 	findings[0].Disposition = DispositionNeedsUser
 	if err := ClosureCheck(findings); err == nil {
 		t.Fatal("needs-user without arbiter decision must block closure")
 	}
-	findings[0].Decided = true
+	findings[0].Decision = &ArbiterDecision{Arbiter: "owner", Reason: " "}
+	if err := ClosureCheck(findings); err == nil {
+		t.Fatal("blank decision reason must block closure")
+	}
+	findings[0].Decision = &ArbiterDecision{Arbiter: "owner", Reason: "risk accepted for alpha"}
 	if err := ClosureCheck(findings); err != nil {
 		t.Fatal(err)
 	}

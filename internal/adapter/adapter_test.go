@@ -1,11 +1,14 @@
 package adapter
 
 import (
+	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidateEffort(t *testing.T) {
@@ -164,5 +167,99 @@ func TestDefaultTimeoutsStructure(t *testing.T) {
 	}
 	if d.HardCap <= d.Idle || d.Idle <= d.Grace {
 		t.Fatal("timeout ordering must be grace < idle < hard-cap")
+	}
+}
+
+// R0-CX-F6: version gate and mandatory schema.
+func TestPreflightVersionGate(t *testing.T) {
+	cap := ClaudeAdapter{}.Capability()
+	if err := PreflightVersion(cap, "2.1.214"); err != nil {
+		t.Fatal(err)
+	}
+	if err := PreflightVersion(cap, "9.9.9"); err == nil {
+		t.Fatal("unvalidated CLI version must fail closed")
+	}
+	if err := PreflightVersion(cap, ""); err == nil {
+		t.Fatal("unobservable version must fail closed")
+	}
+}
+
+func TestPreflightRequiresSchema(t *testing.T) {
+	for _, a := range []Adapter{ClaudeAdapter{}, CodexAdapter{}} {
+		if err := a.Preflight(Request{Prompt: "x"}); err == nil ||
+			!strings.Contains(err.Error(), "SchemaJSON") {
+			t.Fatalf("%s: missing schema must fail preflight: %v", a.Vendor(), err)
+		}
+		if err := a.Preflight(Request{Prompt: "x", SchemaJSON: `{"type":"object"}`}); err != nil {
+			t.Fatalf("%s: valid request must pass preflight: %v", a.Vendor(), err)
+		}
+	}
+}
+
+// R0-CX-N1: timeout validation and normalization.
+func TestTimeoutsValidate(t *testing.T) {
+	norm, err := Timeouts{}.Validate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if norm != DefaultTimeouts() {
+		t.Fatal("zero values must normalize to defaults")
+	}
+	if _, err := (Timeouts{Grace: 10 * time.Minute, Idle: 5 * time.Minute}).Validate(); err == nil {
+		t.Fatal("grace >= idle must fail")
+	}
+	if _, err := (Timeouts{Startup: -1}).Validate(); err == nil {
+		t.Fatal("negative values must fail")
+	}
+}
+
+// R0-CX-F9: rotation vendor mismatch, empty entries, permission gate.
+func TestHandleStoreHardening(t *testing.T) {
+	dir := t.TempDir()
+	h := &HandleStore{Path: filepath.Join(dir, "handles.json")}
+	if _, err := h.Register("", "x"); err == nil {
+		t.Fatal("empty vendor must be refused")
+	}
+	if _, err := h.Register("claude", "  "); err == nil {
+		t.Fatal("blank handle must be refused")
+	}
+	ref, err := h.Register("claude", "native-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ref) != len("sref-")+32 {
+		t.Fatalf("expected 128-bit ref, got %s", ref)
+	}
+	if _, err := h.Rotate(ref, "codex", "thread-1"); err == nil ||
+		!strings.Contains(err.Error(), "vendor mismatch") {
+		t.Fatalf("cross-vendor rotation must fail closed: %v", err)
+	}
+	// permission exposure fails closed on load
+	os.Chmod(h.Path, 0o644)
+	if _, _, err := h.Lookup(ref); err == nil ||
+		!strings.Contains(err.Error(), "permission") {
+		t.Fatalf("group/other-readable store must fail closed: %v", err)
+	}
+}
+
+// R0-CX-F8: SIGTERM-ignoring grandchildren die at grace escalation.
+func TestGroupKillGraceEscalation(t *testing.T) {
+	marker := "1799" // unique sleep duration as process marker
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	cmd := newGroupCmd(ctx, 500*time.Millisecond, "bash", "-c",
+		"trap '' TERM; sleep "+marker+" & sleep "+marker+" & wait")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { cmd.Wait(); close(done) }()
+	time.Sleep(300 * time.Millisecond) // let children spawn
+	<-done                             // ctx timeout → TERM (ignored) → grace → group SIGKILL
+	time.Sleep(700 * time.Millisecond) // allow the AfterFunc SIGKILL to land
+	out, _ := exec.Command("pgrep", "-f", "sleep "+marker).Output()
+	if len(strings.TrimSpace(string(out))) != 0 {
+		exec.Command("pkill", "-9", "-f", "sleep "+marker).Run()
+		t.Fatalf("grandchildren survived grace escalation: %q", out)
 	}
 }

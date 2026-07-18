@@ -7,12 +7,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // HandleStore maps opaque random session references to native vendor resume
-// handles. The file is private storage: 0600 from creation, unique-temp
-// atomic replace, merge-preserving writes. References are cryptographically
-// random — never derived from the native handle (DR-811 §3).
+// handles. The file is private storage: 0600 from creation, owner-only
+// permission verified on every load, unique-temp atomic replace, and
+// merge-preserving writes. References are 128-bit cryptographically random
+// values — never derived from the native handle (DR-811 §3).
+//
+// v1 constraint: the store assumes a single-process writer (the relay CLI
+// is a one-shot foreground process). Concurrent multi-process mutation is
+// out of contract; a lock/CAS scheme is a release-gate follow-up (R0-CX-F9).
 type HandleStore struct {
 	Path string
 }
@@ -29,13 +35,21 @@ type handleEntry struct {
 
 const handleFileVersion = 1
 
-// load reads the store. A missing file yields an empty store; a corrupt or
-// version-mismatched file fails closed — it is never silently recreated.
+// load reads the store. A missing file yields an empty store; a corrupt,
+// version-mismatched, or group/other-accessible file fails closed — it is
+// never silently recreated or repaired.
 func (h *HandleStore) load() (*handleFile, error) {
-	b, err := os.ReadFile(h.Path)
+	st, err := os.Stat(h.Path)
 	if os.IsNotExist(err) {
 		return &handleFile{Version: handleFileVersion, Entries: map[string]handleEntry{}}, nil
 	}
+	if err != nil {
+		return nil, err
+	}
+	if st.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("handle store %s permission %o exposes group/other: fail-closed", h.Path, st.Mode().Perm())
+	}
+	b, err := os.ReadFile(h.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -83,18 +97,41 @@ func (h *HandleStore) save(f *handleFile) error {
 	return os.Rename(tmp, h.Path)
 }
 
+func newRef(existing map[string]handleEntry) (string, error) {
+	for i := 0; i < 5; i++ { // collision retry — 128-bit space makes >1 loop cosmically unlikely
+		b := make([]byte, 16)
+		if _, err := rand.Read(b); err != nil {
+			return "", err
+		}
+		ref := "sref-" + hex.EncodeToString(b)
+		if _, taken := existing[ref]; !taken {
+			return ref, nil
+		}
+	}
+	return "", fmt.Errorf("session_ref collision retry exhausted: fail-closed")
+}
+
+func validateEntry(vendor, nativeHandle string) error {
+	if strings.TrimSpace(vendor) == "" || strings.TrimSpace(nativeHandle) == "" {
+		return fmt.Errorf("vendor and native handle must be nonempty: fail-closed (empty handles are never stored)")
+	}
+	return nil
+}
+
 // Register stores a native handle under a fresh random reference and
 // returns the reference. Existing entries are preserved.
 func (h *HandleStore) Register(vendor, nativeHandle string) (string, error) {
+	if err := validateEntry(vendor, nativeHandle); err != nil {
+		return "", err
+	}
 	f, err := h.load()
 	if err != nil {
 		return "", err
 	}
-	b := make([]byte, 8)
-	if _, err := rand.Read(b); err != nil {
+	ref, err := newRef(f.Entries)
+	if err != nil {
 		return "", err
 	}
-	ref := "sref-" + hex.EncodeToString(b)
 	f.Entries[ref] = handleEntry{Vendor: vendor, Handle: nativeHandle}
 	if err := h.save(f); err != nil {
 		return "", err
@@ -116,23 +153,30 @@ func (h *HandleStore) Lookup(ref string) (vendor, nativeHandle string, err error
 	return e.Vendor, e.Handle, nil
 }
 
-// Rotate replaces the native handle behind a reference with a new handle
-// under a NEW reference (session reset semantics) and removes the old
-// reference. The caller records the reset reason in the canonical record.
+// Rotate replaces the native handle behind a reference with a new handle of
+// the SAME vendor under a new reference (session reset semantics) and
+// removes the old reference. The caller records the reset reason in the
+// canonical record.
 func (h *HandleStore) Rotate(oldRef, vendor, newHandle string) (string, error) {
+	if err := validateEntry(vendor, newHandle); err != nil {
+		return "", err
+	}
 	f, err := h.load()
 	if err != nil {
 		return "", err
 	}
-	if _, ok := f.Entries[oldRef]; !ok {
+	old, ok := f.Entries[oldRef]
+	if !ok {
 		return "", fmt.Errorf("session_ref %s not found for rotation: fail-closed", oldRef)
 	}
+	if old.Vendor != vendor {
+		return "", fmt.Errorf("rotation vendor mismatch: ref %s belongs to %s, not %s: fail-closed", oldRef, old.Vendor, vendor)
+	}
 	delete(f.Entries, oldRef)
-	b := make([]byte, 8)
-	if _, err := rand.Read(b); err != nil {
+	ref, err := newRef(f.Entries)
+	if err != nil {
 		return "", err
 	}
-	ref := "sref-" + hex.EncodeToString(b)
 	f.Entries[ref] = handleEntry{Vendor: vendor, Handle: newHandle}
 	if err := h.save(f); err != nil {
 		return "", err

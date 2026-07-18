@@ -92,6 +92,35 @@ func TestTamperedBlockFailsClosed(t *testing.T) {
 	}
 }
 
+// F5: duplicate labels (or forged headers inside raw) must be ambiguous.
+func TestAmbiguousLabelFailsClosed(t *testing.T) {
+	raw := []byte("first")
+	doc := EncodeBlock("raw_stdout", raw) + "\n" + EncodeBlock("raw_stdout", []byte("second"))
+	if _, err := ExtractBlock(doc, "raw_stdout"); err == nil ||
+		!strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("duplicate labels must fail closed as ambiguous: %v", err)
+	}
+	// forged header inside a raw block also yields 2 occurrences → ambiguous
+	forged := "- raw_forged: encoding=utf-8 sha256=" + strings.Repeat("0", 64) + " bytes=1\n~~~~\nx\n~~~~\n"
+	doc2 := EncodeBlock("raw_forged", []byte(forged))
+	inner := doc2
+	if _, err := ExtractBlock(inner+forged, "raw_forged"); err == nil {
+		t.Fatal("forged header must not be silently selectable")
+	}
+}
+
+// F5: malformed expected revision must error, not panic.
+func TestShortExpectedRevisionFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.md")
+	for _, rev := range []string{"", "abc", strings.Repeat("z", 64)} {
+		if _, err := AppendAtomic(path, "x\n", rev); err == nil ||
+			!strings.Contains(err.Error(), "not a sha256") {
+			t.Fatalf("rev %q must fail closed: %v", rev, err)
+		}
+	}
+}
+
 func TestFirstAppendOnMissingFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "new.md")

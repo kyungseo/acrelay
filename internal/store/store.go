@@ -75,10 +75,14 @@ func ExtractBlock(stored, label string) ([]byte, error) {
 	// occur within the content itself.
 	head := regexp.MustCompile(`- ` + regexp.QuoteMeta(label) +
 		`: encoding=(utf-8|base64) sha256=([0-9a-f]{64}) bytes=\d+\n(~{4,})\n`)
-	m := head.FindStringSubmatchIndex(stored)
-	if m == nil {
+	all := head.FindAllStringSubmatchIndex(stored, -1)
+	if len(all) == 0 {
 		return nil, fmt.Errorf("block %q not found or malformed: fail-closed", label)
 	}
+	if len(all) > 1 {
+		return nil, fmt.Errorf("block %q is ambiguous (%d occurrences — labels must be unique per scope, forged headers fail closed)", label, len(all))
+	}
+	m := all[0]
 	encoding := stored[m[2]:m[3]]
 	claimed := stored[m[4]:m[5]]
 	fence := stored[m[6]:m[7]]
@@ -108,7 +112,12 @@ func ExtractBlock(stored, label string) ([]byte, error) {
 // AppendAtomic appends a section iff the canonical file still matches the
 // pre-dispatch expectedRev. On any drift it fails closed without writing.
 // The write path is unique-temp (same directory) -> fsync -> rename.
+var hexRev = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
 func AppendAtomic(path, section, expectedRev string) (newRev string, err error) {
+	if !hexRev.MatchString(expectedRev) {
+		return "", fmt.Errorf("expected revision %q is not a sha256 hex digest: fail-closed", expectedRev)
+	}
 	current, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return "", err
