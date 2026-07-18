@@ -357,9 +357,21 @@ func (m *mutatingAdapter) Dispatch(ctx context.Context, req adapter.Request, h *
 	return m.FakeAdapter.Dispatch(ctx, req, h)
 }
 
-// R1-CX-F4: confirmation cycle persists, rehydrates, and consumes no rounds.
+// R1-CX-F4 (CP): confirmation is reviewer-judged, persists, and consumes no rounds.
 func TestR1ConfirmationLifecycle(t *testing.T) {
-	s, _, _ := newSession(t, []adapter.FakeResult{changesRequested("f1", "f2")})
+	confResult := func(pairs map[string]string) adapter.FakeResult {
+		var arr []any
+		for id, status := range pairs {
+			arr = append(arr, map[string]any{"id": id, "status": status})
+		}
+		return adapter.FakeResult{Structured: map[string]any{"results": arr}}
+	}
+	s, fake, _ := newSession(t, []adapter.FakeResult{
+		changesRequested("f1", "f2"),
+		confResult(map[string]string{"R0-F1": "confirmed", "R0-F2": "not-confirmed"}),
+		{Structured: map[string]any{"results": []any{map[string]any{"id": "BOGUS", "status": "confirmed"}}}},
+		confResult(map[string]string{"R0-F2": "confirmed"}),
+	})
 	st, _, err := s.Review(context.Background(), "x", adapter.Request{})
 	if err != nil {
 		t.Fatal(err)
@@ -371,26 +383,52 @@ func TestR1ConfirmationLifecycle(t *testing.T) {
 	if _, err := OpenConfirmation(s.Canonical, 0, []string{"R0-F1"}); err == nil {
 		t.Fatal("second cycle per round must be refused")
 	}
-	// precondition failure: wrong expected target revision
-	st2, done, err := SubmitConfirmation(s.Canonical, 0, "wrong-rev", []string{"R0-F1"}, nil)
+	// precondition failure BEFORE dispatch: wrong expected target revision —
+	// the fake script must not be consumed.
+	dispatchedBefore := fake.Dispatched
+	st2, done, err := s.ConfirmWithReviewer(context.Background(), 0, "wrong-rev", []string{"R0-F1"}, "d", adapter.Request{})
 	if err != nil || done {
 		t.Fatalf("precondition failure path: %v", err)
+	}
+	if fake.Dispatched != dispatchedBefore {
+		t.Fatal("precondition failure must not dispatch the reviewer")
 	}
 	if st2.Confirmations[0].PreconditionFailures != 1 || st2.Confirmations[0].ValidAttempts != 0 {
 		t.Fatalf("precondition failure must not consume valid attempts: %+v", st2.Confirmations[0])
 	}
-	// valid attempts
 	st3, _ := LoadState(s.Canonical)
 	rev := st3.TargetRevision
-	if _, done, err = SubmitConfirmation(s.Canonical, 0, rev, []string{"R0-F1", "R0-F2"}, []string{"R0-F1"}); err != nil || done {
+	// valid attempt 1: reviewer confirms F1 only
+	if _, done, err = s.ConfirmWithReviewer(context.Background(), 0, rev, []string{"R0-F1", "R0-F2"}, "fixed both", adapter.Request{}); err != nil || done {
 		t.Fatal(err)
 	}
-	if _, done, err = SubmitConfirmation(s.Canonical, 0, rev, []string{"R0-F2"}, []string{"R0-F2"}); err != nil || !done {
-		t.Fatalf("full confirmation must complete: %v", err)
+	// invalid reviewer output (unsubmitted ID): validation failure, no valid attempt
+	if _, done, err = s.ConfirmWithReviewer(context.Background(), 0, rev, []string{"R0-F2"}, "d", adapter.Request{}); err != nil || done {
+		t.Fatalf("invalid output path must not error out: %v", err)
 	}
 	st4, _ := LoadState(s.Canonical)
-	if len(st4.Rounds) != roundsBefore {
+	if st4.Confirmations[0].ValidAttempts != 1 {
+		t.Fatalf("invalid reviewer output must not consume a valid attempt: %+v", st4.Confirmations[0])
+	}
+	// valid attempt 2 completes the cycle
+	if _, done, err = s.ConfirmWithReviewer(context.Background(), 0, rev, []string{"R0-F2"}, "fixed f2", adapter.Request{}); err != nil || !done {
+		t.Fatalf("full confirmation must complete: %v", err)
+	}
+	st5, _ := LoadState(s.Canonical)
+	if len(st5.Rounds) != roundsBefore {
 		t.Fatal("confirmation must not consume formal rounds")
+	}
+}
+
+// CP: unterminated block fails closed instead of resurrecting older state.
+func TestCPUnterminatedBlockFailsClosed(t *testing.T) {
+	s, _, _ := newSession(t, nil)
+	f, _ := os.OpenFile(s.Canonical, os.O_APPEND|os.O_WRONLY, 0o600)
+	f.WriteString("- broken_block: encoding=utf-8 sha256=" + strings.Repeat("a", 64) + " bytes=1\n~~~~\nnever closed")
+	f.Close()
+	if _, err := LoadState(s.Canonical); err == nil ||
+		!strings.Contains(err.Error(), "unterminated") {
+		t.Fatalf("unterminated block must fail closed: %v", err)
 	}
 }
 
@@ -417,10 +455,28 @@ func TestR1AppendConflictRecovery(t *testing.T) {
 		!strings.Contains(err.Error(), "reconcile") {
 		t.Fatalf("pending recovery must block dispatch: %v", err)
 	}
+	// lineage: foreign recovery (tampered objective) must be refused
+	rb, _ := os.ReadFile(recs[0])
+	tampered := strings.Replace(string(rb), `"objective_id":"obj-`, `"objective_id":"obj-ffff`, 1)
+	foreign := recs[0] + "-foreign"
+	os.WriteFile(foreign, []byte(tampered), 0o600)
+	if _, err := Reconcile(s.Canonical, foreign); err == nil ||
+		!strings.Contains(err.Error(), "fail-closed") {
+		t.Fatalf("foreign recovery must be refused: %v", err)
+	}
+	os.Remove(foreign)
 	st, err := Reconcile(s.Canonical, recs[0])
 	if err != nil {
 		t.Fatal(err)
 	}
+	// replay: re-writing the same transaction must be refused by seq lineage
+	replay := s.Canonical + ".recovery-replay"
+	os.WriteFile(replay, rb, 0o600)
+	if _, err := Reconcile(s.Canonical, replay); err == nil ||
+		!strings.Contains(err.Error(), "seq") {
+		t.Fatalf("replayed recovery must be refused: %v", err)
+	}
+	os.Remove(replay)
 	if len(st.Rounds) != 1 || st.Rounds[0].Outcome != "result-valid" {
 		t.Fatalf("reconciled round missing: %+v", st.Rounds)
 	}

@@ -166,9 +166,13 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 		canonical := fs.String("canonical", "", "canonical record path")
 		round := fs.Int("round", -1, "formal round index (R0=0)")
 		open := fs.String("open", "", "comma-separated closed finding IDs to open a cycle")
-		submit := fs.String("submit", "", "comma-separated IDs for a valid attempt")
-		confirmed := fs.String("confirmed", "", "comma-separated confirmed IDs (subset of -submit)")
+		submit := fs.String("submit", "", "comma-separated IDs to submit to the reviewer")
+		delta := fs.String("delta", "", "claimed delta description")
 		expected := fs.String("expected-target-rev", "", "exact target revision (precondition)")
+		reviewer := fs.String("reviewer", "", "claude|codex (confirmation is reviewer-judged)")
+		model := fs.String("model", "", "explicit model")
+		effort := fs.String("effort", "", "explicit effort")
+		handles := fs.String("handles", defaultHandles(), "session handle store path")
 		fs.Parse(args)
 		split := func(v string) []string {
 			if strings.TrimSpace(v) == "" {
@@ -189,7 +193,16 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 			fmt.Printf("confirmation cycle open R%d: %s\n", *round, *open)
 			_ = st
 		case *submit != "":
-			st, done, err := relay.SubmitConfirmation(*canonical, *round, *expected, split(*submit), split(*confirmed))
+			if *reviewer == "" {
+				fail(fmt.Errorf("confirm -submit requires -reviewer: confirmation is judged by the reviewer, not entered manually"))
+			}
+			a, err := adapterFor(*reviewer)
+			if err != nil {
+				fail(err)
+			}
+			cSess := &relay.Session{Adapter: a, Handles: &adapter.HandleStore{Path: *handles}, Canonical: *canonical}
+			st, done, err := cSess.ConfirmWithReviewer(context.Background(), *round, *expected, split(*submit), *delta,
+				adapter.Request{Model: *model, Effort: *effort})
 			if err != nil {
 				fail(err)
 			}

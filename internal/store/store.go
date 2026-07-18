@@ -92,7 +92,9 @@ var fenceLine = regexp.MustCompile(`^~{4,}$`)
 // ListBlocks walks the document fence-aware: content inside a block's fence
 // (including raw reviewer output) is never scanned for headers, so forged
 // headers inside raw evidence cannot shadow relay-managed blocks (R1-CX-F2).
-func ListBlocks(doc string) []Block {
+// An unterminated block is a document integrity failure and fails closed —
+// it never silently truncates the scan (CP finding).
+func ListBlocks(doc string) ([]Block, error) {
 	lines := strings.Split(doc, "\n")
 	var out []Block
 	for i := 0; i < len(lines); i++ {
@@ -115,20 +117,24 @@ func ListBlocks(doc string) []Block {
 			body = append(body, lines[j])
 		}
 		if !closed {
-			break // unterminated block: stop scanning, fail closed downstream
+			return nil, fmt.Errorf("block %q unterminated at line %d: canonical integrity failure, fail-closed", m[1], i+1)
 		}
 		out = append(out, Block{Label: m[1], Encoding: m[2], Claimed: m[3], Body: strings.Join(body, "\n")})
-		i = j // skip past the fenced body entirely
+		i = j
 	}
-	return out
+	return out, nil
 }
 
 // ExtractBlock re-reads a stored block and returns the original bytes after
 // verifying the recomputed digest against the recorded one. Lookup is
 // fence-aware; duplicate labels outside fences fail closed as ambiguous.
 func ExtractBlock(stored, label string) ([]byte, error) {
+	blocks, err := ListBlocks(stored)
+	if err != nil {
+		return nil, err
+	}
 	var found []Block
-	for _, b := range ListBlocks(stored) {
+	for _, b := range blocks {
 		if b.Label == label {
 			found = append(found, b)
 		}

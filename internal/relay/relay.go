@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -135,8 +136,12 @@ func LoadState(canonical string) (*State, error) {
 	if doc == "" {
 		return nil, nil
 	}
+	blocks, err := store.ListBlocks(doc)
+	if err != nil {
+		return nil, err
+	}
 	maxSeq, found := -1, false
-	for _, b := range store.ListBlocks(doc) {
+	for _, b := range blocks {
 		if !strings.HasPrefix(b.Label, statePrefix) {
 			continue
 		}
@@ -176,13 +181,21 @@ func validateState(st *State, labelSeq int) error {
 			return fmt.Errorf("round index %d at position %d breaks continuity: fail-closed", r.Index, i)
 		}
 	}
+	if !hex64.MatchString(st.TargetRevision) {
+		return fmt.Errorf("target revision %q is not a sha256 hex digest: fail-closed", st.TargetRevision)
+	}
 	for _, c := range st.Confirmations {
 		if c.RoundIndex < 0 || c.RoundIndex >= len(st.Rounds) {
 			return fmt.Errorf("confirmation for unknown round %d: fail-closed", c.RoundIndex)
 		}
+		if _, err := kernel.RehydrateConfirmation(c.Initial, c.Outstanding, c.ValidAttempts, c.PreconditionFailures, c.Escalated); err != nil {
+			return fmt.Errorf("confirmation R%d invalid: %w", c.RoundIndex, err)
+		}
 	}
 	return nil
 }
+
+var hex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func stateSection(st *State) (string, error) {
 	st.Seq++
@@ -483,7 +496,7 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	if _, err := store.AppendAtomic(s.Canonical, section, snapshot); err != nil {
 		// R1-CX-F5: never lose the raw or the dispatch fact — persist an
 		// owner-only recovery transaction and block further dispatches.
-		rpath, rerr := writeRecovery(s.Canonical, section)
+		rpath, rerr := writeRecovery(s.Canonical, section, st, snapshot)
 		if rerr != nil {
 			return nil, "", fmt.Errorf("append conflict AND recovery write failed: %v / %v", err, rerr)
 		}
@@ -492,17 +505,32 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	return st, outcome, nil
 }
 
+// recoveryPayload binds a recovery transaction to its canonical lineage
+// (R1-CX-F5 CP): objective, collaboration, expected state sequence, the
+// pre-dispatch snapshots, and the unappended section.
+type recoveryPayload struct {
+	Note            string `json:"note"`
+	CollaborationID string `json:"collaboration_id"`
+	ObjectiveID     string `json:"objective_id"`
+	Seq             int    `json:"seq"` // seq of the state embedded in Section (current+1 at reconcile time)
+	PreSnapshot     string `json:"pre_snapshot"`
+	TargetRevision  string `json:"target_revision"`
+	Section         string `json:"section"`
+}
+
 // writeRecovery persists the unappended section as an owner-only recovery
 // transaction (noncanonical, non-resumable).
-func writeRecovery(canonical, section string) (string, error) {
+func writeRecovery(canonical, section string, st *State, preSnapshot string) (string, error) {
 	suffix := make([]byte, 4)
 	if _, err := rand.Read(suffix); err != nil {
 		return "", err
 	}
 	path := fmt.Sprintf("%s.recovery-%d-%s", canonical, os.Getpid(), hex.EncodeToString(suffix))
-	payload, err := json.Marshal(map[string]string{
-		"note":    "noncanonical recovery transaction — reconcile appends it to the canonical; it cannot be used for session resume or revision comparison",
-		"section": base64.StdEncoding.EncodeToString([]byte(section)),
+	payload, err := json.Marshal(recoveryPayload{
+		Note:            "noncanonical recovery transaction — reconcile appends it to the canonical; it cannot be used for session resume or revision comparison",
+		CollaborationID: st.CollaborationID, ObjectiveID: st.ObjectiveID, Seq: st.Seq,
+		PreSnapshot: preSnapshot, TargetRevision: st.TargetRevision,
+		Section: base64.StdEncoding.EncodeToString([]byte(section)),
 	})
 	if err != nil {
 		return "", err
@@ -519,21 +547,38 @@ func writeRecovery(canonical, section string) (string, error) {
 }
 
 // Reconcile appends a pending recovery transaction to the canonical under a
-// fresh snapshot and removes the transaction file.
+// fresh snapshot after verifying lineage: same collaboration/objective and
+// the exact next state sequence. Foreign or replayed transactions fail
+// closed (R1-CX-F5 CP).
 func Reconcile(canonical, recoveryPath string) (*State, error) {
 	b, err := os.ReadFile(recoveryPath)
 	if err != nil {
 		return nil, err
 	}
-	var payload struct {
-		Section string `json:"section"`
-	}
+	var payload recoveryPayload
 	if err := json.Unmarshal(b, &payload); err != nil {
 		return nil, fmt.Errorf("recovery transaction corrupt: fail-closed: %w", err)
 	}
 	section, err := base64.StdEncoding.DecodeString(payload.Section)
 	if err != nil {
 		return nil, fmt.Errorf("recovery transaction corrupt: fail-closed: %w", err)
+	}
+	cur, err := LoadState(canonical)
+	if err != nil {
+		return nil, err
+	}
+	if cur == nil {
+		return nil, fmt.Errorf("reconcile refused: canonical has no state")
+	}
+	if payload.CollaborationID != cur.CollaborationID || payload.ObjectiveID != cur.ObjectiveID {
+		return nil, fmt.Errorf("reconcile refused: recovery belongs to objective %s/%s, canonical tracks %s/%s: fail-closed",
+			payload.CollaborationID, payload.ObjectiveID, cur.CollaborationID, cur.ObjectiveID)
+	}
+	if payload.Seq != cur.Seq+1 {
+		return nil, fmt.Errorf("reconcile refused: recovery state seq %d does not follow current seq %d (replay or stale transaction): fail-closed", payload.Seq, cur.Seq)
+	}
+	if payload.TargetRevision != cur.TargetRevision {
+		return nil, fmt.Errorf("reconcile refused: recovery target revision differs from canonical state: fail-closed")
 	}
 	rev, err := store.Revision(canonical)
 	if err != nil {
@@ -576,11 +621,67 @@ func OpenConfirmation(canonical string, roundIndex int, ids []string) (*State, e
 	return st, appendState(canonical, st, fmt.Sprintf("\n## confirmation open R%d\n- ids: %s\n", roundIndex, strings.Join(ids, ", ")))
 }
 
-// SubmitConfirmation applies one confirmation attempt. The precondition is
-// the exact target revision (CP contract): a mismatch records a
-// precondition failure and consumes no valid attempt.
-func SubmitConfirmation(canonical string, roundIndex int, expectedTargetRev string, ids, confirmed []string) (*State, bool, error) {
-	st, err := LoadState(canonical)
+// ConfirmSchema restricts confirmation output to per-ID statuses — no
+// verdicts, no new findings (CP contract, R1-CX-F4).
+const ConfirmSchema = `{"type":"object","properties":{"results":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"status":{"type":"string","enum":["confirmed","not-confirmed"]}},"required":["id","status"],"additionalProperties":false}}},"required":["results"],"additionalProperties":false}`
+
+// parseConfirmResults validates reviewer confirmation output: every
+// submitted ID exactly once, statuses from the enum, nothing else.
+func parseConfirmResults(structured map[string]any, submitted []string) (confirmed []string, errs []string) {
+	want := map[string]bool{}
+	for _, id := range submitted {
+		want[id] = true
+	}
+	for k := range structured {
+		if k != "results" {
+			errs = append(errs, "unknown-property:"+k)
+		}
+	}
+	arr, ok := structured["results"].([]any)
+	if !ok {
+		return nil, append(errs, "results-not-array")
+	}
+	seen := map[string]bool{}
+	for i, e := range arr {
+		m, ok := e.(map[string]any)
+		if !ok {
+			errs = append(errs, fmt.Sprintf("result-%d-not-object", i))
+			continue
+		}
+		id, _ := m["id"].(string)
+		status, _ := m["status"].(string)
+		if !want[id] {
+			errs = append(errs, "unsubmitted-id:"+id)
+			continue
+		}
+		if seen[id] {
+			errs = append(errs, "duplicate-id:"+id)
+			continue
+		}
+		seen[id] = true
+		switch status {
+		case "confirmed":
+			confirmed = append(confirmed, id)
+		case "not-confirmed":
+		default:
+			errs = append(errs, "status-enum:"+status)
+		}
+	}
+	for id := range want {
+		if !seen[id] {
+			errs = append(errs, "missing-id:"+id)
+		}
+	}
+	return confirmed, errs
+}
+
+// ConfirmWithReviewer runs one confirmation attempt by dispatching the
+// reviewer with the confirmation schema (R1-CX-F4 CP): the reviewer — not
+// the operator — decides confirmed/not-confirmed. Precondition failures and
+// invalid reviewer output consume no valid attempt. No formal round is
+// consumed.
+func (s *Session) ConfirmWithReviewer(ctx context.Context, roundIndex int, expectedTargetRev string, ids []string, claimedDelta string, req adapter.Request) (*State, bool, error) {
+	st, err := LoadState(s.Canonical)
 	if err != nil {
 		return nil, false, err
 	}
@@ -600,23 +701,82 @@ func SubmitConfirmation(canonical string, roundIndex int, expectedTargetRev stri
 	if err != nil {
 		return nil, false, err
 	}
+	// precondition BEFORE any dispatch: exact target revision
 	targetNow, _, terr := TargetSnapshot(st.TargetLocation)
 	if terr != nil || expectedTargetRev != st.TargetRevision || targetNow != st.TargetRevision {
 		cyc.RecordPreconditionFailure()
 		cs.PreconditionFailures = cyc.PreconditionFailures
-		return st, false, appendState(canonical, st,
+		return st, false, appendState(s.Canonical, st,
 			fmt.Sprintf("\n## confirmation precondition-failure R%d\n- expected: %s\n- state: %s\n", roundIndex, expectedTargetRev, st.TargetRevision))
 	}
-	if err := cyc.SubmitValidAttempt(ids, confirmed); err != nil {
+	// confirmation must run in the same reviewer session (contract): a
+	// different vendor is only possible through the explicit reset path.
+	if st.SessionRef != "" && st.Vendor == s.Adapter.Vendor() && req.ResumeRef == "" {
+		req.ResumeRef = st.SessionRef
+	} else if st.SessionRef != "" && st.Vendor != s.Adapter.Vendor() {
+		return nil, false, fmt.Errorf("confirmation must use the stored reviewer session (%s): vendor switch is not allowed inside a confirmation cycle", st.Vendor)
+	}
+	req.SchemaJSON = ConfirmSchema
+	req.Prompt = fmt.Sprintf(`Confirmation pass (bounded). You previously reviewed this target and requested changes.
+Claimed delta: %s
+For EACH of these finding IDs, judge only whether the claimed fix is actually reflected: %s
+Output per the schema: results[] with id and status confirmed|not-confirmed. Do not issue a verdict, do not report new findings.`,
+		claimedDelta, strings.Join(ids, ", "))
+
+	if err := s.Adapter.PreDispatch(ctx, req, s.Handles); err != nil {
+		return nil, false, fmt.Errorf("confirmation pre-dispatch failure (nothing consumed): %w", err)
+	}
+	snapshot, err := store.Revision(s.Canonical)
+	if err != nil {
 		return nil, false, err
+	}
+	res, dispatchErr := s.Adapter.Dispatch(ctx, req, s.Handles)
+	if res != nil && !res.Started {
+		return nil, false, fmt.Errorf("confirmation child start failure (nothing consumed): %w", dispatchErr)
+	}
+	label := fmt.Sprintf("conf-r%d-try%d", roundIndex, cyc.ValidAttempts+cyc.PreconditionFailures+1)
+	section := fmt.Sprintf("\n## confirmation attempt R%d\n- submitted: %s\n- claimed_delta: %q\n", roundIndex, strings.Join(ids, ", "), claimedDelta)
+	if res != nil {
+		prov, _ := json.Marshal(res.Provenance)
+		section += fmt.Sprintf("- provenance: %s\n", prov)
+		section += store.EncodeBlock("raw_stdout "+label, res.Stdout)
+		section += store.EncodeBlock("raw_stderr "+label, res.Stderr)
+	}
+	done := false
+	if dispatchErr != nil || res == nil || res.Structured == nil {
+		// failed or schema-less output: a validation failure, not a valid attempt
+		cyc.RecordPreconditionFailure()
+		section += fmt.Sprintf("- result: invalid (dispatch error or missing structured output)\n")
+	} else if confirmed, perrs := parseConfirmResults(res.Structured, ids); len(perrs) > 0 {
+		cyc.RecordPreconditionFailure()
+		section += fmt.Sprintf("- result: invalid (%s) — no valid attempt consumed\n", strings.Join(perrs, "; "))
+	} else {
+		if err := cyc.SubmitValidAttempt(ids, confirmed); err != nil {
+			return nil, false, err
+		}
+		done = cyc.Done()
+		section += fmt.Sprintf("- confirmed: %s\n- outstanding: %s\n- escalated: %v\n",
+			strings.Join(confirmed, ", "), strings.Join(cyc.Outstanding(), ", "), cyc.Escalated)
+	}
+	if res != nil && res.Provenance.SessionRef != "" {
+		st.SessionRef, st.Vendor = res.Provenance.SessionRef, s.Adapter.Vendor()
 	}
 	cs.Outstanding = cyc.Outstanding()
 	cs.ValidAttempts = cyc.ValidAttempts
+	cs.PreconditionFailures = cyc.PreconditionFailures
 	cs.Escalated = cyc.Escalated
-	done := cyc.Done()
-	return st, done, appendState(canonical, st,
-		fmt.Sprintf("\n## confirmation attempt R%d\n- submitted: %s\n- confirmed: %s\n- outstanding: %s\n- escalated: %v\n",
-			roundIndex, strings.Join(ids, ", "), strings.Join(confirmed, ", "), strings.Join(cs.Outstanding, ", "), cs.Escalated))
+	block, err := stateSection(st)
+	if err != nil {
+		return nil, false, err
+	}
+	if _, err := store.AppendAtomic(s.Canonical, section+block, snapshot); err != nil {
+		rpath, rerr := writeRecovery(s.Canonical, section+block, st, snapshot)
+		if rerr != nil {
+			return nil, false, fmt.Errorf("confirmation append conflict AND recovery failed: %v / %v", err, rerr)
+		}
+		return nil, false, fmt.Errorf("confirmation append conflict: %v — preserved in %s; reconcile required", err, rpath)
+	}
+	return st, done, nil
 }
 
 // Disposition records the driver's response to a finding and persists it.
