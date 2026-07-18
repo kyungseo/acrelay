@@ -14,8 +14,27 @@ Toolstead `DR-811` (Agent Collab v1 Feasibility Contract And Session Continuity)
 - `internal/store` — canonical Markdown artifact: pre-dispatch revision
   snapshot, content-derived fence / base64 raw blocks, unique-temp atomic append
 
-## Verify
+- `internal/relay` — one-shot review flow wiring (preflight → snapshot →
+  attempt commit → dispatch → validate → append), state as sequence-numbered
+  blocks inside the canonical document
+- `cmd/acrelay` — CLI: `init` / `review` / `disposition` / `close` /
+  `terminate` / `status`
+
+## Canonical Record Is Private
+
+The canonical Markdown record preserves raw reviewer output including
+provenance. Keep it in private local storage outside any shared, synced, or
+published boundary. There is no share/export path in v1 — copying the raw
+canonical into a shareable artifact requires explicit opt-in per DR-811, and
+a redacted-export tool is a release-gate decision. The session handle store
+(`~/.acrelay/handles.json`) is 0600, single-process-writer, and never leaves
+the machine.
+
+## Install / Verify
 
 ```
-go vet ./... && go test ./...
+go build -o acrelay ./cmd/acrelay   # single binary, no runtime dependencies
+go vet ./... && go test ./...       # deterministic suite (fake adapter)
 ```
+
+Uninstall by deleting the binary and, if desired, `~/.acrelay/`.

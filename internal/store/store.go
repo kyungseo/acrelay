@@ -38,6 +38,19 @@ func Revision(path string) (string, error) {
 	return Digest(b), nil
 }
 
+// ReadAll returns the whole canonical document ("" when the file does not
+// exist yet).
+func ReadAll(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
 // fenceFor computes a tilde fence strictly longer than any tilde run in the
 // content (minimum 4). The closing fence carries fence characters only.
 func fenceFor(text string) string {

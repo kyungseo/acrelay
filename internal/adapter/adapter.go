@@ -142,6 +142,11 @@ type Adapter interface {
 	// any dispatch and before any attempt is committed. Explicit-but-
 	// unsupported inputs fail here — never silently ignored.
 	Preflight(req Request) error
+	// PreDispatch runs every non-consuming check (preflight, CLI version
+	// probe, resume-ref resolution). A failure here must never consume a
+	// round or attempt (R0-CX-F3) — the relay commits the attempt only
+	// after PreDispatch succeeds.
+	PreDispatch(ctx context.Context, req Request, handles *HandleStore) error
 	// Dispatch runs exactly one child invocation. It never retries.
 	Dispatch(ctx context.Context, req Request, handles *HandleStore) (*Result, error)
 }

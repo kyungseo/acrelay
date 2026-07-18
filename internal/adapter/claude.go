@@ -72,6 +72,31 @@ func detectClaudeVersion(ctx context.Context) (string, error) {
 	return firstNonEmptyLineField(banner, 0), nil
 }
 
+// PreDispatch runs preflight, the version gate, and resume-ref resolution
+// without consuming any budget.
+func (a ClaudeAdapter) PreDispatch(ctx context.Context, req Request, handles *HandleStore) error {
+	if err := a.Preflight(req); err != nil {
+		return err
+	}
+	observed, err := detectClaudeVersion(ctx)
+	if err != nil {
+		return err
+	}
+	if err := PreflightVersion(a.Capability(), observed); err != nil {
+		return err
+	}
+	if req.ResumeRef != "" {
+		vendor, _, err := handles.Lookup(req.ResumeRef)
+		if err != nil {
+			return err
+		}
+		if vendor != "claude" {
+			return fmt.Errorf("session_ref %s belongs to %s, not claude: fail-closed", req.ResumeRef, vendor)
+		}
+	}
+	return nil
+}
+
 func (a ClaudeAdapter) Dispatch(ctx context.Context, req Request, handles *HandleStore) (*Result, error) {
 	if err := a.Preflight(req); err != nil {
 		return nil, err
