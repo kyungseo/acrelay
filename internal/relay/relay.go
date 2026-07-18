@@ -184,12 +184,31 @@ func validateState(st *State, labelSeq int) error {
 	if !hex64.MatchString(st.TargetRevision) {
 		return fmt.Errorf("target revision %q is not a sha256 hex digest: fail-closed", st.TargetRevision)
 	}
+	seenConf := map[int]bool{}
 	for _, c := range st.Confirmations {
 		if c.RoundIndex < 0 || c.RoundIndex >= len(st.Rounds) {
 			return fmt.Errorf("confirmation for unknown round %d: fail-closed", c.RoundIndex)
 		}
+		if seenConf[c.RoundIndex] {
+			return fmt.Errorf("duplicate confirmation cycle for round %d: fail-closed", c.RoundIndex)
+		}
+		seenConf[c.RoundIndex] = true
 		if _, err := kernel.RehydrateConfirmation(c.Initial, c.Outstanding, c.ValidAttempts, c.PreconditionFailures, c.Escalated); err != nil {
 			return fmt.Errorf("confirmation R%d invalid: %w", c.RoundIndex, err)
+		}
+		// contradictory combinations fail closed (CP-2 F2)
+		if len(c.Outstanding) == 0 && c.ValidAttempts == 0 {
+			return fmt.Errorf("confirmation R%d complete without any valid attempt: fail-closed", c.RoundIndex)
+		}
+		if c.Escalated {
+			if len(c.Outstanding) == 0 {
+				return fmt.Errorf("confirmation R%d escalated but nothing outstanding: fail-closed", c.RoundIndex)
+			}
+			if c.ValidAttempts != kernel.MaxValidConfirmationRetries {
+				return fmt.Errorf("confirmation R%d escalated at %d valid attempts (contract escalates only at %d): fail-closed", c.RoundIndex, c.ValidAttempts, kernel.MaxValidConfirmationRetries)
+			}
+		} else if c.ValidAttempts >= kernel.MaxValidConfirmationRetries && len(c.Outstanding) > 0 {
+			return fmt.Errorf("confirmation R%d exhausted attempts without escalation flag: fail-closed", c.RoundIndex)
 		}
 	}
 	return nil
@@ -580,11 +599,45 @@ func Reconcile(canonical, recoveryPath string) (*State, error) {
 	if payload.TargetRevision != cur.TargetRevision {
 		return nil, fmt.Errorf("reconcile refused: recovery target revision differs from canonical state: fail-closed")
 	}
+	if !hex64.MatchString(payload.PreSnapshot) {
+		return nil, fmt.Errorf("reconcile refused: recovery pre-snapshot malformed: fail-closed")
+	}
+	// section ↔ lineage metadata 정합 (CP-2 F5): the embedded state block
+	// must exist at exactly payload.Seq and describe the same lineage.
+	secBlocks, err := store.ListBlocks(string(section))
+	if err != nil {
+		return nil, fmt.Errorf("reconcile refused: recovery section integrity: %w", err)
+	}
+	var embedded *State
+	for _, b := range secBlocks {
+		if b.Label == fmt.Sprintf("%s%d", statePrefix, payload.Seq) {
+			raw, xerr := store.ExtractBlock(string(section), b.Label)
+			if xerr != nil {
+				return nil, fmt.Errorf("reconcile refused: embedded state unreadable: %w", xerr)
+			}
+			var es State
+			if xerr := json.Unmarshal(raw, &es); xerr != nil {
+				return nil, fmt.Errorf("reconcile refused: embedded state corrupt: %w", xerr)
+			}
+			embedded = &es
+		}
+	}
+	if embedded == nil {
+		return nil, fmt.Errorf("reconcile refused: recovery section lacks state block seq %d: fail-closed", payload.Seq)
+	}
+	if embedded.ObjectiveID != payload.ObjectiveID || embedded.CollaborationID != payload.CollaborationID ||
+		embedded.TargetRevision != payload.TargetRevision || embedded.Seq != payload.Seq {
+		return nil, fmt.Errorf("reconcile refused: recovery section state does not match lineage metadata: fail-closed")
+	}
 	rev, err := store.Revision(canonical)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := store.AppendAtomic(canonical, string(section), rev); err != nil {
+	// PreSnapshot 비교: divergence 여부를 감사 가능하게 기록한다. 동일하면
+	// canonical이 dispatch 이후 변하지 않았음을 뜻한다.
+	note := fmt.Sprintf("\n## reconcile\n- recovery: %s\n- pre_snapshot: %s\n- current_revision: %s\n- diverged_since_dispatch: %v\n",
+		filepath.Base(recoveryPath), payload.PreSnapshot, rev, rev != payload.PreSnapshot)
+	if _, err := store.AppendAtomic(canonical, note+string(section), rev); err != nil {
 		return nil, err
 	}
 	if err := os.Remove(recoveryPath); err != nil {
@@ -608,6 +661,20 @@ func OpenConfirmation(canonical string, roundIndex int, ids []string) (*State, e
 	for _, c := range st.Confirmations {
 		if c.RoundIndex == roundIndex {
 			return nil, fmt.Errorf("confirmation cycle already exists for round R%d (max 1 per round)", roundIndex)
+		}
+	}
+	// confirmation은 driver가 disposition으로 닫은 finding에 대해서만 연다 (CP-2 F4)
+	byID := map[string]review.Finding{}
+	for _, f := range st.Findings {
+		byID[f.ID] = f
+	}
+	for _, id := range ids {
+		f, ok := byID[strings.TrimSpace(id)]
+		if !ok {
+			return nil, fmt.Errorf("confirmation ID %q is not a known finding: fail-closed", id)
+		}
+		if f.Disposition == "" {
+			return nil, fmt.Errorf("finding %s has no disposition: only closed findings enter a confirmation cycle", id)
 		}
 	}
 	r := &kernel.Round{Index: roundIndex}
@@ -700,6 +767,37 @@ func (s *Session) ConfirmWithReviewer(ctx context.Context, roundIndex int, expec
 	cyc, err := kernel.RehydrateConfirmation(cs.Initial, cs.Outstanding, cs.ValidAttempts, cs.PreconditionFailures, cs.Escalated)
 	if err != nil {
 		return nil, false, err
+	}
+	// packet validation BEFORE any dispatch (CP-2 F4): nonblank delta,
+	// unique/nonblank IDs, submitted ⊆ current outstanding, and every ID a
+	// dispositioned (closed) finding. Invalid packets never reach the reviewer.
+	if strings.TrimSpace(claimedDelta) == "" {
+		return nil, false, fmt.Errorf("confirmation requires a nonblank claimed delta: fail-closed (no dispatch)")
+	}
+	outSet := map[string]bool{}
+	for _, id := range cs.Outstanding {
+		outSet[id] = true
+	}
+	idSeen := map[string]bool{}
+	byID := map[string]review.Finding{}
+	for _, f := range st.Findings {
+		byID[f.ID] = f
+	}
+	if len(ids) == 0 {
+		return nil, false, fmt.Errorf("confirmation submission requires IDs: fail-closed (no dispatch)")
+	}
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" || idSeen[id] {
+			return nil, false, fmt.Errorf("confirmation IDs must be nonblank and unique: fail-closed (no dispatch)")
+		}
+		idSeen[id] = true
+		if !outSet[id] {
+			return nil, false, fmt.Errorf("confirmation ID %q is not outstanding in this cycle: fail-closed (no dispatch)", id)
+		}
+		if f, ok := byID[id]; !ok || f.Disposition == "" {
+			return nil, false, fmt.Errorf("confirmation ID %q is not a dispositioned finding: fail-closed (no dispatch)", id)
+		}
 	}
 	// precondition BEFORE any dispatch: exact target revision
 	targetNow, _, terr := TargetSnapshot(st.TargetLocation)

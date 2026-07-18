@@ -2,6 +2,8 @@ package relay
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -377,6 +379,16 @@ func TestR1ConfirmationLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	roundsBefore := len(st.Rounds)
+	// 미disposition finding으로는 cycle을 열 수 없다 (CP-2 F4)
+	if _, err := OpenConfirmation(s.Canonical, 0, []string{"R0-F1", "R0-F2"}); err == nil {
+		t.Fatal("undispositioned findings must not open a confirmation cycle")
+	}
+	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Disposition(s.Canonical, "R0-F2", review.DispositionAccept, nil); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := OpenConfirmation(s.Canonical, 0, []string{"R0-F1", "R0-F2"}); err != nil {
 		t.Fatal(err)
 	}
@@ -398,6 +410,17 @@ func TestR1ConfirmationLifecycle(t *testing.T) {
 	}
 	st3, _ := LoadState(s.Canonical)
 	rev := st3.TargetRevision
+	// packet validation은 dispatch 전에 실패한다 (CP-2 F4)
+	before := fake.Dispatched
+	if _, _, err := s.ConfirmWithReviewer(context.Background(), 0, rev, []string{"R0-F1"}, "  ", adapter.Request{}); err == nil {
+		t.Fatal("blank claimed delta must fail before dispatch")
+	}
+	if _, _, err := s.ConfirmWithReviewer(context.Background(), 0, rev, []string{"R0-F9"}, "d", adapter.Request{}); err == nil {
+		t.Fatal("non-outstanding ID must fail before dispatch")
+	}
+	if fake.Dispatched != before {
+		t.Fatal("invalid packets must never reach the reviewer")
+	}
 	// valid attempt 1: reviewer confirms F1 only
 	if _, done, err = s.ConfirmWithReviewer(context.Background(), 0, rev, []string{"R0-F1", "R0-F2"}, "fixed both", adapter.Request{}); err != nil || done {
 		t.Fatal(err)
@@ -550,5 +573,96 @@ func TestR1StartFailureAndModelMismatch(t *testing.T) {
 	}
 	if outcome != review.OutcomeNeedsInput {
 		t.Fatalf("model mismatch must classify needs-input: %s", outcome)
+	}
+}
+
+
+// CP-2 F2: contradictory persisted confirmation combinations fail closed.
+func TestCP2StateConfirmationInvariants(t *testing.T) {
+	base := func() *State {
+		return &State{
+			Seq: 1, KernelVersion: KernelVersion, ProfileVersion: ProfileVersion, StoreVersion: StoreVersion,
+			CollaborationID: "c", ObjectiveID: "o", TargetRevision: strings.Repeat("a", 64),
+			Governance: "OPEN",
+			Rounds:     []RoundState{{Index: 0}},
+		}
+	}
+	cases := []struct {
+		name string
+		mut  func(*State)
+	}{
+		{"duplicate-cycle", func(st *State) {
+			st.Confirmations = []ConfState{
+				{RoundIndex: 0, Initial: []string{"F1"}, Outstanding: []string{"F1"}},
+				{RoundIndex: 0, Initial: []string{"F1"}, Outstanding: []string{"F1"}},
+			}
+		}},
+		{"done-without-attempt", func(st *State) {
+			st.Confirmations = []ConfState{{RoundIndex: 0, Initial: []string{"F1"}, Outstanding: nil, ValidAttempts: 0}}
+		}},
+		{"escalated-but-done", func(st *State) {
+			st.Confirmations = []ConfState{{RoundIndex: 0, Initial: []string{"F1"}, Outstanding: nil, ValidAttempts: 3, Escalated: true}}
+		}},
+		{"escalated-early", func(st *State) {
+			st.Confirmations = []ConfState{{RoundIndex: 0, Initial: []string{"F1"}, Outstanding: []string{"F1"}, ValidAttempts: 1, Escalated: true}}
+		}},
+		{"exhausted-without-escalation", func(st *State) {
+			st.Confirmations = []ConfState{{RoundIndex: 0, Initial: []string{"F1"}, Outstanding: []string{"F1"}, ValidAttempts: 3, Escalated: false}}
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			st := base()
+			c.mut(st)
+			if err := validateState(st, st.Seq); err == nil {
+				t.Fatalf("%s must fail closed", c.name)
+			}
+		})
+	}
+	// 정상 조합은 통과
+	ok := base()
+	ok.Confirmations = []ConfState{{RoundIndex: 0, Initial: []string{"F1"}, Outstanding: nil, ValidAttempts: 1}}
+	if err := validateState(ok, ok.Seq); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// CP-2 F5: recovery section must match its lineage metadata.
+func TestCP2ReconcileSectionLineage(t *testing.T) {
+	s, fake, _ := newSession(t, []adapter.FakeResult{approve(), approve()})
+	conflicting := &conflictAdapter{FakeAdapter: fake, canonical: s.Canonical}
+	s.Adapter = conflicting
+	if _, _, err := s.Review(context.Background(), "x", adapter.Request{}); err == nil {
+		t.Fatal("expected append conflict")
+	}
+	recs, _ := filepath.Glob(s.Canonical + ".recovery-*")
+	if len(recs) != 1 {
+		t.Fatal("recovery missing")
+	}
+	// section을 다른 state seq의 것으로 위조 → lineage 불일치로 거부
+	rb, _ := os.ReadFile(recs[0])
+	var payload map[string]any
+	json.Unmarshal(rb, &payload)
+	sec, _ := base64.StdEncoding.DecodeString(payload["section"].(string))
+	forged := strings.Replace(string(sec), "acrelay_state_", "acrelay_state_x", 1) // state block 라벨 훼손
+	payload["section"] = base64.StdEncoding.EncodeToString([]byte(forged))
+	fb, _ := json.Marshal(payload)
+	forgedPath := recs[0] + "-forged"
+	os.WriteFile(forgedPath, fb, 0o600)
+	if _, err := Reconcile(s.Canonical, forgedPath); err == nil {
+		t.Fatal("recovery with mismatched section lineage must be refused")
+	}
+	os.Remove(forgedPath)
+	// 정상 reconcile은 divergence note와 함께 성공
+	st, err := Reconcile(s.Canonical, recs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, _ := os.ReadFile(s.Canonical)
+	if !strings.Contains(string(doc), "diverged_since_dispatch: true") {
+		t.Fatal("reconcile must record pre-snapshot divergence")
+	}
+	if len(st.Rounds) != 1 {
+		t.Fatal("reconciled round missing")
 	}
 }
