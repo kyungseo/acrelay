@@ -105,40 +105,101 @@ func TestE2EChangesRequestedClosureGate(t *testing.T) {
 	}
 }
 
-// R2 bound: a fourth review round is refused.
+// Default bound 3: a fourth review round is refused.
 func TestE2ERoundBound(t *testing.T) {
 	s, _, _ := newSession(t, []adapter.FakeResult{
 		changesRequested("f1"), changesRequested("f2"), changesRequested("f3"),
 	})
-	for i := 0; i < kernel.MaxRoundsPerObjective; i++ {
+	for i := 0; i < kernel.DefaultFormalRoundBound; i++ {
 		if _, _, err := s.Review(context.Background(), "again", adapter.Request{}); err != nil {
 			t.Fatalf("round %d: %v", i, err)
 		}
 	}
+	st, err := LoadState(s.Canonical)
+	if err != nil || st.FormalRoundBound != kernel.DefaultFormalRoundBound {
+		t.Fatalf("omitted first review must persist default bound %d: %+v %v",
+			kernel.DefaultFormalRoundBound, st, err)
+	}
 	if _, _, err := s.Review(context.Background(), "again", adapter.Request{}); err == nil ||
 		!strings.Contains(err.Error(), "owner decision gate") {
-		t.Fatalf("R3 must be refused toward owner gate: %v", err)
+		t.Fatalf("post-final round must be refused toward owner gate: %v", err)
+	}
+}
+
+func TestE2EExplicitFormalRoundBounds(t *testing.T) {
+	for _, bound := range []int{
+		kernel.MinFormalRoundBound,
+		kernel.DefaultFormalRoundBound,
+		kernel.MaxFormalRoundBound,
+	} {
+		t.Run(fmt.Sprintf("bound-%d", bound), func(t *testing.T) {
+			s, fake, _ := newSession(t, []adapter.FakeResult{approve()})
+			s.FormalRoundBound = bound
+			st, _, err := s.Review(context.Background(), "x", adapter.Request{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.FormalRoundBound != bound || len(st.Rounds) != 1 {
+				t.Fatalf("bound not persisted with first round: %+v", st)
+			}
+			prepared, dispatched := fake.Prepared, fake.Dispatched
+			s.FormalRoundBound = bound%kernel.MaxFormalRoundBound + 1
+			if s.FormalRoundBound == bound {
+				s.FormalRoundBound = kernel.MaxFormalRoundBound
+			}
+			if s.FormalRoundBound != bound {
+				if _, _, err := s.Review(context.Background(), "mismatch", adapter.Request{}); err == nil ||
+					!strings.Contains(err.Error(), "immutable") {
+					t.Fatalf("bound mismatch must fail closed: %v", err)
+				}
+				if fake.Prepared != prepared || fake.Dispatched != dispatched {
+					t.Fatal("bound mismatch must fail before adapter preparation")
+				}
+			}
+		})
 	}
 }
 
 // F3 wiring: pre-dispatch failure consumes no round.
 func TestE2EPreDispatchFailureConsumesNothing(t *testing.T) {
 	s, fake, _ := newSession(t, []adapter.FakeResult{approve()})
+	s.FormalRoundBound = kernel.MaxFormalRoundBound
 	fake.PrepareFail = errors.New("cli version drift")
 	if _, _, err := s.Review(context.Background(), "x", adapter.Request{}); err == nil {
 		t.Fatal("pre-dispatch failure must surface")
 	}
 	st, _ := LoadState(s.Canonical)
-	if len(st.Rounds) != 0 {
-		t.Fatal("pre-dispatch failure must not consume a round")
+	if len(st.Rounds) != 0 || st.FormalRoundBound != 0 {
+		t.Fatal("pre-dispatch failure must not bind policy or consume a round")
 	}
 	fake.PrepareFail = nil
+	s.FormalRoundBound = kernel.MinFormalRoundBound
 	if _, _, err := s.Review(context.Background(), "x", adapter.Request{}); err != nil {
 		t.Fatal(err)
 	}
 	st, _ = LoadState(s.Canonical)
-	if len(st.Rounds) != 1 {
-		t.Fatal("recovered dispatch must consume exactly one round")
+	if len(st.Rounds) != 1 || st.FormalRoundBound != kernel.MinFormalRoundBound {
+		t.Fatal("recovered dispatch must bind the newly selected policy and consume exactly one round")
+	}
+}
+
+func TestE2EStaleFirstTargetSnapshotDoesNotBind(t *testing.T) {
+	s, fake, dir := newSession(t, []adapter.FakeResult{approve()})
+	s.FormalRoundBound = kernel.MaxFormalRoundBound
+	if err := os.WriteFile(targetPath(dir), []byte("changed-before-review"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Review(context.Background(), "x", adapter.Request{}); err == nil ||
+		!strings.Contains(err.Error(), "stale") {
+		t.Fatalf("stale first snapshot must fail before binding: %v", err)
+	}
+	st, err := LoadState(s.Canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.FormalRoundBound != 0 || len(st.Rounds) != 0 || fake.Prepared != 1 || fake.Dispatched != 0 {
+		t.Fatalf("stale first snapshot must remain unbound and undispatched: state=%+v prepared=%d dispatched=%d",
+			st, fake.Prepared, fake.Dispatched)
 	}
 }
 
@@ -179,12 +240,20 @@ func TestE2ESessionContinuityAcrossRoundsAndObjectives(t *testing.T) {
 	if stNew.SessionRef != st2.SessionRef {
 		t.Fatal("follow-up objective must carry the reviewer session_ref")
 	}
+	if stNew.FormalRoundBound != 0 {
+		t.Fatalf("follow-up objective must start with an independent unbound policy: %d", stNew.FormalRoundBound)
+	}
+	s.FormalRoundBound = kernel.MaxFormalRoundBound
 	st3, _, err := s.Review(context.Background(), "r0 of obj2", adapter.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if st3.SessionRef != st2.SessionRef {
 		t.Fatal("resumed dispatch must keep the same session_ref")
+	}
+	if st3.FormalRoundBound != kernel.MaxFormalRoundBound {
+		t.Fatalf("follow-up objective must independently select bound %d: %d",
+			kernel.MaxFormalRoundBound, st3.FormalRoundBound)
 	}
 	if fake.Dispatched != 3 {
 		t.Fatalf("expected 3 dispatches, got %d", fake.Dispatched)
@@ -402,6 +471,22 @@ type mutatingAdapter struct {
 	path string
 }
 
+type prepareGateAdapter struct {
+	*adapter.FakeAdapter
+	ready chan<- struct{}
+	gate  <-chan struct{}
+}
+
+func (a *prepareGateAdapter) Prepare(ctx context.Context, req adapter.Request, h *adapter.HandleStore) (adapter.PreparedInvocation, error) {
+	prepared, err := a.FakeAdapter.Prepare(ctx, req, h)
+	if err != nil {
+		return nil, err
+	}
+	a.ready <- struct{}{}
+	<-a.gate
+	return prepared, nil
+}
+
 type beforeDispatchPrepared struct {
 	inner  adapter.PreparedInvocation
 	before func()
@@ -422,6 +507,107 @@ func (m *mutatingAdapter) Prepare(ctx context.Context, req adapter.Request, h *a
 	return &beforeDispatchPrepared{inner: prepared, before: func() {
 		os.WriteFile(m.path, []byte("v2-edited-mid-dispatch"), 0o600)
 	}}, nil
+}
+
+func TestConcurrentFirstReviewBoundBinding(t *testing.T) {
+	tests := []struct {
+		name string
+		a    int
+		b    int
+	}{
+		{name: "conflicting", a: kernel.MinFormalRoundBound, b: kernel.MaxFormalRoundBound},
+		{name: "same-value", a: kernel.MaxFormalRoundBound, b: kernel.MaxFormalRoundBound},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			target := filepath.Join(dir, "target.go")
+			canonical := filepath.Join(dir, "canonical.md")
+			if err := os.WriteFile(target, []byte("package target"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Init(canonical, "q", target, "", "", false); err != nil {
+				t.Fatal(err)
+			}
+			ready := make(chan struct{}, 2)
+			prepareGate := make(chan struct{})
+			dispatchGate := make(chan struct{})
+			enteredA := make(chan struct{})
+			enteredB := make(chan struct{})
+			fakeA := &adapter.FakeAdapter{
+				VendorName: "fake-a", NativeHandle: "native-a", Script: []adapter.FakeResult{approve()},
+				DispatchEntered: enteredA, DispatchGate: dispatchGate,
+			}
+			fakeB := &adapter.FakeAdapter{
+				VendorName: "fake-b", NativeHandle: "native-b", Script: []adapter.FakeResult{approve()},
+				DispatchEntered: enteredB, DispatchGate: dispatchGate,
+			}
+			sA := &Session{
+				Adapter: &prepareGateAdapter{FakeAdapter: fakeA, ready: ready, gate: prepareGate},
+				Handles: &adapter.HandleStore{Path: filepath.Join(dir, "handles-a.json")}, Canonical: canonical,
+				FormalRoundBound: tt.a,
+			}
+			sB := &Session{
+				Adapter: &prepareGateAdapter{FakeAdapter: fakeB, ready: ready, gate: prepareGate},
+				Handles: &adapter.HandleStore{Path: filepath.Join(dir, "handles-b.json")}, Canonical: canonical,
+				FormalRoundBound: tt.b,
+			}
+			type result struct {
+				requested int
+				err       error
+			}
+			results := make(chan result, 2)
+			go func() {
+				_, _, err := sA.Review(context.Background(), "a", adapter.Request{})
+				results <- result{requested: tt.a, err: err}
+			}()
+			go func() {
+				_, _, err := sB.Review(context.Background(), "b", adapter.Request{})
+				results <- result{requested: tt.b, err: err}
+			}()
+			<-ready
+			<-ready
+			close(prepareGate)
+
+			var winnerBound int
+			var winnerSession *Session
+			var winnerFake *adapter.FakeAdapter
+			select {
+			case <-enteredA:
+				winnerBound, winnerSession, winnerFake = tt.a, sA, fakeA
+			case <-enteredB:
+				winnerBound, winnerSession, winnerFake = tt.b, sB, fakeB
+			case <-time.After(2 * time.Second):
+				t.Fatal("neither concurrent review reached dispatch")
+			}
+			loser := <-results // winner remains blocked in Dispatch
+			if loser.err == nil {
+				t.Fatal("losing concurrent review must fail before dispatch")
+			}
+			if loser.requested != winnerBound && !strings.Contains(loser.err.Error(), "immutable") {
+				t.Fatalf("conflicting loser must receive bound mismatch: %v", loser.err)
+			}
+			close(dispatchGate)
+			winner := <-results
+			if winner.err != nil {
+				t.Fatalf("winning review failed: %v", winner.err)
+			}
+			st, err := LoadState(canonical)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.FormalRoundBound != winnerBound || len(st.Rounds) != 1 || fakeA.Dispatched+fakeB.Dispatched != 1 {
+				t.Fatalf("concurrent bind must persist one winner and one child: state=%+v dispatches=%d",
+					st, fakeA.Dispatched+fakeB.Dispatched)
+			}
+			if tt.a == tt.b {
+				winnerFake.Script = append(winnerFake.Script, approve())
+				if _, _, err := winnerSession.Review(context.Background(), "same assertion", adapter.Request{}); err != nil {
+					t.Fatalf("later same explicit value must be accepted: %v", err)
+				}
+			}
+		})
+	}
 }
 
 // R1-CX-F4 (CP): confirmation is reviewer-judged, persists, and consumes no rounds.
@@ -664,8 +850,8 @@ func TestR1StartFailureAndModelMismatch(t *testing.T) {
 		t.Fatal("start failure must not persist a round")
 	}
 	st, _ := LoadState(s.Canonical)
-	if len(st.Rounds) != 0 {
-		t.Fatal("start failure consumed a persisted round")
+	if len(st.Rounds) != 0 || st.FormalRoundBound != kernel.DefaultFormalRoundBound {
+		t.Fatal("start failure must preserve the bound but consume no persisted round")
 	}
 	if pending, _ := pendingTransactions(s.Canonical); len(pending) != 0 {
 		t.Fatalf("explicit start failure must clean the prepared journal: %v", pending)
@@ -673,6 +859,15 @@ func TestR1StartFailureAndModelMismatch(t *testing.T) {
 	if fake.Prepared != 1 || fake.Dispatched != 1 {
 		t.Fatalf("start failure must cross Prepare/Dispatch once: prepared=%d dispatched=%d", fake.Prepared, fake.Dispatched)
 	}
+	s.FormalRoundBound = kernel.MaxFormalRoundBound
+	if _, _, err := s.Review(context.Background(), "mismatch", adapter.Request{}); err == nil ||
+		!strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("post-bind mismatch must fail closed: %v", err)
+	}
+	if fake.Prepared != 1 || fake.Dispatched != 1 {
+		t.Fatal("post-bind mismatch must fail before adapter preparation")
+	}
+	s.FormalRoundBound = 0 // omitted uses the stored default
 	fake.Script[1].ModelMismatch = true
 	_, outcome, err := s.Review(context.Background(), "x", adapter.Request{Model: "haiku"})
 	if err != nil {
@@ -689,7 +884,8 @@ func TestCP2StateConfirmationInvariants(t *testing.T) {
 		txID := "tx-" + strings.Repeat("1", 32)
 		return &State{
 			Seq: 1, KernelVersion: KernelVersion, ProfileVersion: ProfileVersion, StoreVersion: StoreVersion,
-			CollaborationID: "c", ObjectiveID: "o", TargetRevision: strings.Repeat("a", 64),
+			FormalRoundBound: kernel.DefaultFormalRoundBound,
+			CollaborationID:  "c", ObjectiveID: "o", TargetRevision: strings.Repeat("a", 64),
 			Governance:   "OPEN",
 			Rounds:       []RoundState{{Index: 0, TransactionID: txID}},
 			Transactions: []TransactionState{{ID: txID, Kind: "review", RoundIndex: 0, Result: "captured"}},
@@ -732,6 +928,57 @@ func TestCP2StateConfirmationInvariants(t *testing.T) {
 	ok.Confirmations = []ConfState{{RoundIndex: 0, Initial: []string{"F1"}, Outstanding: nil, ValidAttempts: 1}}
 	if err := validateState(ok, ok.Seq); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFormalRoundBoundStateInvariants(t *testing.T) {
+	base := func() *State {
+		return &State{
+			Seq: 1, KernelVersion: KernelVersion, ProfileVersion: ProfileVersion, StoreVersion: StoreVersion,
+			CollaborationID: "c", ObjectiveID: "o", TargetRevision: strings.Repeat("a", 64),
+			Governance: string(kernel.GovOpen), SessionRef: "carried-session", Vendor: "fake",
+		}
+	}
+	if err := validateState(base(), 1); err != nil {
+		t.Fatalf("clean pre-review objective may remain unbound: %v", err)
+	}
+	invalid := base()
+	invalid.FormalRoundBound = kernel.MaxFormalRoundBound + 1
+	if err := validateState(invalid, 1); err == nil {
+		t.Fatal("out-of-range persisted bound must fail closed")
+	}
+	unboundRound := base()
+	unboundRound.Rounds = []RoundState{{Index: 0, TransactionID: "tx-" + strings.Repeat("1", 32)}}
+	if err := validateState(unboundRound, 1); err == nil || !strings.Contains(err.Error(), "unbound") {
+		t.Fatalf("unbound state with a round must fail closed: %v", err)
+	}
+	over := base()
+	over.FormalRoundBound = 1
+	for i := 0; i < 2; i++ {
+		txID := fmt.Sprintf("tx-%032x", i+1)
+		over.Rounds = append(over.Rounds, RoundState{Index: i, TransactionID: txID})
+		over.Transactions = append(over.Transactions, TransactionState{
+			ID: txID, Kind: "review", RoundIndex: i, Result: "captured",
+		})
+	}
+	if err := validateState(over, 1); err == nil || !strings.Contains(err.Error(), "beyond") {
+		t.Fatalf("rounds beyond persisted bound must fail closed: %v", err)
+	}
+}
+
+func TestStatusShowsPendingAndResolvedFormalRoundBound(t *testing.T) {
+	s, _, _ := newSession(t, []adapter.FakeResult{approve()})
+	before, err := Status(s.Canonical)
+	if err != nil || !strings.Contains(before, "rounds: 0/unbound (first review default: 3)") {
+		t.Fatalf("pre-review status must show pending default: %q %v", before, err)
+	}
+	s.FormalRoundBound = kernel.MaxFormalRoundBound
+	if _, _, err := s.Review(context.Background(), "x", adapter.Request{}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := Status(s.Canonical)
+	if err != nil || !strings.Contains(after, "rounds: 1/5") {
+		t.Fatalf("resolved status must show persisted bound: %q %v", after, err)
 	}
 }
 
