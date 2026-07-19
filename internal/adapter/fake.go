@@ -39,7 +39,7 @@ func (f *FakeAdapter) Vendor() string { return f.VendorName }
 
 func (f *FakeAdapter) Capability() Capability {
 	return Capability{
-		Vendor: f.VendorName, CLIVersionChecked: "fake-1",
+		Vendor: f.VendorName, ContractVersion: "fake-v1", KnownGoodCLIVersion: "fake-1",
 		EffortEnum: []string{"low", "high"}, SchemaFlag: "--fake-schema",
 		SupportsResume: true, ModelObservation: ObsAttested,
 		ProgressEvents: false, IdleTimeoutMode: "unsupported",
@@ -129,10 +129,13 @@ func (p *preparedFake) Dispatch(ctx context.Context) (*Result, error) {
 	mm := res.Provenance.ModelMismatch
 	res.Provenance = Provenance{
 		ModelSelection: modelSelection(req.Model), ModelMismatch: mm,
-		RequestedModel: req.Model, ModelState: ObsAttested,
-		RequestedEffort:    req.Effort,
-		ManifestCLIVersion: "fake-1", ObservedCLIVersion: "fake-1",
-		SessionRef: sessionRef, NewSession: newSession,
+		RequestedModel: req.Model, ResolvedModel: req.Model, ModelState: ObsAttested,
+		ModelSource: "fake adapter", RequestedEffort: req.Effort,
+		AdapterContractVersion: "fake-v1", KnownGoodCLIVersion: "fake-1",
+		ObservedCLIVersion: "fake-1", ObservedCLIVersionBanner: "fake-1",
+		CLIVersionSource: "fake adapter", CapabilityProbeState: ProbeObserved,
+		CapabilityProbeDiagnostic: "fake required capabilities observed",
+		SessionRef:                sessionRef, NewSession: newSession,
 	}
 	return res, nil
 }

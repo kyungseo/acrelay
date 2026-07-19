@@ -206,6 +206,23 @@ func TestE2EDispatchFailure(t *testing.T) {
 	}
 }
 
+// PATCH-002: a schema-less adapter result is a transport/output-contract
+// failure, not reviewer needs-input. The relay defends this boundary even if
+// an adapter accidentally returns nil structured output without an error.
+func TestE2EMissingStructuredOutputIsFailed(t *testing.T) {
+	s, _, _ := newSession(t, []adapter.FakeResult{{}})
+	st, outcome, err := s.Review(context.Background(), "x", adapter.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome != review.OutcomeFailed || st.Rounds[0].Attempts[0] != string(kernel.ExecFailed) {
+		t.Fatalf("missing structured output must record FAILED: %s %+v", outcome, st.Rounds[0])
+	}
+	if st.Governance != string(kernel.GovDecisionRequired) {
+		t.Fatal("schema-less execution must remain decision-required")
+	}
+}
+
 // Timeout marks the attempt UNKNOWN; the next review opens a new round but
 // kernel forbids a second attempt in the same round.
 func TestE2ETimeoutUnknown(t *testing.T) {
@@ -488,6 +505,40 @@ func TestR1ConfirmationLifecycle(t *testing.T) {
 	st5, _ := LoadState(s.Canonical)
 	if len(st5.Rounds) != roundsBefore {
 		t.Fatal("confirmation must not consume formal rounds")
+	}
+}
+
+func TestConfirmationMissingStructuredOutputIsTransactionVisibleFailed(t *testing.T) {
+	s, _, _ := newSession(t, []adapter.FakeResult{changesRequested("f1"), {}})
+	if _, _, err := s.Review(context.Background(), "x", adapter.Request{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenConfirmation(s.Canonical, 0, []string{"R0-F1"}); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := LoadState(s.Canonical)
+	st, done, err := s.ConfirmWithReviewer(context.Background(), 0, st.TargetRevision,
+		[]string{"R0-F1"}, "claimed fix", adapter.Request{})
+	if err != nil || done {
+		t.Fatalf("schema-less confirmation should be captured as failed precondition: done=%v err=%v", done, err)
+	}
+	if got := st.Transactions[len(st.Transactions)-1].Result; got != "captured" {
+		t.Fatalf("confirmation transaction result = %q, want captured", got)
+	}
+	canonical, _ := os.ReadFile(s.Canonical)
+	if !strings.Contains(string(canonical), "execution: FAILED") ||
+		!strings.Contains(string(canonical), "no structured output") {
+		t.Fatalf("FAILED confirmation diagnostic missing from canonical:\n%s", canonical)
+	}
+	reloaded, err := LoadState(s.Canonical)
+	if err != nil {
+		t.Fatalf("FAILED confirmation must leave canonical reloadable: %v", err)
+	}
+	if got := reloaded.Transactions[len(reloaded.Transactions)-1].Result; got != "captured" {
+		t.Fatalf("reloaded confirmation transaction result = %q, want captured", got)
 	}
 }
 

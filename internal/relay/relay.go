@@ -636,6 +636,9 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	if res == nil {
 		return nil, "", fmt.Errorf("dispatch returned no start evidence: journal %s remains PREPARED; reconcile as UNKNOWN", journalPath)
 	}
+	if dispatchErr == nil && res.Structured == nil && !res.TimedOut {
+		dispatchErr = fmt.Errorf("adapter returned no structured output: FAILED, no automatic retry")
+	}
 	switch {
 	case res != nil && res.TimedOut:
 		_ = attempt.Transition(kernel.ExecRunning)
@@ -1058,12 +1061,15 @@ Output per the schema: results[] with id and status confirmed|not-confirmed. Do 
 	if res == nil {
 		return nil, false, fmt.Errorf("confirmation dispatch returned no start evidence: journal %s remains PREPARED; reconcile as UNKNOWN", journalPath)
 	}
+	if dispatchErr == nil && res.Structured == nil && !res.TimedOut {
+		dispatchErr = fmt.Errorf("adapter returned no structured output: FAILED, no automatic retry")
+	}
 	label := fmt.Sprintf("conf-r%d-try%d", roundIndex, cyc.ValidAttempts+cyc.PreconditionFailures+1)
 	section := fmt.Sprintf("\n## confirmation attempt R%d\n- transaction_id: %s\n- submitted: %s\n- claimed_delta: %q\n",
 		roundIndex, journal.TransactionID, strings.Join(ids, ", "), claimedDelta)
 	if res != nil {
 		prov, _ := json.Marshal(res.Provenance)
-		section += fmt.Sprintf("- provenance: %s\n", prov)
+		section += fmt.Sprintf("- provenance: %s\n- diagnostic: %q\n", prov, res.Diagnostic)
 		section += store.EncodeBlock("raw_stdout "+label, res.Stdout)
 		section += store.EncodeBlock("raw_stderr "+label, res.Stderr)
 	}
@@ -1076,9 +1082,14 @@ Output per the schema: results[] with id and status confirmed|not-confirmed. Do 
 		txResult, journalPhase = "unknown", journalPhaseUnknown
 		section += "- result: UNKNOWN (hard-cap/external kill) — no automatic retry\n"
 	} else if dispatchErr != nil || res.Structured == nil {
-		// failed or schema-less output: a validation failure, not a valid attempt
+		// Failed or schema-less output is captured durably, but does not consume a
+		// valid confirmation attempt. The execution marker below carries FAILED.
 		cyc.RecordPreconditionFailure()
+		section += "- execution: FAILED — no automatic retry\n"
 		section += fmt.Sprintf("- result: invalid (dispatch error or missing structured output)\n")
+		if dispatchErr != nil {
+			section += fmt.Sprintf("- dispatch_error: %q\n", dispatchErr.Error())
+		}
 	} else if confirmed, perrs := parseConfirmResults(res.Structured, ids); len(perrs) > 0 {
 		cyc.RecordPreconditionFailure()
 		section += fmt.Sprintf("- result: invalid (%s) — no valid attempt consumed\n", strings.Join(perrs, "; "))
