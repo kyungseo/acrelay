@@ -28,6 +28,8 @@ func TestDR813CrashHelper(t *testing.T) {
 		Canonical: canonical,
 	}
 	switch mode {
+	case "bound-only":
+		afterFormalRoundBoundAppend = func() { os.Exit(90) }
 	case "prepared":
 		createPreparedJournalForTest(t, s, "review", 0)
 		os.Exit(91)
@@ -42,6 +44,53 @@ func TestDR813CrashHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Fatal("crash hook did not terminate the helper process")
+}
+
+func TestFormalRoundBoundBindOnlyCrash(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+	canonical := filepath.Join(dir, "canonical.md")
+	if err := os.WriteFile(target, []byte("target"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Init(canonical, "q", target, "", "", false); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDR813CrashHelper$")
+	cmd.Env = append(os.Environ(),
+		"ACRELAY_CRASH_MODE=bound-only",
+		"ACRELAY_CRASH_CANONICAL="+canonical,
+		"ACRELAY_CRASH_TARGET="+target,
+	)
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("helper did not crash after bound append: %s", out)
+	}
+	if pending, _ := pendingTransactions(canonical); len(pending) != 0 {
+		t.Fatalf("bind-only crash must precede journal creation: %v", pending)
+	}
+	st, err := LoadState(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.FormalRoundBound != kernel.DefaultFormalRoundBound || len(st.Rounds) != 0 || len(st.Transactions) != 0 {
+		t.Fatalf("bind-only crash must leave a valid immutable policy without execution: %+v", st)
+	}
+	fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "native", Script: []adapter.FakeResult{approve()}}
+	s := &Session{
+		Adapter: fake, Handles: &adapter.HandleStore{Path: filepath.Join(dir, "retry-handles.json")},
+		Canonical: canonical, FormalRoundBound: kernel.MaxFormalRoundBound,
+	}
+	if _, _, err := s.Review(context.Background(), "mismatch", adapter.Request{}); err == nil ||
+		!strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("bind-only mismatch must fail closed: %v", err)
+	}
+	if fake.Prepared != 0 || fake.Dispatched != 0 {
+		t.Fatal("bind-only mismatch must fail before adapter preparation")
+	}
+	s.FormalRoundBound = 0
+	if _, _, err := s.Review(context.Background(), "same by omission", adapter.Request{}); err != nil {
+		t.Fatalf("omitted retry must use the stored bound: %v", err)
+	}
 }
 
 func TestDR813HostProcessCrashWindows(t *testing.T) {
@@ -91,16 +140,27 @@ func TestDR813HostProcessCrashWindows(t *testing.T) {
 
 func createPreparedJournalForTest(t *testing.T, s *Session, kind string, round int) string {
 	t.Helper()
-	st, err := LoadState(s.Canonical)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rev, err := store.Revision(s.Canonical)
-	if err != nil {
-		t.Fatal(err)
-	}
 	var path string
-	err = withCanonicalLock(s.Canonical, func() error {
+	err := withCanonicalLock(s.Canonical, func() error {
+		st, err := LoadState(s.Canonical)
+		if err != nil {
+			return err
+		}
+		rev, err := store.Revision(s.Canonical)
+		if err != nil {
+			return err
+		}
+		if st.FormalRoundBound == 0 {
+			st.FormalRoundBound = kernel.DefaultFormalRoundBound
+			if err := appendState(s.Canonical, st,
+				"\n## test formal round bound\n- value: 3\n", rev); err != nil {
+				return err
+			}
+			rev, err = store.Revision(s.Canonical)
+			if err != nil {
+				return err
+			}
+		}
 		_, p, _, err := createDispatchJournalLocked(s.Canonical, st, kind, round, 0, "fake", rev)
 		path = p
 		return err
@@ -266,11 +326,11 @@ func TestDR813ConfirmationHardCapPersistsUnknownTransaction(t *testing.T) {
 	}
 }
 
-func TestDR813StoreV02FailsExactVersionGate(t *testing.T) {
+func TestStoreV03FailsExactVersionGate(t *testing.T) {
 	dir := t.TempDir()
 	canonical := filepath.Join(dir, "legacy.md")
 	st := &State{
-		KernelVersion: KernelVersion, ProfileVersion: ProfileVersion, StoreVersion: "store-md v0.2",
+		KernelVersion: KernelVersion, ProfileVersion: ProfileVersion, StoreVersion: "store-md v0.3",
 		CollaborationID: "c", ObjectiveID: "o", TargetRevision: strings.Repeat("a", 64),
 		Governance: string(kernel.GovOpen),
 	}
@@ -281,21 +341,21 @@ func TestDR813StoreV02FailsExactVersionGate(t *testing.T) {
 	if err := os.WriteFile(canonical, []byte(block), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadState(canonical); err == nil || !strings.Contains(err.Error(), "store-md v0.3") {
-		t.Fatalf("v0.2 canonical must fail the exact-version gate: %v", err)
+	if _, err := LoadState(canonical); err == nil || !strings.Contains(err.Error(), "store-md v0.4") {
+		t.Fatalf("v0.3 canonical must fail the exact-version gate: %v", err)
 	}
 }
 
-func TestDR813LegacyRecoverySidecarDoesNotGuardV03Canonical(t *testing.T) {
+func TestDR813LegacyRecoverySidecarDoesNotGuardV04Canonical(t *testing.T) {
 	s, _, _ := newSession(t, []adapter.FakeResult{approve()})
 	legacy := s.Canonical + ".recovery-stale"
 	if err := os.WriteFile(legacy, []byte("legacy-v0.2-sidecar"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.Review(context.Background(), "v0.3 review", adapter.Request{}); err != nil {
-		t.Fatalf("legacy sidecar must not guard a v0.3 canonical: %v", err)
+	if _, _, err := s.Review(context.Background(), "v0.4 review", adapter.Request{}); err != nil {
+		t.Fatalf("legacy sidecar must not guard a v0.4 canonical: %v", err)
 	}
 	if _, err := Reconcile(s.Canonical, legacy); err == nil || !strings.Contains(err.Error(), "not bound") {
-		t.Fatalf("legacy sidecar must not be loaded as a v0.3 journal: %v", err)
+		t.Fatalf("legacy sidecar must not be loaded as a v0.4 journal: %v", err)
 	}
 }

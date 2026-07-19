@@ -1,7 +1,8 @@
 // Package relay wires the kernel, review profile, store, and adapters into
 // the one-shot review flow. The DR-813 wiring order is:
-// Prepare → revision snapshots → private dispatch journal → in-memory attempt
-// admission → child start/capture → transaction-tagged append. State lives inside the canonical Markdown as
+// Prepare → revision snapshots → objective-bound append → private dispatch
+// journal → in-memory attempt admission → child start/capture →
+// transaction-tagged append. State lives inside the canonical Markdown as
 // relay-managed, sequence-numbered blocks parsed fence-aware (R1-CX-F2) —
 // the canonical document stays the single writable artifact (DR-811 §2).
 package relay
@@ -30,24 +31,25 @@ const ReviewSchema = `{"type":"object","properties":{"verdict":{"type":"string",
 
 // Format versions (DR-811 §8). Unknown persisted versions fail closed.
 const (
-	KernelVersion  = "kernel v0.1"
+	KernelVersion  = "kernel v0.2"
 	ProfileVersion = "review-profile v0.1"
-	// store-md v0.3 binds every reviewer dispatch to a durable transaction
-	// identity. The exact-version gate deliberately rejects v0.2 canonicals;
+	// store-md v0.4 adds the immutable objective-level formal round bound.
+	// The exact-version gate deliberately rejects v0.3 canonicals;
 	// private-alpha callers re-init instead of mixing old/new invariants.
-	StoreVersion = "store-md v0.3"
+	StoreVersion = "store-md v0.4"
 )
 
 // State is the machine-readable snapshot appended after every mutation.
 // The highest sequence number wins; history stays in the document.
 type State struct {
-	Seq             int    `json:"seq"`
-	KernelVersion   string `json:"kernel_version"`
-	ProfileVersion  string `json:"profile_version"`
-	StoreVersion    string `json:"store_version"`
-	CollaborationID string `json:"collaboration_id"`
-	ObjectiveID     string `json:"objective_id"`
-	Question        string `json:"question"`
+	Seq              int    `json:"seq"`
+	KernelVersion    string `json:"kernel_version"`
+	ProfileVersion   string `json:"profile_version"`
+	StoreVersion     string `json:"store_version"`
+	FormalRoundBound int    `json:"formal_round_bound"`
+	CollaborationID  string `json:"collaboration_id"`
+	ObjectiveID      string `json:"objective_id"`
+	Question         string `json:"question"`
 	// Target is an evidence pointer: location + raw-byte digest (R1-CX-F3).
 	TargetLocation  string `json:"target_location"`
 	TargetRevision  string `json:"target_revision"`
@@ -137,12 +139,17 @@ var validResetModes = map[string]bool{
 	"second-opinion": true, "context-reset": true, "resume-failure": true, "unrelated": true,
 }
 
+// afterFormalRoundBoundAppend is a deterministic crash-window hook used only
+// by package tests. Production leaves it nil.
+var afterFormalRoundBoundAppend func()
+
 // Session binds one adapter+handle store to one canonical document.
 type Session struct {
-	Adapter   adapter.Adapter
-	Handles   *adapter.HandleStore
-	Canonical string
-	Reset     *SessionReset // required to switch vendor/session
+	Adapter          adapter.Adapter
+	Handles          *adapter.HandleStore
+	Canonical        string
+	FormalRoundBound int           // zero means omitted; first review resolves the default
+	Reset            *SessionReset // required to switch vendor/session
 	// Reporter, if set, receives observable reviewer progress states —
 	// started, running, completed, failed, unknown — each carrying the
 	// reviewer identity, so the user can follow the leg on any exit path
@@ -154,6 +161,25 @@ func (s *Session) report(state, detail string) {
 	if s.Reporter != nil {
 		s.Reporter(state, detail)
 	}
+}
+
+func resolveFormalRoundBound(stored, requested int) (int, error) {
+	if requested != 0 {
+		if err := kernel.ValidateFormalRoundBound(requested); err != nil {
+			return 0, err
+		}
+	}
+	if stored == 0 {
+		if requested == 0 {
+			return kernel.DefaultFormalRoundBound, nil
+		}
+		return requested, nil
+	}
+	if requested != 0 && requested != stored {
+		return 0, fmt.Errorf("formal round bound immutable: stored %d, requested %d: fail-closed",
+			stored, requested)
+	}
+	return stored, nil
 }
 
 // TargetSnapshot computes the evidence-pointer digest of the target's raw
@@ -227,6 +253,20 @@ func validateState(st *State, labelSeq int) error {
 	if st.KernelVersion != KernelVersion || st.ProfileVersion != ProfileVersion || st.StoreVersion != StoreVersion {
 		return fmt.Errorf("state format versions %q/%q/%q not supported (want %q/%q/%q): fail-closed",
 			st.KernelVersion, st.ProfileVersion, st.StoreVersion, KernelVersion, ProfileVersion, StoreVersion)
+	}
+	if st.FormalRoundBound == 0 {
+		if len(st.Rounds) != 0 || len(st.Confirmations) != 0 || len(st.Transactions) != 0 ||
+			len(st.Findings) != 0 || len(st.Advances) != 0 || len(st.SessionChanges) != 0 {
+			return fmt.Errorf("unbound objective carries review-derived state: fail-closed")
+		}
+	} else {
+		if err := kernel.ValidateFormalRoundBound(st.FormalRoundBound); err != nil {
+			return err
+		}
+		if len(st.Rounds) > st.FormalRoundBound {
+			return fmt.Errorf("objective has %d rounds beyond formal round bound %d: fail-closed",
+				len(st.Rounds), st.FormalRoundBound)
+		}
 	}
 	for i, r := range st.Rounds {
 		if r.Index != i {
@@ -338,6 +378,11 @@ func stateSection(st *State) (string, error) {
 func rehydrate(st *State) (*kernel.Objective, error) {
 	o := kernel.NewObjective(st.ObjectiveID, st.CollaborationID, st.Question, st.TargetRevision)
 	o.PriorObjective, o.MaterialDifference = st.PriorObjective, st.MaterialDiff
+	if st.FormalRoundBound != 0 {
+		if err := o.BindFormalRoundBound(st.FormalRoundBound); err != nil {
+			return nil, fmt.Errorf("rehydrate formal round bound: %w", err)
+		}
+	}
 	for _, rs := range st.Rounds {
 		r, err := o.OpenRound()
 		if err != nil {
@@ -524,13 +569,28 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	if tx := unknownTransaction(st); tx != "" {
 		return nil, "", fmt.Errorf("transaction %s ended UNKNOWN: re-dispatch forbidden until an owner resolves it — no automatic retry", tx)
 	}
-	o, err := rehydrate(st)
+	resolvedBound, err := resolveFormalRoundBound(st.FormalRoundBound, s.FormalRoundBound)
 	if err != nil {
+		return nil, "", err
+	}
+	// Validate governance, immutability, and the post-final-round gate before
+	// paying adapter preflight cost. This provisional in-memory admission does
+	// not bind or consume anything; the lock-held fresh state remains
+	// authoritative.
+	admissionObjective, err := rehydrate(st)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := admissionObjective.BindFormalRoundBound(resolvedBound); err != nil {
+		return nil, "", err
+	}
+	if _, err := admissionObjective.OpenRound(); err != nil {
 		return nil, "", err
 	}
 	// Session continuity (R1-CX-F6): an existing session binds the vendor.
 	// Switching requires an explicit reset with mode+reason — never silent.
 	sessionChanged := false
+	var sessionChange *SessionChange
 	if st.SessionRef != "" && s.Reset == nil {
 		switch {
 		case st.Vendor == s.Adapter.Vendor():
@@ -547,24 +607,18 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 		if !validResetModes[s.Reset.Mode] || strings.TrimSpace(s.Reset.Reason) == "" {
 			return nil, "", fmt.Errorf("session reset requires a valid mode (second-opinion|context-reset|resume-failure|unrelated) and a reason")
 		}
-		st.SessionChanges = append(st.SessionChanges, SessionChange{
+		sessionChange = &SessionChange{
 			FromRef: st.SessionRef, ToVendor: s.Adapter.Vendor(), Mode: s.Reset.Mode, Reason: s.Reset.Reason,
-		})
+		}
 		req.ResumeRef = "" // authorized new session; round counters are untouched
 		sessionChanged = true
 	}
 	req.Prompt = prompt
 	req.SchemaJSON = ReviewSchema
 
-	round, err := o.OpenRound()
-	if err != nil {
-		return nil, "", err
-	}
-	attempt := round.PrepareAttempt()
 	// 1. non-consuming preparation: ALL fallible pre-start work ends here.
 	prepared, err := s.Adapter.Prepare(ctx, req, s.Handles)
 	if err != nil {
-		_ = attempt.Transition(kernel.ExecFailed)
 		return nil, "", fmt.Errorf("prepare failure (no round/attempt consumed): %w", err)
 	}
 	defer prepared.Close()
@@ -580,9 +634,13 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	if targetNow != st.TargetRevision {
 		return nil, "", fmt.Errorf("target %s changed since objective init (stale): open a follow-up objective with a prior pointer", st.TargetLocation)
 	}
-	// 3. Under the canonical flock, re-check the snapshot/lineage and create
-	// the owner-only journal. Guard check→journal create is one critical
-	// section; the lock is released before reviewer execution.
+	// 3. Under the canonical flock, re-check the snapshot/lineage, bind an
+	// unbound objective to its immutable policy, then create the owner-only
+	// journal from the post-bind revision. Bind→journal admission is one
+	// critical section; the lock is released before reviewer execution.
+	var o *kernel.Objective
+	var round *kernel.Round
+	var attempt *kernel.Attempt
 	var journal *dispatchJournal
 	var journalPath string
 	err = withCanonicalLock(s.Canonical, func() error {
@@ -590,11 +648,23 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 		if err != nil {
 			return err
 		}
-		if current != snapshot {
-			return fmt.Errorf("canonical changed after preparation (expected %s, found %s): fail-closed before dispatch", snapshot[:12], current[:12])
-		}
 		fresh, err := LoadState(s.Canonical)
 		if err != nil {
+			return err
+		}
+		if current != snapshot {
+			// A concurrent first review may have bound the objective while this
+			// invocation was preparing. Surface a conflicting policy as the
+			// authoritative immutability error; same-value races continue to the
+			// generic snapshot/pending-journal guard and never duplicate a child.
+			if fresh != nil && fresh.ObjectiveID == st.ObjectiveID {
+				if _, bindErr := resolveFormalRoundBound(fresh.FormalRoundBound, s.FormalRoundBound); bindErr != nil {
+					return bindErr
+				}
+			}
+			return fmt.Errorf("canonical changed after preparation (expected %s, found %s): fail-closed before dispatch", snapshot[:12], current[:12])
+		}
+		if err := ensureNoPendingLocked(s.Canonical); err != nil {
 			return err
 		}
 		if fresh == nil || fresh.ObjectiveID != st.ObjectiveID || fresh.Seq != st.Seq || fresh.TargetRevision != st.TargetRevision {
@@ -603,12 +673,49 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 		if diskTarget, _, err := TargetSnapshot(st.TargetLocation); err != nil || diskTarget != st.TargetRevision {
 			return fmt.Errorf("target changed after preparation: fail-closed before dispatch")
 		}
+		freshBound, err := resolveFormalRoundBound(fresh.FormalRoundBound, s.FormalRoundBound)
+		if err != nil {
+			return err
+		}
+		o, err = rehydrate(fresh)
+		if err != nil {
+			return err
+		}
+		if err := o.BindFormalRoundBound(freshBound); err != nil {
+			return err
+		}
+		if fresh.FormalRoundBound == 0 {
+			fresh.FormalRoundBound = freshBound
+			if err := appendState(s.Canonical, fresh,
+				fmt.Sprintf("\n## formal round bound\n- value: %d\n- immutable: true\n", freshBound), current); err != nil {
+				return err
+			}
+			if afterFormalRoundBoundAppend != nil {
+				afterFormalRoundBoundAppend()
+			}
+			current, err = store.Revision(s.Canonical)
+			if err != nil {
+				return err
+			}
+			snapshot = current
+		}
+		round, err = o.OpenRound()
+		if err != nil {
+			return err
+		}
+		attempt = round.PrepareAttempt()
 		journal, journalPath, _, err = createDispatchJournalLocked(
-			s.Canonical, st, "review", round.Index, len(round.Attempts), vendor, snapshot)
+			s.Canonical, fresh, "review", round.Index, len(round.Attempts), vendor, snapshot)
+		if err == nil {
+			st = fresh
+		}
 		return err
 	})
 	if err != nil {
 		return nil, "", err
+	}
+	if sessionChange != nil {
+		st.SessionChanges = append(st.SessionChanges, *sessionChange)
 	}
 	// 4. CommitDispatch is in-memory admission only. The persisted budget is
 	// consumed later by the transaction-tagged captured/UNKNOWN append.
@@ -767,7 +874,7 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	return st, outcome, nil
 }
 
-// Reconcile applies or cleans up a DR-813 dispatch journal. store-md v0.3 is a
+// Reconcile applies or cleans up a DR-813 dispatch journal. store-md v0.4 is a
 // hard cutover: legacy .recovery-* sidecars are neither guarded nor loaded.
 func Reconcile(canonical, transactionPath string) (*State, error) {
 	return reconcileDispatchJournal(canonical, transactionPath)
@@ -1440,9 +1547,14 @@ func Status(canonical string) (string, error) {
 		return "no objective", nil
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "objective %s (%s)\ngovernance: %s\nrounds: %d/%d\ntarget: %s sha256=%s\n",
-		st.ObjectiveID, st.Question, st.Governance, len(st.Rounds), kernel.MaxRoundsPerObjective,
-		st.TargetLocation, st.TargetRevision[:12])
+	fmt.Fprintf(&b, "objective %s (%s)\ngovernance: %s\n", st.ObjectiveID, st.Question, st.Governance)
+	if st.FormalRoundBound == 0 {
+		fmt.Fprintf(&b, "rounds: %d/unbound (first review default: %d)\n",
+			len(st.Rounds), kernel.DefaultFormalRoundBound)
+	} else {
+		fmt.Fprintf(&b, "rounds: %d/%d\n", len(st.Rounds), st.FormalRoundBound)
+	}
+	fmt.Fprintf(&b, "target: %s sha256=%s\n", st.TargetLocation, st.TargetRevision[:12])
 	var open []string
 	for _, f := range st.Findings {
 		if f.Blocking && f.Disposition == "" {

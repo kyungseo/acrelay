@@ -9,15 +9,17 @@ Toolstead `DR-811` (Agent Collab v1 Feasibility Contract And Session Continuity)
 ## Layout
 
 - `internal/kernel` — collaboration/objective types, execution·governance dual
-  state machines, R0..R2 round bound, attempt bound, confirmation cycle
+  state machines, objective-level formal round bound, attempt bound,
+  confirmation cycle
 - `internal/review` — review profile: canonical ReviewResult validation,
   dispatch outcome classification, fail-closed closure check
 - `internal/store` — canonical Markdown artifact: pre-dispatch revision
   snapshot, content-derived fence / base64 raw blocks, owner-only atomic replace
 - `internal/relay` — prepared one-shot review flow (`Prepare` → snapshots →
-  private dispatch journal → in-memory attempt admission → child start/capture →
-  transaction-tagged canonical append), state as sequence-numbered blocks inside
-  the canonical document; `store-md v0.3` / `dispatch-journal v0.1`
+  objective-bound append → private dispatch journal → in-memory attempt
+  admission → child start/capture → transaction-tagged canonical append), state
+  as sequence-numbered blocks inside the canonical document; `store-md v0.4` /
+  `dispatch-journal v0.1`
 - `cmd/acrelay` — CLI: `init` / `review` / `confirm` / `disposition` /
   `advance` / `close` / `terminate` / `reconcile` / `abandon-transaction` /
   `status`
@@ -41,8 +43,30 @@ available. A crash with ambiguous execution reconciles to `UNKNOWN` and never
 retries automatically. Corrupt journals are recorded in the canonical before
 being moved to owner-only quarantine.
 
-`store-md v0.3` is an exact-version cutover. Existing v0.2 canonicals are not
+`store-md v0.4` is an exact-version cutover. Existing v0.3 canonicals are not
 silently migrated; re-init or a linked follow-up objective is required.
+
+## Formal Round Bound
+
+Each objective selects a total formal review bound from `1..5` on its first
+successful `review` preflight. Omission resolves to `3`:
+
+```
+acrelay review -canonical review.md -reviewer claude -prompt-file packet.md -round-bound 5
+```
+
+The resolved value is appended to the canonical before the reviewer child is
+started and cannot be changed. Later reviews may omit the flag or assert the
+same value; a different value fails before adapter preparation. A pure
+preflight failure does not bind the objective, while a failure after the
+canonical bind leaves the policy immutable. An explicit child-start failure
+consumes no formal round; ambiguous execution follows the existing durable
+`UNKNOWN` and no-retry contract.
+
+The bound covers the objective's entire review→revise→re-review loop, including
+reviews after `advance`. Bound `1` therefore means one `R0` assessment with no
+re-review round. A related objective keeps the reviewer session but selects a
+new bound independently. Attempt and confirmation limits are unchanged.
 
 ## CLI Compatibility And Provenance
 

@@ -99,14 +99,38 @@ type testError struct{}
 func (*testError) Error() string { return "unresolved blocking finding" }
 
 func TestRoundBound(t *testing.T) {
-	o := NewObjective("obj-1", "c", "q", "rev")
-	for i := 0; i < MaxRoundsPerObjective; i++ {
-		if _, err := o.OpenRound(); err != nil {
-			t.Fatalf("round %d should open: %v", i, err)
+	for _, bound := range []int{MinFormalRoundBound, DefaultFormalRoundBound, MaxFormalRoundBound} {
+		o := NewObjective("obj-1", "c", "q", "rev")
+		if _, err := o.OpenRound(); err == nil {
+			t.Fatalf("bound %d: unbound objective must refuse rounds", bound)
+		}
+		if err := o.BindFormalRoundBound(bound); err != nil {
+			t.Fatalf("bound %d: %v", bound, err)
+		}
+		if err := o.BindFormalRoundBound(bound); err != nil {
+			t.Fatalf("bound %d: same-value assertion must be idempotent: %v", bound, err)
+		}
+		for i := 0; i < bound; i++ {
+			if _, err := o.OpenRound(); err != nil {
+				t.Fatalf("bound %d round %d should open: %v", bound, i, err)
+			}
+		}
+		if _, err := o.OpenRound(); err == nil {
+			t.Fatalf("bound %d: post-final round must be refused", bound)
 		}
 	}
-	if _, err := o.OpenRound(); err == nil {
-		t.Fatal("R3 must be refused — owner decision gate required")
+
+	o := NewObjective("obj-immutable", "c", "q", "rev")
+	if err := o.BindFormalRoundBound(DefaultFormalRoundBound); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.BindFormalRoundBound(MaxFormalRoundBound); err == nil {
+		t.Fatal("mismatched bound must fail closed")
+	}
+	for _, invalid := range []int{0, MaxFormalRoundBound + 1} {
+		if err := NewObjective("obj-invalid", "c", "q", "rev").BindFormalRoundBound(invalid); err == nil {
+			t.Fatalf("invalid bound %d must fail closed", invalid)
+		}
 	}
 }
 

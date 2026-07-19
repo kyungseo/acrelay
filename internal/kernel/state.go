@@ -32,12 +32,24 @@ const (
 	GovAbandoned        GovernanceState = "ABANDONED"
 )
 
-// Bounds fixed by the v1 contract.
+// Bounds fixed by the v1 contract. The formal round bound is selected per
+// objective; attempt and confirmation bounds remain compile-time constants.
 const (
-	MaxRoundsPerObjective       = 3 // R0..R2
+	MinFormalRoundBound         = 1
+	DefaultFormalRoundBound     = 3
+	MaxFormalRoundBound         = 5
 	MaxAttemptsPerRound         = 2
 	MaxValidConfirmationRetries = 3 // valid attempts per confirmation cycle
 )
+
+// ValidateFormalRoundBound rejects values outside the owner-selectable range.
+func ValidateFormalRoundBound(bound int) error {
+	if bound < MinFormalRoundBound || bound > MaxFormalRoundBound {
+		return fmt.Errorf("formal round bound %d outside supported range %d..%d: fail-closed",
+			bound, MinFormalRoundBound, MaxFormalRoundBound)
+	}
+	return nil
+}
 
 var execTransitions = map[ExecutionState][]ExecutionState{
 	ExecPrepared:   {ExecDispatched, ExecFailed}, // pre-dispatch validation failure

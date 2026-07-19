@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/kyungseo/acrelay/internal/adapter"
@@ -41,6 +42,21 @@ func adapterFor(name string) (adapter.Adapter, error) {
 func fail(err error) {
 	fmt.Fprintln(os.Stderr, "error:", err)
 	os.Exit(1)
+}
+
+func parseOptionalFormalRoundBound(raw string) (int, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	bound, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("round-bound must be an integer in %d..%d",
+			kernel.MinFormalRoundBound, kernel.MaxFormalRoundBound)
+	}
+	if err := kernel.ValidateFormalRoundBound(bound); err != nil {
+		return 0, err
+	}
+	return bound, nil
 }
 
 func main() {
@@ -78,6 +94,7 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 		promptFile := fs.String("prompt-file", "", "read prompt from file")
 		model := fs.String("model", "", "explicit model (default: platform default)")
 		effort := fs.String("effort", "", "explicit effort (default: omitted, no flag sent)")
+		roundBound := fs.String("round-bound", "", "objective formal round bound 1..5 (first review default: 3)")
 		handles := fs.String("handles", defaultHandles(), "session handle store path")
 		workdir := fs.String("workdir", "", "reviewer working directory (default: current)")
 		resetMode := fs.String("session-reset", "", "second-opinion|context-reset|resume-failure|unrelated")
@@ -101,7 +118,14 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 		if err != nil {
 			fail(err)
 		}
-		s := &relay.Session{Adapter: a, Handles: &adapter.HandleStore{Path: *handles}, Canonical: *canonical}
+		bound, err := parseOptionalFormalRoundBound(*roundBound)
+		if err != nil {
+			fail(err)
+		}
+		s := &relay.Session{
+			Adapter: a, Handles: &adapter.HandleStore{Path: *handles}, Canonical: *canonical,
+			FormalRoundBound: bound,
+		}
 		if *resetMode != "" || *resetReason != "" {
 			s.Reset = &relay.SessionReset{Mode: *resetMode, Reason: *resetReason}
 		}

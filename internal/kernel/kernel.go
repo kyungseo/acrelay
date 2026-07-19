@@ -32,6 +32,7 @@ type Objective struct {
 	// The relay validates presence only, never meaning.
 	PriorObjective     string
 	MaterialDifference string
+	formalRoundBound   int
 
 	governance GovernanceState
 	terminal   *TerminalReason
@@ -49,6 +50,31 @@ func NewObjective(id, collaborationID, question, targetRevision string) *Objecti
 
 // Governance returns the current governance state.
 func (o *Objective) Governance() GovernanceState { return o.governance }
+
+// FormalRoundBound returns the immutable objective-level bound. Zero means
+// the first review has not completed its non-consuming preflight and binding.
+func (o *Objective) FormalRoundBound() int { return o.formalRoundBound }
+
+// BindFormalRoundBound resolves the objective's round policy exactly once.
+// Repeating the same value is an idempotent assertion; a mismatch fails
+// closed. No objective with an admitted round can be bound retroactively.
+func (o *Objective) BindFormalRoundBound(bound int) error {
+	if err := ValidateFormalRoundBound(bound); err != nil {
+		return err
+	}
+	if o.formalRoundBound != 0 {
+		if o.formalRoundBound != bound {
+			return fmt.Errorf("formal round bound immutable: stored %d, requested %d: fail-closed",
+				o.formalRoundBound, bound)
+		}
+		return nil
+	}
+	if len(o.Rounds) != 0 {
+		return fmt.Errorf("cannot bind formal round bound after rounds exist: fail-closed")
+	}
+	o.formalRoundBound = bound
+	return nil
+}
 
 // Terminal returns the recorded terminal reason, if any.
 func (o *Objective) Terminal() *TerminalReason { return o.terminal }
@@ -102,7 +128,7 @@ func (o *Objective) Terminate(to GovernanceState, reason TerminalReason) error {
 	return nil
 }
 
-// Round is one formal reviewer assessment (R0..R2).
+// Round is one formal reviewer assessment (R0..R{bound-1}).
 type Round struct {
 	Index    int // 0-based
 	Attempts []*Attempt
@@ -133,14 +159,17 @@ var knownNonTerminal = map[GovernanceState]bool{
 	GovOpen: true, GovDecisionRequired: true, GovClosable: true,
 }
 
-// OpenRound starts the next formal round, enforcing the R0..R2 bound.
+// OpenRound starts the next formal round, enforcing the objective-owned bound.
 // Unknown governance states (including the zero value) fail closed.
 func (o *Objective) OpenRound() (*Round, error) {
 	if !knownNonTerminal[o.governance] {
 		return nil, fmt.Errorf("objective %s governance %q does not admit rounds: fail-closed", o.ID, o.governance)
 	}
-	if len(o.Rounds) >= MaxRoundsPerObjective {
-		return nil, fmt.Errorf("round bound exceeded (max R0..R%d): owner decision gate required", MaxRoundsPerObjective-1)
+	if o.formalRoundBound == 0 {
+		return nil, fmt.Errorf("objective %s formal round bound is unbound: fail-closed", o.ID)
+	}
+	if len(o.Rounds) >= o.formalRoundBound {
+		return nil, fmt.Errorf("round bound exceeded (max R0..R%d): owner decision gate required", o.formalRoundBound-1)
 	}
 	r := &Round{Index: len(o.Rounds)}
 	o.Rounds = append(o.Rounds, r)
