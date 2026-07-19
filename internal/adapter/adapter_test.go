@@ -171,17 +171,280 @@ func TestDefaultTimeoutsStructure(t *testing.T) {
 	}
 }
 
-// R0-CX-F6: version gate and mandatory schema.
-func TestPreflightVersionGate(t *testing.T) {
+// PATCH-002: version equality is evidence-only; observability remains the
+// pre-dispatch hard gate.
+func TestPreflightVersionObservability(t *testing.T) {
 	cap := ClaudeAdapter{}.Capability()
 	if err := PreflightVersion(cap, "2.1.215"); err != nil {
 		t.Fatal(err)
 	}
-	if err := PreflightVersion(cap, "9.9.9"); err == nil {
-		t.Fatal("unvalidated CLI version must fail closed")
+	if err := PreflightVersion(cap, "9.9.9"); err != nil {
+		t.Fatalf("changed observable version must not be an admission gate: %v", err)
 	}
 	if err := PreflightVersion(cap, ""); err == nil {
 		t.Fatal("unobservable version must fail closed")
+	}
+}
+
+func TestVersionProbeIgnoresStderrWarnings(t *testing.T) {
+	script := `#!/bin/sh
+echo 'WARNING: local setup warning' >&2
+echo 'codex-cli 0.144.1'
+`
+	_, _ = installAdapterCLI(t, "codex", script)
+	version, banner, err := detectCodexVersion(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != "0.144.1" || banner != "codex-cli 0.144.1" {
+		t.Fatalf("stderr warning polluted observed version: version=%q banner=%q", version, banner)
+	}
+}
+
+func installAdapterCLI(t *testing.T, name, script string) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	cli := filepath.Join(dir, name)
+	if err := os.WriteFile(cli, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "calls.log")
+	t.Setenv("ACRELAY_TEST_LOG", logPath)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return dir, logPath
+}
+
+func TestChangedVersionAndHelpDriftDoNotBlockCompatibleDispatch(t *testing.T) {
+	tests := []struct {
+		name           string
+		script         string
+		adapter        Adapter
+		wantVersion    string
+		wantModel      string
+		wantModelState ObservationState
+	}{
+		{
+			name: "claude",
+			script: `#!/bin/sh
+echo "$@" >> "$ACRELAY_TEST_LOG"
+if [ "$1" = "--version" ]; then echo "9.9.9 (Claude Code)"; exit 0; fi
+if [ "$1" = "--help" ]; then echo "reformatted capability reference"; exit 0; fi
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"session-new","structured_output":{"verdict":"approve","findings":[]},"modelUsage":{"claude-default":{}}}'
+`,
+			adapter: ClaudeAdapter{}, wantVersion: "9.9.9", wantModel: "claude-default",
+			wantModelState: ObsVerified,
+		},
+		{
+			name: "codex",
+			script: `#!/bin/sh
+echo "$@" >> "$ACRELAY_TEST_LOG"
+if [ "$1" = "--version" ]; then echo "codex-cli 9.9.9"; exit 0; fi
+if [ "$1" = "doctor" ]; then
+  echo '{"checks":{"config.load":{"status":"ok","details":{"model":"codex-default","provider":"openai","private_path":"/must/not/persist"}}}}'
+  exit 0
+fi
+if [ "$2" = "--help" ] || [ "$3" = "--help" ]; then echo "reformatted capability reference"; exit 0; fi
+printf '%s\n' '{"type":"thread.started","thread_id":"thread-new"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"verdict\":\"approve\",\"findings\":[]}"}}'
+printf '%s\n' '{"type":"turn.completed"}'
+`,
+			adapter: CodexAdapter{}, wantVersion: "9.9.9", wantModel: "codex-default",
+			wantModelState: ObsAttested,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, logPath := installAdapterCLI(t, tc.name, tc.script)
+			prepared, err := tc.adapter.Prepare(context.Background(), Request{
+				Prompt: "review", SchemaJSON: `{"type":"object"}`, WorkingDir: dir,
+			}, &HandleStore{Path: filepath.Join(dir, "handles.json")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer prepared.Close()
+			res, err := prepared.Dispatch(context.Background())
+			if err != nil {
+				t.Fatalf("compatible actual command must dispatch after advisory help drift: %v", err)
+			}
+			if res.Provenance.ObservedCLIVersion != tc.wantVersion ||
+				res.Provenance.KnownGoodCLIVersion == tc.wantVersion {
+				t.Fatalf("changed version provenance not preserved: %+v", res.Provenance)
+			}
+			if res.Provenance.CapabilityProbeState != ProbeInconclusive {
+				t.Fatalf("reformatted help must be diagnostic-only: %+v", res.Provenance)
+			}
+			if res.Provenance.ResolvedModel != tc.wantModel || res.Provenance.ModelState != tc.wantModelState {
+				t.Fatalf("resolved model provenance mismatch: %+v", res.Provenance)
+			}
+			provJSON, _ := json.Marshal(res.Provenance)
+			if strings.Contains(string(provJSON), "must/not/persist") {
+				t.Fatalf("non-allowlisted doctor field leaked into provenance: %s", provJSON)
+			}
+			calls, _ := os.ReadFile(logPath)
+			for _, line := range strings.Split(string(calls), "\n") {
+				if strings.Contains(line, "--output-schema") || strings.Contains(line, "--json-schema") {
+					if strings.Contains(line, "--model") || strings.Contains(line, " -m ") {
+						t.Fatalf("platform-default dispatch must not send a model override: %q", line)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestCodexDoctorFailureIsUnverifiedAndNonblocking(t *testing.T) {
+	script := `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "codex-cli 7.7.7"; exit 0; fi
+if [ "$1" = "doctor" ]; then echo 'not-json'; exit 1; fi
+if [ "$2" = "--help" ]; then echo '--json --output-schema'; exit 0; fi
+if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
+printf '%s\n' '{"type":"thread.started","thread_id":"thread-doctor-fail"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"verdict\":\"approve\",\"findings\":[]}"}}'
+printf '%s\n' '{"type":"turn.completed"}'
+`
+	dir, _ := installAdapterCLI(t, "codex", script)
+	prepared, err := (CodexAdapter{}).Prepare(context.Background(), Request{
+		Prompt: "review", SchemaJSON: `{"type":"object"}`, WorkingDir: dir,
+	}, &HandleStore{Path: filepath.Join(dir, "handles.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Close()
+	res, err := prepared.Dispatch(context.Background())
+	if err != nil {
+		t.Fatalf("doctor failure must not block dispatch: %v", err)
+	}
+	if res.Provenance.ResolvedModel != "" || res.Provenance.ModelState != ObsUnverified ||
+		res.Provenance.ModelDiagnostic == "" {
+		t.Fatalf("doctor failure must record empty/unverified diagnostic: %+v", res.Provenance)
+	}
+}
+
+func TestCodexDoctorTimeoutIsUnverifiedAndNonblocking(t *testing.T) {
+	script := `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "codex-cli 7.7.8"; exit 0; fi
+if [ "$1" = "doctor" ]; then sleep 2; exit 0; fi
+if [ "$2" = "--help" ]; then echo '--json --output-schema'; exit 0; fi
+if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
+printf '%s\n' '{"type":"thread.started","thread_id":"thread-doctor-timeout"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"verdict\":\"approve\",\"findings\":[]}"}}'
+printf '%s\n' '{"type":"turn.completed"}'
+	`
+	dir, _ := installAdapterCLI(t, "codex", script)
+	previousTimeout := codexModelProbeTimeout
+	codexModelProbeTimeout = 100 * time.Millisecond
+	defer func() { codexModelProbeTimeout = previousTimeout }()
+	prepared, err := (CodexAdapter{}).Prepare(context.Background(), Request{
+		Prompt: "review", SchemaJSON: `{"type":"object"}`, WorkingDir: dir,
+	}, &HandleStore{Path: filepath.Join(dir, "handles.json")})
+	if err != nil {
+		t.Fatalf("doctor timeout must not fail Prepare: %v", err)
+	}
+	defer prepared.Close()
+	res, err := prepared.Dispatch(context.Background())
+	if err != nil {
+		t.Fatalf("doctor timeout must not block dispatch: %v", err)
+	}
+	if res.Provenance.ResolvedModel != "" || res.Provenance.ModelState != ObsUnverified ||
+		!strings.Contains(res.Provenance.ModelDiagnostic, "timed out") {
+		t.Fatalf("doctor timeout must record empty/unverified diagnostic: %+v", res.Provenance)
+	}
+}
+
+func TestAdvisoryProbePassDoesNotMaskActualCommandFailure(t *testing.T) {
+	tests := []struct {
+		name    string
+		script  string
+		adapter Adapter
+	}{
+		{
+			name: "claude",
+			script: `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "9.1.0 (Claude Code)"; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume'; exit 0; fi
+echo 'unknown option --json-schema' >&2
+exit 2
+`,
+			adapter: ClaudeAdapter{},
+		},
+		{
+			name: "codex",
+			script: `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "codex-cli 9.1.0"; exit 0; fi
+if [ "$1" = "doctor" ]; then echo '{}'; exit 0; fi
+if [ "$2" = "--help" ]; then echo '--json --output-schema'; exit 0; fi
+if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
+echo 'unknown option --output-schema' >&2
+exit 2
+`,
+			adapter: CodexAdapter{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, _ := installAdapterCLI(t, tc.name, tc.script)
+			prepared, err := tc.adapter.Prepare(context.Background(), Request{
+				Prompt: "review", SchemaJSON: `{"type":"object"}`, WorkingDir: dir,
+			}, &HandleStore{Path: filepath.Join(dir, "handles.json")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer prepared.Close()
+			res, err := prepared.Dispatch(context.Background())
+			if err == nil || res == nil || !res.Started {
+				t.Fatalf("actual command rejection must fail after child start: result=%+v err=%v", res, err)
+			}
+			if res.Provenance.CapabilityProbeState != ProbeObserved {
+				t.Fatalf("fixture must prove probe-pass/runtime-fail split: %+v", res.Provenance)
+			}
+		})
+	}
+}
+
+func TestMissingOrMalformedStructuredOutputFailsAfterStart(t *testing.T) {
+	tests := []struct {
+		name    string
+		script  string
+		adapter Adapter
+	}{
+		{
+			name: "claude",
+			script: `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "8.8.8 (Claude Code)"; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume'; exit 0; fi
+echo '{"type":"result","subtype":"success","is_error":false,"session_id":"session-no-output","modelUsage":{"claude-default":{}}}'
+`,
+			adapter: ClaudeAdapter{},
+		},
+		{
+			name: "codex",
+			script: `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "codex-cli 8.8.8"; exit 0; fi
+if [ "$1" = "doctor" ]; then echo '{}'; exit 0; fi
+if [ "$2" = "--help" ]; then echo '--json --output-schema'; exit 0; fi
+if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
+printf '%s\n' '{"type":"thread.started","thread_id":"thread-bad-output"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"not-json"}}'
+printf '%s\n' '{"type":"turn.completed"}'
+`,
+			adapter: CodexAdapter{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, _ := installAdapterCLI(t, tc.name, tc.script)
+			prepared, err := tc.adapter.Prepare(context.Background(), Request{
+				Prompt: "review", SchemaJSON: `{"type":"object"}`, WorkingDir: dir,
+			}, &HandleStore{Path: filepath.Join(dir, "handles.json")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer prepared.Close()
+			res, err := prepared.Dispatch(context.Background())
+			if err == nil || res == nil || !res.Started || !strings.Contains(err.Error(), "FAILED") {
+				t.Fatalf("missing/malformed structured output must be post-start FAILED: result=%+v err=%v", res, err)
+			}
+		})
 	}
 }
 

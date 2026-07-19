@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // ClaudeAdapter binds the Claude Code CLI (`claude -p`) in final-envelope
@@ -19,14 +20,15 @@ func (ClaudeAdapter) Vendor() string { return "claude" }
 
 func (ClaudeAdapter) Capability() Capability {
 	return Capability{
-		Vendor:            "claude",
-		CLIVersionChecked: "2.1.215",
-		EffortEnum:        []string{"low", "medium", "high", "xhigh", "max"},
-		SchemaFlag:        "--json-schema",
-		SupportsResume:    true,
-		ModelObservation:  ObsVerified, // resolved model observable via modelUsage
-		ProgressEvents:    true,        // stream-json surface exists; v1 dispatch uses final envelope
-		IdleTimeoutMode:   "unsupported",
+		Vendor:              "claude",
+		ContractVersion:     "claude-final-envelope-v1",
+		KnownGoodCLIVersion: "2.1.215",
+		EffortEnum:          []string{"low", "medium", "high", "xhigh", "max"},
+		SchemaFlag:          "--json-schema",
+		SupportsResume:      true,
+		ModelObservation:    ObsVerified, // resolved model observable via modelUsage
+		ProgressEvents:      true,        // stream-json surface exists; v1 dispatch uses final envelope
+		IdleTimeoutMode:     "unsupported",
 	}
 }
 
@@ -66,21 +68,27 @@ func parseClaudeEnvelope(stdout []byte) (*claudeEnvelope, string, error) {
 	return &env, fmt.Sprintf("non-JSON prefix %d bytes before envelope", i), nil
 }
 
-// detectClaudeVersion parses `claude --version` ("2.1.215 (Claude Code)").
-func detectClaudeVersion(ctx context.Context) (string, error) {
+// detectClaudeVersion parses `claude --version` ("2.1.215 (Claude Code)")
+// while retaining the normalized banner for provenance.
+func detectClaudeVersion(ctx context.Context) (string, string, error) {
 	banner, err := probeVersion(ctx, "claude", "--version")
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return firstNonEmptyLineField(banner, 0), nil
+	return firstNonEmptyLineField(banner, 0), strings.TrimSpace(banner), nil
+}
+
+func probeClaudeCapabilities(ctx context.Context) (string, string) {
+	out, truncated, err := runBoundedProbe(ctx, 15*time.Second, "claude", "--help")
+	return assessHelpProbe(out, truncated, err, "--output-format", "--json-schema", "--resume")
 }
 
 type preparedClaude struct {
-	req             Request
-	handles         *HandleStore
-	args            []string
-	timeouts        Timeouts
-	observedVersion string
+	req        Request
+	handles    *HandleStore
+	args       []string
+	timeouts   Timeouts
+	provenance Provenance
 }
 
 func (p *preparedClaude) Close() error { return nil }
@@ -96,13 +104,14 @@ func (a ClaudeAdapter) Prepare(ctx context.Context, req Request, handles *Handle
 	if err != nil {
 		return nil, err
 	}
-	observed, err := detectClaudeVersion(ctx)
+	observed, banner, err := detectClaudeVersion(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if err := PreflightVersion(a.Capability(), observed); err != nil {
 		return nil, err
 	}
+	probeState, probeDiagnostic := probeClaudeCapabilities(ctx)
 	args := []string{"-p", "--output-format", "json", "--json-schema", req.SchemaJSON}
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
@@ -120,7 +129,11 @@ func (a ClaudeAdapter) Prepare(ctx context.Context, req Request, handles *Handle
 		}
 		args = append(args, "--resume", h)
 	}
-	return &preparedClaude{req: req, handles: handles, args: args, timeouts: timeouts, observedVersion: observed}, nil
+	prov := baseProvenance(a.Capability(), req, observed, banner, "claude --version",
+		probeState, probeDiagnostic)
+	prov.ModelState = ObsUnverified
+	prov.ModelSource = "claude terminal envelope:modelUsage"
+	return &preparedClaude{req: req, handles: handles, args: args, timeouts: timeouts, provenance: prov}, nil
 }
 
 func (p *preparedClaude) Dispatch(ctx context.Context) (*Result, error) {
@@ -134,7 +147,8 @@ func (p *preparedClaude) Dispatch(ctx context.Context) (*Result, error) {
 	cmd.Stdin = bytes.NewReader([]byte(req.Prompt))
 	runErr := runWithProgress(cmd, req.Progress)
 
-	res := &Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: exitCode(cmd), Started: cmd.ProcessState != nil}
+	res := &Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: exitCode(cmd),
+		Started: cmd.ProcessState != nil, Provenance: p.provenance}
 	if !res.Started {
 		return res, fmt.Errorf("claude process never started (pre-dispatch failure, no attempt consumed): %v", runErr)
 	}
@@ -144,9 +158,9 @@ func (p *preparedClaude) Dispatch(ctx context.Context) (*Result, error) {
 	}
 	env, diag, perr := parseClaudeEnvelope(stdout.Bytes())
 	if perr != nil {
-		return res, fmt.Errorf("dispatch capture failed (runErr=%v): %w", runErr, perr)
+		return res, fmt.Errorf("dispatch capture failed (runErr=%v): FAILED, no automatic retry: %w", runErr, perr)
 	}
-	res.Diagnostic = diag
+	res.Diagnostic = joinDiagnostics(p.provenance.CapabilityProbeDiagnostic, diag)
 	if env.Type != "result" || env.Subtype != "success" {
 		return res, fmt.Errorf("claude envelope is not a terminal success (type=%s subtype=%s): fail-closed", env.Type, env.Subtype)
 	}
@@ -158,7 +172,7 @@ func (p *preparedClaude) Dispatch(ctx context.Context) (*Result, error) {
 	}
 	res.Structured = env.Structured
 	if env.Structured == nil {
-		res.Invalid = append(res.Invalid, "missing-structured-output")
+		return res, fmt.Errorf("claude terminal envelope has no structured_output: FAILED, no automatic retry")
 	}
 
 	sessionRef := req.ResumeRef
@@ -179,12 +193,13 @@ func (p *preparedClaude) Dispatch(ctx context.Context) (*Result, error) {
 	if req.Effort != "" {
 		effortState = ObsAttested // accepted pre-validated flag; no echo on success path
 	}
-	res.Provenance = Provenance{
-		ModelSelection: modelSelection(req.Model),
-		RequestedModel: req.Model, ResolvedModel: resolved, ModelState: modelState, ModelMismatch: mismatch,
-		RequestedEffort: req.Effort, EffortState: effortState,
-		ManifestCLIVersion: ClaudeAdapter{}.Capability().CLIVersionChecked, ObservedCLIVersion: p.observedVersion,
-		WorkingDir: req.WorkingDir, SessionRef: sessionRef, NewSession: newSession,
-	}
+	res.Provenance.ResolvedModel = resolved
+	res.Provenance.ModelState = modelState
+	res.Provenance.ModelSource = "claude terminal envelope:modelUsage"
+	res.Provenance.ModelMismatch = mismatch
+	res.Provenance.RequestedEffort = req.Effort
+	res.Provenance.EffortState = effortState
+	res.Provenance.SessionRef = sessionRef
+	res.Provenance.NewSession = newSession
 	return res, nil
 }

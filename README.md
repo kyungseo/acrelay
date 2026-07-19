@@ -44,6 +44,29 @@ being moved to owner-only quarantine.
 `store-md v0.3` is an exact-version cutover. Existing v0.2 canonicals are not
 silently migrated; re-init or a linked follow-up objective is required.
 
+## CLI Compatibility And Provenance
+
+Claude Code and Codex CLI versions are observed on every invocation and stored
+in provenance, but version-string equality is not an admission gate. The
+adapter's known-good version is regression evidence only. An unobservable
+version banner still fails before child start because provenance would be
+incomplete.
+
+Required help tokens are probed on every invocation as an advisory diagnostic.
+Missing or reformatted help text does not block dispatch. The actual command,
+terminal envelope or JSONL events, session identity, and structured output are
+the authoritative compatibility boundary. Command/transport/session failures
+and absent or malformed structured output are recorded as `FAILED` with no
+automatic retry. A captured ReviewResult whose content violates the canonical
+schema remains `needs-input`.
+
+Platform-default model selection sends no model override flag. Claude records
+the terminal envelope's `modelUsage` as verified. Codex uses the bounded
+`codex doctor --json` `config.load` model/provider fields as an attested
+effective-config observation; every other doctor field and the raw output are
+discarded. Doctor failure, timeout, or malformed output records an empty,
+`unverified` model observation and never blocks dispatch.
+
 ## Supported Platforms
 
 - **macOS** — runtime-verified in this cycle: process-group termination of the

@@ -1,7 +1,7 @@
 // Package adapter maps platform CLIs onto the kernel contract: one-shot
-// dispatch, structured capture, provenance with observation states, static
-// capability manifests versioned per adapter+CLI version, and the private
-// handle store for session continuity (DR-811 §3, §7).
+// dispatch, structured capture, provenance with observation states,
+// capability-first admission, and the private handle store for session
+// continuity (DR-811 §3, §7).
 package adapter
 
 import (
@@ -29,31 +29,118 @@ const (
 	ObsUnsupported ObservationState = "unsupported"
 )
 
-// Capability is the static manifest for one adapter at one CLI version.
-// Any other observed version fails closed at preflight (DR-811 §7).
+// Capability is the adapter contract and its known-good regression reference.
+// KnownGoodCLIVersion is evidence, never an admission allowlist (DR-811 §7).
 type Capability struct {
-	Vendor            string
-	CLIVersionChecked string
-	EffortEnum        []string
-	SchemaFlag        string
-	SupportsResume    bool
-	ModelObservation  ObservationState
-	ProgressEvents    bool
-	IdleTimeoutMode   string // "event-stream" or "unsupported"
+	Vendor              string
+	ContractVersion     string
+	KnownGoodCLIVersion string
+	EffortEnum          []string
+	SchemaFlag          string
+	SupportsResume      bool
+	ModelObservation    ObservationState
+	ProgressEvents      bool
+	IdleTimeoutMode     string // "event-stream" or "unsupported"
 }
 
-// PreflightVersion compares the observed CLI version against the manifest.
-// Unknown versions fail closed: the manifest's guarantees were validated
-// against exactly one version.
+// PreflightVersion enforces version observability only. Compatibility is
+// established by the actual command and post-start validators, not equality
+// with the known-good regression version.
 func PreflightVersion(cap Capability, observed string) error {
 	if strings.TrimSpace(observed) == "" {
 		return fmt.Errorf("%s CLI version unobservable: fail-closed", cap.Vendor)
 	}
-	if observed != cap.CLIVersionChecked {
-		return fmt.Errorf("%s CLI version %s not validated against manifest (%s): fail-closed",
-			cap.Vendor, observed, cap.CLIVersionChecked)
-	}
 	return nil
+}
+
+const (
+	ProbeObserved     = "observed"
+	ProbeInconclusive = "inconclusive"
+	probeOutputLimit  = 256 * 1024
+)
+
+// cappedBuffer retains at most limit bytes while continuing to drain the
+// child pipe. Probe output is used transiently and never copied into
+// provenance; only allowlisted observations and bounded diagnostics survive.
+type cappedBuffer struct {
+	buf       bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	remaining := b.limit - b.buf.Len()
+	if remaining > 0 {
+		if remaining > len(p) {
+			remaining = len(p)
+		}
+		_, _ = b.buf.Write(p[:remaining])
+	}
+	if remaining < len(p) {
+		b.truncated = true
+	}
+	return n, nil
+}
+
+func (b *cappedBuffer) String() string { return b.buf.String() }
+
+func runBoundedProbe(ctx context.Context, timeout time.Duration, name string, args ...string) (string, bool, error) {
+	pctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var out cappedBuffer
+	out.limit = probeOutputLimit
+	cmd := exec.CommandContext(pctx, name, args...)
+	cmd.Stdout, cmd.Stderr = &out, &out
+	err := cmd.Run()
+	if pctx.Err() != nil {
+		return out.String(), out.truncated, pctx.Err()
+	}
+	return out.String(), out.truncated, err
+}
+
+func assessHelpProbe(output string, truncated bool, runErr error, required ...string) (string, string) {
+	missing := make([]string, 0, len(required))
+	for _, token := range required {
+		if !strings.Contains(output, token) {
+			missing = append(missing, token)
+		}
+	}
+	if runErr == nil && !truncated && len(missing) == 0 {
+		return ProbeObserved, "required help tokens observed (advisory only)"
+	}
+	parts := []string{"advisory help probe inconclusive"}
+	if runErr != nil {
+		parts = append(parts, "command error="+runErr.Error())
+	}
+	if truncated {
+		parts = append(parts, "output exceeded limit")
+	}
+	if len(missing) > 0 {
+		parts = append(parts, "tokens not observed="+strings.Join(missing, ","))
+	}
+	return ProbeInconclusive, strings.Join(parts, "; ")
+}
+
+func combineProbeResults(states, diagnostics []string) (string, string) {
+	state := ProbeObserved
+	for _, s := range states {
+		if s != ProbeObserved {
+			state = ProbeInconclusive
+			break
+		}
+	}
+	return state, strings.Join(diagnostics, "; ")
+}
+
+func joinDiagnostics(parts ...string) string {
+	nonempty := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if strings.TrimSpace(part) != "" {
+			nonempty = append(nonempty, part)
+		}
+	}
+	return strings.Join(nonempty, "; ")
 }
 
 // Timeouts decomposes the invocation deadline contract (DR-811 §7).
@@ -214,18 +301,26 @@ type Request struct {
 
 // Provenance records what was requested and what was observed.
 type Provenance struct {
-	ModelSelection     string // "explicit" or "platform-default" (R1-CX-N2)
-	RequestedModel     string
-	ResolvedModel      string
-	ModelState         ObservationState
-	ModelMismatch      bool // explicit model does not match resolved model
-	RequestedEffort    string
-	EffortState        ObservationState // empty when effort was omitted
-	ManifestCLIVersion string
-	ObservedCLIVersion string
-	WorkingDir         string
-	SessionRef         string // opaque random reference — never the native handle
-	NewSession         bool
+	ModelSelection            string // "explicit" or "platform-default" (R1-CX-N2)
+	RequestedModel            string
+	ResolvedModel             string
+	ModelProvider             string
+	ModelState                ObservationState
+	ModelSource               string
+	ModelDiagnostic           string
+	ModelMismatch             bool // explicit model does not match resolved model
+	RequestedEffort           string
+	EffortState               ObservationState // empty when effort was omitted
+	AdapterContractVersion    string
+	KnownGoodCLIVersion       string // regression reference, not an admission allowlist
+	ObservedCLIVersion        string
+	ObservedCLIVersionBanner  string
+	CLIVersionSource          string
+	CapabilityProbeState      string
+	CapabilityProbeDiagnostic string
+	WorkingDir                string
+	SessionRef                string // opaque random reference — never the native handle
+	NewSession                bool
 }
 
 // TimeoutKind distinguishes which deadline expired. Startup/idle expiry is
@@ -306,15 +401,41 @@ func validateCommonRequest(cap Capability, req Request) error {
 }
 
 // probeVersion runs the CLI's version command outside any round/attempt
-// budget and returns raw stdout.
+// budget and returns its bounded, normalized banner.
 func probeVersion(ctx context.Context, name string, args ...string) (string, error) {
 	pctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(pctx, name, args...).Output()
+	var stdout, stderr cappedBuffer
+	stdout.limit, stderr.limit = probeOutputLimit, probeOutputLimit
+	cmd := exec.CommandContext(pctx, name, args...)
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	if pctx.Err() != nil {
+		return "", fmt.Errorf("%s version probe failed: %w", name, pctx.Err())
+	}
 	if err != nil {
 		return "", fmt.Errorf("%s version probe failed: %w", name, err)
 	}
-	return strings.TrimSpace(string(out)), nil
+	if stdout.truncated {
+		return "", fmt.Errorf("%s version probe exceeded %d bytes: fail-closed", name, probeOutputLimit)
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+func baseProvenance(cap Capability, req Request, observedVersion, versionBanner, versionSource,
+	probeState, probeDiagnostic string) Provenance {
+	return Provenance{
+		ModelSelection:            modelSelection(req.Model),
+		RequestedModel:            req.Model,
+		AdapterContractVersion:    cap.ContractVersion,
+		KnownGoodCLIVersion:       cap.KnownGoodCLIVersion,
+		ObservedCLIVersion:        observedVersion,
+		ObservedCLIVersionBanner:  versionBanner,
+		CLIVersionSource:          versionSource,
+		CapabilityProbeState:      probeState,
+		CapabilityProbeDiagnostic: probeDiagnostic,
+		WorkingDir:                req.WorkingDir,
+	}
 }
 
 // newGroupCmd builds an exec.Cmd whose child runs in an isolated,
