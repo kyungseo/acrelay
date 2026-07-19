@@ -174,7 +174,7 @@ func TestDefaultTimeoutsStructure(t *testing.T) {
 // R0-CX-F6: version gate and mandatory schema.
 func TestPreflightVersionGate(t *testing.T) {
 	cap := ClaudeAdapter{}.Capability()
-	if err := PreflightVersion(cap, "2.1.214"); err != nil {
+	if err := PreflightVersion(cap, "2.1.215"); err != nil {
 		t.Fatal(err)
 	}
 	if err := PreflightVersion(cap, "9.9.9"); err == nil {
@@ -194,6 +194,81 @@ func TestPreflightRequiresSchema(t *testing.T) {
 		if err := a.Preflight(Request{Prompt: "x", SchemaJSON: `{"type":"object"}`}); err != nil {
 			t.Fatalf("%s: valid request must pass preflight: %v", a.Vendor(), err)
 		}
+	}
+}
+
+// DR-813 C2: each real adapter performs version/schema/resume preparation
+// exactly once before the returned one-shot Dispatch. Dispatch itself must
+// not re-probe the CLI or recreate the Codex schema file.
+func TestPreparedInvocationDoesNotRepeatPreflight(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		script string
+		make   func() Adapter
+	}{
+		{
+			name: "codex",
+			script: `#!/bin/sh
+echo "$@" >> "$ACRELAY_TEST_LOG"
+if [ "$1" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
+printf '%s\n' '{"type":"thread.started","thread_id":"thread-1"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"verdict\":\"approve\",\"findings\":[]}"}}'
+printf '%s\n' '{"type":"turn.completed"}'
+`,
+			make: func() Adapter { return CodexAdapter{} },
+		},
+		{
+			name: "claude",
+			script: `#!/bin/sh
+echo "$@" >> "$ACRELAY_TEST_LOG"
+if [ "$1" = "--version" ]; then echo "2.1.215 (Claude Code)"; exit 0; fi
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"session-1","structured_output":{"verdict":"approve","findings":[]},"modelUsage":{"claude-test":{}}}'
+`,
+			make: func() Adapter { return ClaudeAdapter{} },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cli := filepath.Join(dir, tc.name)
+			if err := os.WriteFile(cli, []byte(tc.script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			logPath := filepath.Join(dir, "calls.log")
+			t.Setenv("ACRELAY_TEST_LOG", logPath)
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			handles := &HandleStore{Path: filepath.Join(dir, "handles.json")}
+			prepared, err := tc.make().Prepare(context.Background(), Request{
+				Prompt: "review", SchemaJSON: `{"type":"object"}`, WorkingDir: dir,
+			}, handles)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pc, ok := prepared.(*preparedCodex); ok {
+				if _, err := os.Stat(pc.schemaPath); err != nil {
+					t.Fatalf("Codex schema must exist after Prepare: %v", err)
+				}
+			}
+			res, err := prepared.Dispatch(context.Background())
+			if err != nil || res == nil || !res.Started {
+				t.Fatalf("prepared dispatch failed: result=%+v err=%v", res, err)
+			}
+			var schemaPath string
+			if pc, ok := prepared.(*preparedCodex); ok {
+				schemaPath = pc.schemaPath
+			}
+			if err := prepared.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if schemaPath != "" {
+				if _, err := os.Stat(schemaPath); !os.IsNotExist(err) {
+					t.Fatalf("Codex prepared schema must be cleaned by Close: %v", err)
+				}
+			}
+			calls, _ := os.ReadFile(logPath)
+			if strings.Count(string(calls), "--version") != 1 {
+				t.Fatalf("version probe repeated after Prepare: %q", calls)
+			}
+		})
 	}
 }
 

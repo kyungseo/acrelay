@@ -45,7 +45,7 @@ func fail(err error) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, `usage: acrelay <init|review|confirm|disposition|advance|close|terminate|reconcile|status> [flags]
+		fmt.Fprintln(os.Stderr, `usage: acrelay <init|review|confirm|disposition|advance|close|terminate|reconcile|abandon-transaction|status> [flags]
 The canonical record is private local storage: keep it outside shared/synced/
 published paths. Sharing requires a redacted export (not provided in v1).`)
 		os.Exit(2)
@@ -238,13 +238,38 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 	case "reconcile":
 		fs := flag.NewFlagSet("reconcile", flag.ExitOnError)
 		canonical := fs.String("canonical", "", "canonical record path")
-		recovery := fs.String("recovery", "", "recovery transaction path")
+		transaction := fs.String("transaction", "", "dispatch journal or legacy recovery transaction path")
+		recovery := fs.String("recovery", "", "legacy alias for -transaction")
 		fs.Parse(args)
-		st, err := relay.Reconcile(*canonical, *recovery)
+		path := *transaction
+		if path == "" {
+			path = *recovery
+		}
+		if *canonical == "" || path == "" {
+			fail(fmt.Errorf("reconcile requires -canonical and -transaction"))
+		}
+		st, err := relay.Reconcile(*canonical, path)
 		if err != nil {
 			fail(err)
 		}
 		fmt.Printf("reconciled: rounds=%d governance=%s\n", len(st.Rounds), st.Governance)
+
+	case "abandon-transaction":
+		fs := flag.NewFlagSet("abandon-transaction", flag.ExitOnError)
+		canonical := fs.String("canonical", "", "canonical record path")
+		transaction := fs.String("transaction", "", "un-reconcilable dispatch journal path")
+		actor := fs.String("actor", "", "declared owner/arbiter identity")
+		role := fs.String("role", "owner", "owner|arbiter")
+		reason := fs.String("reason", "", "why normal reconcile is impossible")
+		fs.Parse(args)
+		if *canonical == "" || *transaction == "" {
+			fail(fmt.Errorf("abandon-transaction requires -canonical and -transaction"))
+		}
+		st, quarantine, err := relay.AbandonTransaction(*canonical, *transaction, *actor, *role, *reason)
+		if err != nil {
+			fail(err)
+		}
+		fmt.Printf("transaction abandoned: objective=%s quarantine=%s\n", st.ObjectiveID, quarantine)
 
 	case "status":
 		fs := flag.NewFlagSet("status", flag.ExitOnError)

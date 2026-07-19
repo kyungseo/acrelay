@@ -21,11 +21,12 @@ type FakeResult struct {
 // interface contract (preflight, handle registration, resume validation)
 // without spawning processes or calling vendors.
 type FakeAdapter struct {
-	VendorName      string
-	NativeHandle    string
-	Script          []FakeResult
-	PreDispatchFail error
-	Dispatched      int
+	VendorName   string
+	NativeHandle string
+	Script       []FakeResult
+	PrepareFail  error
+	Prepared     int
+	Dispatched   int
 	// Test synchronization hooks (nil in normal use). When set, Dispatch
 	// closes DispatchEntered on entry — after the caller has already taken
 	// its pre-dispatch snapshot — and then blocks until DispatchGate is
@@ -49,26 +50,36 @@ func (f *FakeAdapter) Preflight(req Request) error {
 	return validateCommonRequest(f.Capability(), req)
 }
 
-func (f *FakeAdapter) PreDispatch(ctx context.Context, req Request, handles *HandleStore) error {
+type preparedFake struct {
+	adapter *FakeAdapter
+	req     Request
+	handles *HandleStore
+}
+
+func (p *preparedFake) Close() error { return nil }
+
+func (f *FakeAdapter) Prepare(ctx context.Context, req Request, handles *HandleStore) (PreparedInvocation, error) {
 	if err := f.Preflight(req); err != nil {
-		return err
+		return nil, err
 	}
-	if f.PreDispatchFail != nil {
-		return f.PreDispatchFail
+	if f.PrepareFail != nil {
+		return nil, f.PrepareFail
 	}
 	if req.ResumeRef != "" {
 		vendor, _, err := handles.Lookup(req.ResumeRef)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if vendor != f.VendorName {
-			return fmt.Errorf("session_ref %s belongs to %s, not %s: fail-closed", req.ResumeRef, vendor, f.VendorName)
+			return nil, fmt.Errorf("session_ref %s belongs to %s, not %s: fail-closed", req.ResumeRef, vendor, f.VendorName)
 		}
 	}
-	return nil
+	f.Prepared++
+	return &preparedFake{adapter: f, req: req, handles: handles}, nil
 }
 
-func (f *FakeAdapter) Dispatch(ctx context.Context, req Request, handles *HandleStore) (*Result, error) {
+func (p *preparedFake) Dispatch(ctx context.Context) (*Result, error) {
+	f, req, handles := p.adapter, p.req, p.handles
 	if f.DispatchEntered != nil {
 		close(f.DispatchEntered)
 		f.DispatchEntered = nil
@@ -119,7 +130,7 @@ func (f *FakeAdapter) Dispatch(ctx context.Context, req Request, handles *Handle
 	res.Provenance = Provenance{
 		ModelSelection: modelSelection(req.Model), ModelMismatch: mm,
 		RequestedModel: req.Model, ModelState: ObsAttested,
-		RequestedEffort: req.Effort,
+		RequestedEffort:    req.Effort,
 		ManifestCLIVersion: "fake-1", ObservedCLIVersion: "fake-1",
 		SessionRef: sessionRef, NewSession: newSession,
 	}

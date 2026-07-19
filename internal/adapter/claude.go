@@ -20,7 +20,7 @@ func (ClaudeAdapter) Vendor() string { return "claude" }
 func (ClaudeAdapter) Capability() Capability {
 	return Capability{
 		Vendor:            "claude",
-		CLIVersionChecked: "2.1.214",
+		CLIVersionChecked: "2.1.215",
 		EffortEnum:        []string{"low", "medium", "high", "xhigh", "max"},
 		SchemaFlag:        "--json-schema",
 		SupportsResume:    true,
@@ -66,7 +66,7 @@ func parseClaudeEnvelope(stdout []byte) (*claudeEnvelope, string, error) {
 	return &env, fmt.Sprintf("non-JSON prefix %d bytes before envelope", i), nil
 }
 
-// detectClaudeVersion parses `claude --version` ("2.1.214 (Claude Code)").
+// detectClaudeVersion parses `claude --version` ("2.1.215 (Claude Code)").
 func detectClaudeVersion(ctx context.Context) (string, error) {
 	banner, err := probeVersion(ctx, "claude", "--version")
 	if err != nil {
@@ -75,32 +75,20 @@ func detectClaudeVersion(ctx context.Context) (string, error) {
 	return firstNonEmptyLineField(banner, 0), nil
 }
 
-// PreDispatch runs preflight, the version gate, and resume-ref resolution
-// without consuming any budget.
-func (a ClaudeAdapter) PreDispatch(ctx context.Context, req Request, handles *HandleStore) error {
-	if err := a.Preflight(req); err != nil {
-		return err
-	}
-	observed, err := detectClaudeVersion(ctx)
-	if err != nil {
-		return err
-	}
-	if err := PreflightVersion(a.Capability(), observed); err != nil {
-		return err
-	}
-	if req.ResumeRef != "" {
-		vendor, _, err := handles.Lookup(req.ResumeRef)
-		if err != nil {
-			return err
-		}
-		if vendor != "claude" {
-			return fmt.Errorf("session_ref %s belongs to %s, not claude: fail-closed", req.ResumeRef, vendor)
-		}
-	}
-	return nil
+type preparedClaude struct {
+	req             Request
+	handles         *HandleStore
+	args            []string
+	timeouts        Timeouts
+	observedVersion string
 }
 
-func (a ClaudeAdapter) Dispatch(ctx context.Context, req Request, handles *HandleStore) (*Result, error) {
+func (p *preparedClaude) Close() error { return nil }
+
+// Prepare completes every fallible operation before the relay creates the
+// dispatch journal. Dispatch therefore starts the already-decided command;
+// it never repeats version/resume/schema preparation.
+func (a ClaudeAdapter) Prepare(ctx context.Context, req Request, handles *HandleStore) (PreparedInvocation, error) {
 	if err := a.Preflight(req); err != nil {
 		return nil, err
 	}
@@ -108,14 +96,13 @@ func (a ClaudeAdapter) Dispatch(ctx context.Context, req Request, handles *Handl
 	if err != nil {
 		return nil, err
 	}
-	observedVersion, err := detectClaudeVersion(ctx)
+	observed, err := detectClaudeVersion(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if err := PreflightVersion(a.Capability(), observedVersion); err != nil {
+	if err := PreflightVersion(a.Capability(), observed); err != nil {
 		return nil, err
 	}
-
 	args := []string{"-p", "--output-format", "json", "--json-schema", req.SchemaJSON}
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
@@ -126,17 +113,21 @@ func (a ClaudeAdapter) Dispatch(ctx context.Context, req Request, handles *Handl
 	if req.ResumeRef != "" {
 		vendor, h, err := handles.Lookup(req.ResumeRef)
 		if err != nil {
-			return nil, err // fail-closed: no silent new-session fallback
+			return nil, err
 		}
 		if vendor != "claude" {
 			return nil, fmt.Errorf("session_ref %s belongs to %s, not claude: fail-closed", req.ResumeRef, vendor)
 		}
 		args = append(args, "--resume", h)
 	}
+	return &preparedClaude{req: req, handles: handles, args: args, timeouts: timeouts, observedVersion: observed}, nil
+}
 
-	tctx, cancel := context.WithTimeout(ctx, timeouts.HardCap)
+func (p *preparedClaude) Dispatch(ctx context.Context) (*Result, error) {
+	req, handles := p.req, p.handles
+	tctx, cancel := context.WithTimeout(ctx, p.timeouts.HardCap)
 	defer cancel()
-	cmd := newGroupCmd(tctx, timeouts.Grace, "claude", args...)
+	cmd := newGroupCmd(tctx, p.timeouts.Grace, "claude", p.args...)
 	cmd.Dir = req.WorkingDir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -192,7 +183,7 @@ func (a ClaudeAdapter) Dispatch(ctx context.Context, req Request, handles *Handl
 		ModelSelection: modelSelection(req.Model),
 		RequestedModel: req.Model, ResolvedModel: resolved, ModelState: modelState, ModelMismatch: mismatch,
 		RequestedEffort: req.Effort, EffortState: effortState,
-		ManifestCLIVersion: a.Capability().CLIVersionChecked, ObservedCLIVersion: observedVersion,
+		ManifestCLIVersion: ClaudeAdapter{}.Capability().CLIVersionChecked, ObservedCLIVersion: p.observedVersion,
 		WorkingDir: req.WorkingDir, SessionRef: sessionRef, NewSession: newSession,
 	}
 	return res, nil

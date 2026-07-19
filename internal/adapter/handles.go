@@ -6,9 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/kyungseo/acrelay/internal/store"
 )
 
 // HandleStore maps opaque random session references to native vendor resume
@@ -94,34 +95,12 @@ func (h *HandleStore) load() (*handleFile, error) {
 }
 
 func (h *HandleStore) save(f *handleFile) error {
-	suffix := make([]byte, 4)
-	if _, err := rand.Read(suffix); err != nil {
-		return err
-	}
-	tmp := filepath.Join(filepath.Dir(h.Path),
-		fmt.Sprintf(".%s.tmp-%d-%s", filepath.Base(h.Path), os.Getpid(), hex.EncodeToString(suffix)))
-	fd, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) // 0600 from creation
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp)
 	b, err := json.MarshalIndent(f, "", " ")
 	if err != nil {
-		fd.Close()
 		return err
 	}
-	if _, err := fd.Write(b); err != nil {
-		fd.Close()
-		return err
-	}
-	if err := fd.Sync(); err != nil {
-		fd.Close()
-		return err
-	}
-	if err := fd.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp, h.Path)
+	_, err = store.WritePrivateAtomic(h.Path, b)
+	return err
 }
 
 func newRef(existing map[string]handleEntry) (string, error) {
