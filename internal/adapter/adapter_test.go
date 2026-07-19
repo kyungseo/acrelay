@@ -212,6 +212,11 @@ func TestTimeoutsValidate(t *testing.T) {
 	if _, err := (Timeouts{Startup: -1}).Validate(); err == nil {
 		t.Fatal("negative values must fail")
 	}
+	// startup >= hard-cap would let hard-cap fire first and misclassify a
+	// no-output hang as UNKNOWN instead of FAILED(timeout:startup) (R0-F2).
+	if _, err := (Timeouts{Startup: 40 * time.Minute, Idle: 5 * time.Minute, HardCap: 30 * time.Minute, Grace: 10 * time.Second}).Validate(); err == nil {
+		t.Fatal("startup >= hard-cap must fail")
+	}
 }
 
 // R0-CX-F9: rotation vendor mismatch, empty entries, permission gate.

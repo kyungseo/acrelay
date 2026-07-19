@@ -1049,3 +1049,38 @@ func TestReviewLosingToMutatorFailsClosed(t *testing.T) {
 	}
 	noDuplicateStateSeqs(t, s.Canonical)
 }
+
+// R0-F1 (leg 3): a confirmation dispatches the reviewer, so it must honor the
+// same duplicate-execution guard as Review — an UNKNOWN prior round blocks
+// confirmation dispatch until an owner resolves it.
+func TestConfirmationBlockedByUnknownRound(t *testing.T) {
+	s, fake, _ := newSession(t, []adapter.FakeResult{
+		changesRequested("f1"),
+		{TimedOut: true, TimeoutKind: adapter.TimeoutHardCap},
+	})
+	if _, _, err := s.Review(context.Background(), "r0", adapter.Request{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenConfirmation(s.Canonical, 0, []string{"R0-F1"}); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := LoadState(s.Canonical)
+	rev := st.TargetRevision
+	// R1 hard-caps → UNKNOWN
+	if _, outcome, err := s.Review(context.Background(), "r1", adapter.Request{}); err != nil {
+		t.Fatal(err)
+	} else if outcome != review.OutcomeFailed {
+		t.Fatalf("expected FAILED, got %s", outcome)
+	}
+	dispatchedBefore := fake.Dispatched
+	if _, _, err := s.ConfirmWithReviewer(context.Background(), 0, rev, []string{"R0-F1"}, "delta", adapter.Request{}); err == nil ||
+		!strings.Contains(err.Error(), "UNKNOWN") {
+		t.Fatalf("confirmation must be refused while a round is UNKNOWN: %v", err)
+	}
+	if fake.Dispatched != dispatchedBefore {
+		t.Fatalf("refused confirmation must not dispatch the reviewer: %d vs %d", fake.Dispatched, dispatchedBefore)
+	}
+}

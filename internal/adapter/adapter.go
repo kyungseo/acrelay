@@ -96,6 +96,12 @@ func (t Timeouts) Validate() (Timeouts, error) {
 	if !(t.Grace < t.Idle && t.Idle < t.HardCap) {
 		return t, fmt.Errorf("timeout ordering must be grace < idle < hard-cap: %+v", t)
 	}
+	// startup < hard-cap so a no-output hang classifies as FAILED(timeout:
+	// startup), not UNKNOWN(hard-cap): the hard-cap ctx is the parent of the
+	// startup timer, and if it fired first the two would be swapped (R0-F2).
+	if t.Startup >= t.HardCap {
+		return t, fmt.Errorf("timeout ordering must be startup < hard-cap: %+v", t)
+	}
 	return t, nil
 }
 

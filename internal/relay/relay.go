@@ -812,16 +812,24 @@ func parseConfirmResults(structured map[string]any, submitted []string) (confirm
 // invalid reviewer output consume no valid attempt. No formal round is
 // consumed.
 func (s *Session) ConfirmWithReviewer(ctx context.Context, roundIndex int, expectedTargetRev string, ids []string, claimedDelta string, req adapter.Request) (*State, bool, error) {
-	loadRev, err := store.Revision(s.Canonical)
-	if err != nil {
-		return nil, false, err
-	}
 	st, err := LoadState(s.Canonical)
 	if err != nil {
 		return nil, false, err
 	}
 	if st == nil {
 		return nil, false, fmt.Errorf("no objective in canonical")
+	}
+	// A confirmation dispatches the reviewer just like Review, so it must
+	// honor the same duplicate-execution guards (R0-F1): never dispatch while
+	// a prior UNKNOWN round may still be running server-side, nor while an
+	// unreconciled recovery transaction is pending (DR-811 §7).
+	if recs, rerr := pendingRecoveries(s.Canonical); rerr != nil {
+		return nil, false, rerr
+	} else if len(recs) > 0 {
+		return nil, false, fmt.Errorf("pending recovery transactions %v: reconcile before any confirmation dispatch (duplicate-execution guard)", recs)
+	}
+	if r := unknownRound(st); r >= 0 {
+		return nil, false, fmt.Errorf("round R%d ended UNKNOWN: confirmation dispatch forbidden until an owner resolves it (terminate the objective and open a follow-up) — no automatic retry", r)
 	}
 	var cs *ConfState
 	for i := range st.Confirmations {
@@ -870,12 +878,46 @@ func (s *Session) ConfirmWithReviewer(ctx context.Context, roundIndex int, expec
 	// precondition BEFORE any dispatch: exact target revision
 	targetNow, _, terr := TargetSnapshot(st.TargetLocation)
 	if terr != nil || expectedTargetRev != st.TargetRevision || targetNow != st.TargetRevision {
-		cyc.RecordPreconditionFailure()
-		cs.PreconditionFailures = cyc.PreconditionFailures
-		return st, false, withCanonicalLock(s.Canonical, func() error {
-			return appendState(s.Canonical, st,
-				fmt.Sprintf("\n## confirmation precondition-failure R%d\n- expected: %s\n- state: %s\n", roundIndex, expectedTargetRev, st.TargetRevision), loadRev)
+		// Record the non-consuming precondition failure under the lock against
+		// FRESH state (R0-F3): re-reading only the revision would append a
+		// block with the stale in-memory Seq and collide with a concurrent
+		// writer's block. Reload, re-find the cycle, re-increment, then append.
+		var out *State
+		lerr := withCanonicalLock(s.Canonical, func() error {
+			rev, err := store.Revision(s.Canonical)
+			if err != nil {
+				return err
+			}
+			fresh, err := LoadState(s.Canonical)
+			if err != nil {
+				return err
+			}
+			if fresh == nil {
+				return fmt.Errorf("no objective in canonical")
+			}
+			var fcs *ConfState
+			for i := range fresh.Confirmations {
+				if fresh.Confirmations[i].RoundIndex == roundIndex {
+					fcs = &fresh.Confirmations[i]
+				}
+			}
+			if fcs == nil {
+				return fmt.Errorf("no confirmation cycle for round R%d", roundIndex)
+			}
+			fcyc, err := kernel.RehydrateConfirmation(fcs.Initial, fcs.Outstanding, fcs.ValidAttempts, fcs.PreconditionFailures, fcs.Escalated)
+			if err != nil {
+				return err
+			}
+			fcyc.RecordPreconditionFailure()
+			fcs.PreconditionFailures = fcyc.PreconditionFailures
+			out = fresh
+			return appendState(s.Canonical, fresh,
+				fmt.Sprintf("\n## confirmation precondition-failure R%d\n- expected: %s\n- state: %s\n", roundIndex, expectedTargetRev, fresh.TargetRevision), rev)
 		})
+		if lerr != nil {
+			return nil, false, lerr
+		}
+		return out, false, nil
 	}
 	// confirmation must run in the same reviewer session (contract): a
 	// different vendor is only possible through the explicit reset path.
