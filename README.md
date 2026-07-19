@@ -17,8 +17,8 @@ Toolstead `DR-811` (Agent Collab v1 Feasibility Contract And Session Continuity)
 - `internal/relay` — one-shot review flow wiring (preflight → snapshot →
   attempt commit → dispatch → validate → append), state as sequence-numbered
   blocks inside the canonical document
-- `cmd/acrelay` — CLI: `init` / `review` / `disposition` / `close` /
-  `terminate` / `status`
+- `cmd/acrelay` — CLI: `init` / `review` / `confirm` / `disposition` /
+  `advance` / `close` / `terminate` / `reconcile` / `status`
 
 ## Canonical Record Is Private
 
@@ -27,8 +27,21 @@ provenance. Keep it in private local storage outside any shared, synced, or
 published boundary. There is no share/export path in v1 — copying the raw
 canonical into a shareable artifact requires explicit opt-in per DR-811, and
 a redacted-export tool is a release-gate decision. The session handle store
-(`~/.acrelay/handles.json`) is 0600, single-process-writer, and never leaves
-the machine.
+(`~/.acrelay/handles.json`) is 0600 and never leaves the machine; every
+canonical and handle-store mutation is serialized across processes by an
+advisory `flock` on a sidecar lock file, so concurrent invocations cannot
+lose each other's updates.
+
+## Supported Platforms
+
+- **macOS** — runtime-verified in this cycle: process-group termination of the
+  reviewer child tree, owner-only permissions, and atomic file replace.
+- **Linux** — builds and shares the POSIX process-group termination path, but
+  its runtime (termination, permissions, atomic replace, timeout grace) is not
+  yet verified in this cycle; treat as unverified until it is.
+- **Windows** — unsupported. The child-process lifecycle boundary uses POSIX
+  process groups; the Windows Job Object equivalent is a follow-up port and the
+  package does not build for `GOOS=windows`.
 
 ## Install / Verify
 
