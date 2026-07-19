@@ -398,29 +398,61 @@ func TestHandleStoreConcurrentRegisterLosesNothing(t *testing.T) {
 	}
 }
 
-// Helper entry for the multi-process flock fixture: real child processes
-// (not goroutines) register one handle each. Gated by env so the normal
-// suite run skips it.
-func TestHandleStoreHelperProcessRegister(t *testing.T) {
-	if os.Getenv("ACRELAY_HELPER_PATH") == "" {
+// Helper entry for the multi-process flock fixture (R0-F4): real child
+// processes exercise the three mutators (Register/Rotate/Delete) under a
+// shared barrier so their critical sections genuinely overlap. Gated by env
+// so the normal suite run skips it.
+func TestHandleStoreHelperProcessMutate(t *testing.T) {
+	path := os.Getenv("ACRELAY_HELPER_PATH")
+	if path == "" {
 		t.Skip("helper process entry — driven by TestHandleStoreConcurrentProcessesLoseNothing")
 	}
-	s := &HandleStore{Path: os.Getenv("ACRELAY_HELPER_PATH")}
-	if _, err := s.Register("codex", os.Getenv("ACRELAY_HELPER_HANDLE")); err != nil {
+	barrier := os.Getenv("ACRELAY_HELPER_BARRIER")
+	for { // all children release together — real critical-section overlap
+		if _, err := os.Stat(barrier); err == nil {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	s := &HandleStore{Path: path}
+	ref, err := s.Register("codex", os.Getenv("ACRELAY_HELPER_HANDLE"))
+	if err != nil {
 		t.Fatalf("helper register: %v", err)
+	}
+	time.Sleep(3 * time.Millisecond) // widen the window between concurrent mutators
+	switch os.Getenv("ACRELAY_HELPER_OP") {
+	case "rotate":
+		if _, err := s.Rotate(ref, "codex", os.Getenv("ACRELAY_HELPER_HANDLE")+"-rot"); err != nil {
+			t.Fatalf("helper rotate: %v", err)
+		}
+	case "delete":
+		if err := s.Delete(ref); err != nil {
+			t.Fatalf("helper delete: %v", err)
+		}
 	}
 }
 
 func TestHandleStoreConcurrentProcessesLoseNothing(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "handles.json")
+	barrier := path + ".barrier"
 	const n = 12
+	// ops cycle register-only / register+rotate / register+delete so all
+	// three mutators contend on the same file at once.
+	ops := []string{"", "rotate", "delete"}
+	wantEntries := 0
 	cmds := make([]*exec.Cmd, n)
 	outs := make([]*strings.Builder, n)
-	for i := range cmds { // separate OS processes: this exercises real cross-process flock
-		cmd := exec.Command(os.Args[0], "-test.run=TestHandleStoreHelperProcessRegister$", "-test.v")
+	for i := range cmds {
+		op := ops[i%len(ops)]
+		if op != "delete" { // register-only and rotate each leave exactly one entry
+			wantEntries++
+		}
+		cmd := exec.Command(os.Args[0], "-test.run=TestHandleStoreHelperProcessMutate$", "-test.v")
 		cmd.Env = append(os.Environ(),
 			"ACRELAY_HELPER_PATH="+path,
+			"ACRELAY_HELPER_BARRIER="+barrier,
+			"ACRELAY_HELPER_OP="+op,
 			"ACRELAY_HELPER_HANDLE=thread-proc-"+string(rune('a'+i)))
 		outs[i] = &strings.Builder{}
 		cmd.Stdout, cmd.Stderr = outs[i], outs[i]
@@ -428,6 +460,10 @@ func TestHandleStoreConcurrentProcessesLoseNothing(t *testing.T) {
 			t.Fatal(err)
 		}
 		cmds[i] = cmd
+	}
+	time.Sleep(150 * time.Millisecond) // let every child reach the barrier wait
+	if err := os.WriteFile(barrier, []byte("go"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	for i, cmd := range cmds {
 		if err := cmd.Wait(); err != nil {
@@ -439,7 +475,7 @@ func TestHandleStoreConcurrentProcessesLoseNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(f.Entries) != n {
-		t.Fatalf("cross-process lost updates: %d entries survived, want %d", len(f.Entries), n)
+	if len(f.Entries) != wantEntries { // a lost update from any of the 3 mutators changes this count
+		t.Fatalf("cross-process mutator race: %d entries survived, want %d", len(f.Entries), wantEntries)
 	}
 }

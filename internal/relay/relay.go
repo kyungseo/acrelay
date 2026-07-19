@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/kyungseo/acrelay/internal/adapter"
 	"github.com/kyungseo/acrelay/internal/kernel"
@@ -385,6 +386,16 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	if st == nil {
 		return nil, "", fmt.Errorf("canonical %s has no objective: run init first", s.Canonical)
 	}
+	// Cross-round UNKNOWN guard (R0-F3): the kernel forbids re-dispatch inside
+	// a round after an UNKNOWN attempt, but opening a *new* round would slip
+	// past it. An UNKNOWN result (hard-cap/external kill) may have run to
+	// completion server-side, so any further dispatch risks duplicate
+	// execution until an owner resolves it — the arbiter terminates the
+	// objective (SUPERSEDED/ABANDONED) and opens a follow-up. No automatic
+	// retry (DR-811 §7).
+	if r := unknownRound(st); r >= 0 {
+		return nil, "", fmt.Errorf("round R%d ended UNKNOWN: re-dispatch forbidden until an owner resolves it (terminate the objective and open a follow-up) — no automatic retry", r)
+	}
 	o, err := rehydrate(st)
 	if err != nil {
 		return nil, "", err
@@ -669,44 +680,53 @@ func Reconcile(canonical, recoveryPath string) (*State, error) {
 
 // OpenConfirmation starts the bounded confirmation cycle for a round.
 func OpenConfirmation(canonical string, roundIndex int, ids []string) (*State, error) {
-	st, err := LoadState(canonical)
-	if err != nil {
-		return nil, err
-	}
-	if st == nil {
-		return nil, fmt.Errorf("no objective in canonical")
-	}
-	if roundIndex < 0 || roundIndex >= len(st.Rounds) {
-		return nil, fmt.Errorf("round R%d does not exist", roundIndex)
-	}
-	for _, c := range st.Confirmations {
-		if c.RoundIndex == roundIndex {
-			return nil, fmt.Errorf("confirmation cycle already exists for round R%d (max 1 per round)", roundIndex)
+	var out *State
+	err := withCanonicalLock(canonical, func() error {
+		rev, err := store.Revision(canonical)
+		if err != nil {
+			return err
 		}
-	}
-	// confirmation은 driver가 disposition으로 닫은 finding에 대해서만 연다 (CP-2 F4)
-	byID := map[string]review.Finding{}
-	for _, f := range st.Findings {
-		byID[f.ID] = f
-	}
-	for _, id := range ids {
-		f, ok := byID[strings.TrimSpace(id)]
-		if !ok {
-			return nil, fmt.Errorf("confirmation ID %q is not a known finding: fail-closed", id)
+		st, err := LoadState(canonical)
+		if err != nil {
+			return err
 		}
-		if f.Disposition == "" {
-			return nil, fmt.Errorf("finding %s has no disposition: only closed findings enter a confirmation cycle", id)
+		if st == nil {
+			return fmt.Errorf("no objective in canonical")
 		}
-	}
-	r := &kernel.Round{Index: roundIndex}
-	cyc, err := r.OpenConfirmation(ids)
-	if err != nil {
-		return nil, err
-	}
-	st.Confirmations = append(st.Confirmations, ConfState{
-		RoundIndex: roundIndex, Initial: cyc.Initial(), Outstanding: cyc.Outstanding(),
+		if roundIndex < 0 || roundIndex >= len(st.Rounds) {
+			return fmt.Errorf("round R%d does not exist", roundIndex)
+		}
+		for _, c := range st.Confirmations {
+			if c.RoundIndex == roundIndex {
+				return fmt.Errorf("confirmation cycle already exists for round R%d (max 1 per round)", roundIndex)
+			}
+		}
+		// confirmation은 driver가 disposition으로 닫은 finding에 대해서만 연다 (CP-2 F4)
+		byID := map[string]review.Finding{}
+		for _, f := range st.Findings {
+			byID[f.ID] = f
+		}
+		for _, id := range ids {
+			f, ok := byID[strings.TrimSpace(id)]
+			if !ok {
+				return fmt.Errorf("confirmation ID %q is not a known finding: fail-closed", id)
+			}
+			if f.Disposition == "" {
+				return fmt.Errorf("finding %s has no disposition: only closed findings enter a confirmation cycle", id)
+			}
+		}
+		r := &kernel.Round{Index: roundIndex}
+		cyc, err := r.OpenConfirmation(ids)
+		if err != nil {
+			return err
+		}
+		st.Confirmations = append(st.Confirmations, ConfState{
+			RoundIndex: roundIndex, Initial: cyc.Initial(), Outstanding: cyc.Outstanding(),
+		})
+		out = st
+		return appendState(canonical, st, fmt.Sprintf("\n## confirmation open R%d\n- ids: %s\n", roundIndex, strings.Join(ids, ", ")), rev)
 	})
-	return st, appendState(canonical, st, fmt.Sprintf("\n## confirmation open R%d\n- ids: %s\n", roundIndex, strings.Join(ids, ", ")))
+	return out, err
 }
 
 // ConfirmSchema restricts confirmation output to per-ID statuses — no
@@ -769,6 +789,10 @@ func parseConfirmResults(structured map[string]any, submitted []string) (confirm
 // invalid reviewer output consume no valid attempt. No formal round is
 // consumed.
 func (s *Session) ConfirmWithReviewer(ctx context.Context, roundIndex int, expectedTargetRev string, ids []string, claimedDelta string, req adapter.Request) (*State, bool, error) {
+	loadRev, err := store.Revision(s.Canonical)
+	if err != nil {
+		return nil, false, err
+	}
 	st, err := LoadState(s.Canonical)
 	if err != nil {
 		return nil, false, err
@@ -826,7 +850,7 @@ func (s *Session) ConfirmWithReviewer(ctx context.Context, roundIndex int, expec
 		cyc.RecordPreconditionFailure()
 		cs.PreconditionFailures = cyc.PreconditionFailures
 		return st, false, appendState(s.Canonical, st,
-			fmt.Sprintf("\n## confirmation precondition-failure R%d\n- expected: %s\n- state: %s\n", roundIndex, expectedTargetRev, st.TargetRevision))
+			fmt.Sprintf("\n## confirmation precondition-failure R%d\n- expected: %s\n- state: %s\n", roundIndex, expectedTargetRev, st.TargetRevision), loadRev)
 	}
 	// confirmation must run in the same reviewer session (contract): a
 	// different vendor is only possible through the explicit reset path.
@@ -903,32 +927,41 @@ func Disposition(canonical, findingID string, d review.Disposition, decision *re
 	if !review.ValidDisposition(d) {
 		return nil, fmt.Errorf("invalid disposition %q", d)
 	}
-	st, err := LoadState(canonical)
-	if err != nil {
-		return nil, err
-	}
-	if st == nil {
-		return nil, fmt.Errorf("no objective in canonical")
-	}
-	found := false
-	for i := range st.Findings {
-		if st.Findings[i].ID == findingID {
-			st.Findings[i].Disposition = d
-			st.Findings[i].Decision = decision
-			found = true
+	var out *State
+	err := withCanonicalLock(canonical, func() error {
+		rev, err := store.Revision(canonical)
+		if err != nil {
+			return err
 		}
-	}
-	if !found {
-		return nil, fmt.Errorf("finding %s not found", findingID)
-	}
-	// Promotion to CLOSABLE happens here and only here (R1-CX-F1) — and only
-	// when a valid, non-stale round reviewed the target bytes on disk right
-	// now (Gate A-3: a post-result target edit blocks promotion).
-	if st.Governance == string(kernel.GovDecisionRequired) && review.ClosureCheck(st.Findings) == nil &&
-		closableAgainstDisk(st) == nil {
-		st.Governance = string(kernel.GovClosable)
-	}
-	return st, appendState(canonical, st, fmt.Sprintf("\n## disposition %s\n- decision: %s\n", findingID, d))
+		st, err := LoadState(canonical)
+		if err != nil {
+			return err
+		}
+		if st == nil {
+			return fmt.Errorf("no objective in canonical")
+		}
+		found := false
+		for i := range st.Findings {
+			if st.Findings[i].ID == findingID {
+				st.Findings[i].Disposition = d
+				st.Findings[i].Decision = decision
+				found = true
+			}
+		}
+		if !found {
+			return fmt.Errorf("finding %s not found", findingID)
+		}
+		// Promotion to CLOSABLE happens here and only here (R1-CX-F1) — and
+		// only when a valid, non-stale round reviewed the target bytes on disk
+		// right now (Gate A-3: a post-result target edit blocks promotion).
+		if st.Governance == string(kernel.GovDecisionRequired) && review.ClosureCheck(st.Findings) == nil &&
+			closableAgainstDisk(st) == nil {
+			st.Governance = string(kernel.GovClosable)
+		}
+		out = st
+		return appendState(canonical, st, fmt.Sprintf("\n## disposition %s\n- decision: %s\n", findingID, d), rev)
+	})
+	return out, err
 }
 
 func hasValidRound(st *State) bool {
@@ -938,6 +971,32 @@ func hasValidRound(st *State) bool {
 		}
 	}
 	return false
+}
+
+// unknownRound returns the index of the first round whose latest attempt is
+// UNKNOWN, or -1. An UNKNOWN round blocks any further dispatch until an owner
+// resolves it (R0-F3).
+func unknownRound(st *State) int {
+	for _, r := range st.Rounds {
+		if len(r.Attempts) > 0 && r.Attempts[len(r.Attempts)-1] == string(kernel.ExecUnknown) {
+			return r.Index
+		}
+	}
+	return -1
+}
+
+// latestReviewedCurrent reports whether the most recent round is a
+// result-valid, non-stale review of exactly the current TargetRevision. It
+// is the precondition for advancing (R0-F1): advancement continues the loop
+// from a completed review of the present bytes, never from an older round, a
+// failed/timeout/needs-input latest round, or an already-advanced revision
+// that has not been re-reviewed.
+func latestReviewedCurrent(st *State) bool {
+	if len(st.Rounds) == 0 {
+		return false
+	}
+	last := st.Rounds[len(st.Rounds)-1]
+	return last.Outcome == string(review.OutcomeResultValid) && !last.Stale && last.Revision == st.TargetRevision
 }
 
 // closableAgainstDisk is the fail-closed closure precondition (Gate A-3):
@@ -964,111 +1023,158 @@ func closableAgainstDisk(st *State) error {
 // Close ends the objective through the fail-closed gate. It never promotes:
 // only a persisted CLOSABLE state can close (R1-CX-F1).
 func Close(canonical string) (*State, error) {
-	st, err := LoadState(canonical)
-	if err != nil {
-		return nil, err
-	}
-	if st == nil {
-		return nil, fmt.Errorf("no objective in canonical")
-	}
-	if st.Governance != string(kernel.GovClosable) {
-		return nil, fmt.Errorf("close refused: governance is %s, not CLOSABLE (a valid review result and complete dispositions are required)", st.Governance)
-	}
-	// Close-time re-verification (Gate A-3): a persisted CLOSABLE is not
-	// enough — the target on disk must still be the reviewed revision.
-	if err := closableAgainstDisk(st); err != nil {
-		return nil, fmt.Errorf("close refused: %w", err)
-	}
-	o, err := rehydrate(st)
-	if err != nil {
-		return nil, err
-	}
-	if err := o.Close(func() error { return review.ClosureCheck(st.Findings) }); err != nil {
-		return nil, err
-	}
-	st.Governance = string(kernel.GovClosed)
-	return st, appendState(canonical, st, "\n## closure\n- result: CLOSED\n")
+	var out *State
+	err := withCanonicalLock(canonical, func() error {
+		rev, err := store.Revision(canonical)
+		if err != nil {
+			return err
+		}
+		st, err := LoadState(canonical)
+		if err != nil {
+			return err
+		}
+		if st == nil {
+			return fmt.Errorf("no objective in canonical")
+		}
+		if st.Governance != string(kernel.GovClosable) {
+			return fmt.Errorf("close refused: governance is %s, not CLOSABLE (a valid review result and complete dispositions are required)", st.Governance)
+		}
+		// Close-time re-verification (Gate A-3): a persisted CLOSABLE is not
+		// enough — the target on disk must still be the reviewed revision.
+		if err := closableAgainstDisk(st); err != nil {
+			return fmt.Errorf("close refused: %w", err)
+		}
+		o, err := rehydrate(st)
+		if err != nil {
+			return err
+		}
+		if err := o.Close(func() error { return review.ClosureCheck(st.Findings) }); err != nil {
+			return err
+		}
+		st.Governance = string(kernel.GovClosed)
+		out = st
+		return appendState(canonical, st, "\n## closure\n- result: CLOSED\n", rev)
+	})
+	return out, err
 }
 
 // Advance authorizes the objective's expected target revision to move to
 // the bytes currently on disk — the explicit continuation of the
 // review→revise→re-review loop inside one objective (Gate A-1). It is never
-// silent: it refuses when the target is unchanged, when no valid non-stale
-// round exists to advance from, or when any blocking finding is
-// undispositioned. The advanced revision is un-reviewed, so the objective
-// drops out of CLOSABLE and only a new round over the advanced revision can
-// make it closable again. Advancing consumes no round.
+// silent: it refuses when the target is unchanged, when any blocking finding
+// is undispositioned, or when the LATEST round is not a result-valid,
+// non-stale review of the current revision (R0-F1) — so a double-advance
+// (advance again before re-reviewing) or advancing off a failed/timeout
+// latest round are both rejected. The advanced revision is un-reviewed, so
+// the objective drops out of CLOSABLE and only a new round over the advanced
+// revision can make it closable again. Advancing consumes no round.
 func Advance(canonical, note string) (*State, error) {
-	st, err := LoadState(canonical)
-	if err != nil {
-		return nil, err
-	}
-	if st == nil {
-		return nil, fmt.Errorf("no objective in canonical")
-	}
-	switch st.Governance {
-	case string(kernel.GovClosed), string(kernel.GovSuperseded), string(kernel.GovAbandoned):
-		return nil, fmt.Errorf("advance refused: objective is terminal (%s)", st.Governance)
-	}
-	if !hasValidRound(st) {
-		return nil, fmt.Errorf("advance refused: no valid non-stale round to advance from")
-	}
-	if err := review.ClosureCheck(st.Findings); err != nil {
-		return nil, fmt.Errorf("advance refused: blocking findings are not fully dispositioned: %w", err)
-	}
-	diskNow, resolved, err := TargetSnapshot(st.TargetLocation)
-	if err != nil {
-		return nil, err
-	}
-	if diskNow == st.TargetRevision {
-		return nil, fmt.Errorf("advance refused: target unchanged — nothing to advance")
-	}
-	from := st.TargetRevision
-	afterRound := st.Rounds[len(st.Rounds)-1].Index
-	st.Advances = append(st.Advances, AdvanceState{
-		FromRevision: from, ToRevision: diskNow, AfterRound: afterRound, Note: note,
+	var out *State
+	err := withCanonicalLock(canonical, func() error {
+		rev, err := store.Revision(canonical)
+		if err != nil {
+			return err
+		}
+		st, err := LoadState(canonical)
+		if err != nil {
+			return err
+		}
+		if st == nil {
+			return fmt.Errorf("no objective in canonical")
+		}
+		switch st.Governance {
+		case string(kernel.GovClosed), string(kernel.GovSuperseded), string(kernel.GovAbandoned):
+			return fmt.Errorf("advance refused: objective is terminal (%s)", st.Governance)
+		}
+		if !latestReviewedCurrent(st) {
+			return fmt.Errorf("advance refused: the latest round must be a result-valid, non-stale review of the current revision (advance continues the loop from a completed re-review, not an older or failed round)")
+		}
+		if err := review.ClosureCheck(st.Findings); err != nil {
+			return fmt.Errorf("advance refused: blocking findings are not fully dispositioned: %w", err)
+		}
+		diskNow, resolved, err := TargetSnapshot(st.TargetLocation)
+		if err != nil {
+			return err
+		}
+		if diskNow == st.TargetRevision {
+			return fmt.Errorf("advance refused: target unchanged — nothing to advance")
+		}
+		from := st.TargetRevision
+		afterRound := st.Rounds[len(st.Rounds)-1].Index
+		st.Advances = append(st.Advances, AdvanceState{
+			FromRevision: from, ToRevision: diskNow, AfterRound: afterRound, Note: note,
+		})
+		st.TargetRevision, st.TargetResolved = diskNow, resolved
+		if st.Governance == string(kernel.GovClosable) {
+			st.Governance = string(kernel.GovDecisionRequired) // kernel-legal: CLOSABLE → DECISION_REQUIRED
+		}
+		out = st
+		return appendState(canonical, st, fmt.Sprintf(
+			"\n## advance after R%d\n- from: %s\n- to: %s\n- note: %s\n", afterRound, from, diskNow, note), rev)
 	})
-	st.TargetRevision, st.TargetResolved = diskNow, resolved
-	if st.Governance == string(kernel.GovClosable) {
-		st.Governance = string(kernel.GovDecisionRequired) // kernel-legal: CLOSABLE → DECISION_REQUIRED
-	}
-	return st, appendState(canonical, st, fmt.Sprintf(
-		"\n## advance after R%d\n- from: %s\n- to: %s\n- note: %s\n", afterRound, from, diskNow, note))
+	return out, err
 }
 
 // Terminate ends the objective as SUPERSEDED or ABANDONED with arbiter
 // identity and reason.
 func Terminate(canonical string, to kernel.GovernanceState, arbiter, reason string) (*State, error) {
-	st, err := LoadState(canonical)
-	if err != nil {
-		return nil, err
-	}
-	if st == nil {
-		return nil, fmt.Errorf("no objective in canonical")
-	}
-	o, err := rehydrate(st)
-	if err != nil {
-		return nil, err
-	}
-	if err := o.Terminate(to, kernel.TerminalReason{Arbiter: arbiter, Reason: reason}); err != nil {
-		return nil, err
-	}
-	st.Governance = string(to)
-	st.TerminalArbiter, st.TerminalReason = arbiter, reason
-	return st, appendState(canonical, st, fmt.Sprintf("\n## terminal\n- result: %s\n- arbiter: %s\n- reason: %s\n", to, arbiter, reason))
+	var out *State
+	err := withCanonicalLock(canonical, func() error {
+		rev, err := store.Revision(canonical)
+		if err != nil {
+			return err
+		}
+		st, err := LoadState(canonical)
+		if err != nil {
+			return err
+		}
+		if st == nil {
+			return fmt.Errorf("no objective in canonical")
+		}
+		o, err := rehydrate(st)
+		if err != nil {
+			return err
+		}
+		if err := o.Terminate(to, kernel.TerminalReason{Arbiter: arbiter, Reason: reason}); err != nil {
+			return err
+		}
+		st.Governance = string(to)
+		st.TerminalArbiter, st.TerminalReason = arbiter, reason
+		out = st
+		return appendState(canonical, st, fmt.Sprintf("\n## terminal\n- result: %s\n- arbiter: %s\n- reason: %s\n", to, arbiter, reason), rev)
+	})
+	return out, err
 }
 
-func appendState(canonical string, st *State, header string) error {
-	rev, err := store.Revision(canonical)
-	if err != nil {
-		return err
-	}
+// appendState appends the state block under a compare-and-swap on
+// expectedRev — the revision observed at the start of the mutator's critical
+// section (R0-F2). A concurrent writer that changed the canonical since then
+// fails the CAS instead of being silently overwritten.
+func appendState(canonical string, st *State, header, expectedRev string) error {
 	block, err := stateSection(st)
 	if err != nil {
 		return err
 	}
-	_, err = store.AppendAtomic(canonical, header+block, rev)
+	_, err = store.AppendAtomic(canonical, header+block, expectedRev)
 	return err
+}
+
+// withCanonicalLock serializes a mutator's whole load→validate→mutate→append
+// critical section across processes via an exclusive flock on a sidecar lock
+// file (R0-F2). Two acrelay processes can no longer interleave read-modify-
+// write and drop each other's state blocks; the CAS in appendState remains as
+// defense in depth against any non-locking writer.
+func withCanonicalLock(canonical string, fn func() error) error {
+	fd, err := os.OpenFile(canonical+".lock", os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer fd.Close()
+	if err := syscall.Flock(int(fd.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("canonical lock failed: fail-closed, refusing unserialized mutation: %w", err)
+	}
+	defer syscall.Flock(int(fd.Fd()), syscall.LOCK_UN)
+	return fn()
 }
 
 // Status renders a short human-readable summary.

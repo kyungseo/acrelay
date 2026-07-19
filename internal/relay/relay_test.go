@@ -5,10 +5,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kyungseo/acrelay/internal/adapter"
 	"github.com/kyungseo/acrelay/internal/kernel"
@@ -812,5 +815,157 @@ func TestAdvanceFromClosableRequiresReReview(t *testing.T) {
 	}
 	if st2, err := Close(s.Canonical); err != nil || st2.Governance != string(kernel.GovClosed) {
 		t.Fatalf("close after re-review must succeed: %v", err)
+	}
+}
+
+// R0-F1: a second advance without an intervening re-review is refused — the
+// latest round reviewed the pre-advance revision, not the current one.
+func TestAdvanceRefusesDoubleAdvance(t *testing.T) {
+	s, _, dir := newSession(t, []adapter.FakeResult{changesRequested("finding one")})
+	if _, _, err := s.Review(context.Background(), "review", adapter.Request{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetPath(dir), []byte("rev A"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Advance(s.Canonical, "to rev A"); err != nil {
+		t.Fatal(err)
+	}
+	// edit again and try to advance without re-reviewing rev A
+	if err := os.WriteFile(targetPath(dir), []byte("rev B"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Advance(s.Canonical, "to rev B"); err == nil {
+		t.Fatal("double-advance without an intervening re-review must be refused")
+	}
+}
+
+// R0-F1: advancing off a FAILED latest round is refused even if an earlier
+// round was valid.
+func TestAdvanceRefusesFailedLatestRound(t *testing.T) {
+	s, fake, dir := newSession(t, []adapter.FakeResult{changesRequested("finding one")})
+	if _, _, err := s.Review(context.Background(), "review", adapter.Request{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
+		t.Fatal(err)
+	}
+	// a second round fails (timeout FAILED) — latest round is not result-valid
+	fake.Script = append(fake.Script, adapter.FakeResult{TimedOut: true, TimeoutKind: adapter.TimeoutIdle})
+	if _, outcome, err := s.Review(context.Background(), "review again", adapter.Request{}); err != nil {
+		t.Fatal(err)
+	} else if outcome != review.OutcomeFailed {
+		t.Fatalf("expected FAILED, got %s", outcome)
+	}
+	if err := os.WriteFile(targetPath(dir), []byte("revised"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Advance(s.Canonical, "off a failed round"); err == nil {
+		t.Fatal("advance must be refused when the latest round is FAILED")
+	}
+}
+
+// R0-F3: an UNKNOWN round (hard-cap/external kill) forbids any further
+// dispatch — a new round must not slip past the kernel's same-round guard.
+// The second Review fails before dispatching, so the fake dispatch count
+// stays at 1.
+func TestUnknownRoundBlocksFurtherDispatch(t *testing.T) {
+	s, fake, _ := newSession(t, []adapter.FakeResult{{TimedOut: true, TimeoutKind: adapter.TimeoutHardCap}})
+	if _, outcome, err := s.Review(context.Background(), "x", adapter.Request{}); err != nil {
+		t.Fatal(err)
+	} else if outcome != review.OutcomeFailed {
+		t.Fatalf("expected FAILED, got %s", outcome)
+	}
+	if fake.Dispatched != 1 {
+		t.Fatalf("first dispatch count = %d, want 1", fake.Dispatched)
+	}
+	fake.Script = append(fake.Script, approve())
+	if _, _, err := s.Review(context.Background(), "retry", adapter.Request{}); err == nil {
+		t.Fatal("dispatch after an UNKNOWN round must be refused")
+	}
+	if fake.Dispatched != 1 {
+		t.Fatalf("no re-dispatch allowed after UNKNOWN: count = %d, want 1", fake.Dispatched)
+	}
+	// the owner resolves it by terminating; then a follow-up can proceed
+	if _, err := Terminate(s.Canonical, kernel.GovSuperseded, "owner", "UNKNOWN reconciled"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Helper-process entry for the multi-process canonical fixture: one process
+// dispositions one finding. Gated by env so the normal suite skips it.
+func TestDispositionHelperProcess(t *testing.T) {
+	canonical := os.Getenv("ACRELAY_DISP_CANONICAL")
+	if canonical == "" {
+		t.Skip("helper process entry — driven by TestConcurrentCanonicalMutatorsSerialize")
+	}
+	barrier := os.Getenv("ACRELAY_DISP_BARRIER")
+	for { // all children release together for real critical-section overlap
+		if _, err := os.Stat(barrier); err == nil {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if _, err := Disposition(canonical, os.Getenv("ACRELAY_DISP_FINDING"), review.DispositionAccept, nil); err != nil {
+		t.Fatalf("helper disposition: %v", err)
+	}
+}
+
+// R0-F2: concurrent canonical mutators in separate OS processes must
+// serialize under the sidecar flock — no lost updates, no duplicate state
+// blocks. Without the lock, interleaved load→append drops dispositions.
+func TestConcurrentCanonicalMutatorsSerialize(t *testing.T) {
+	const n = 10
+	findings := make([]any, n)
+	for i := range findings {
+		findings[i] = fmt.Sprintf("finding %d", i+1)
+	}
+	s, _, _ := newSession(t, []adapter.FakeResult{changesRequested(findings...)})
+	if _, _, err := s.Review(context.Background(), "review", adapter.Request{}); err != nil {
+		t.Fatal(err)
+	}
+	barrier := s.Canonical + ".barrier"
+	cmds := make([]*exec.Cmd, n)
+	outs := make([]*strings.Builder, n)
+	for i := range cmds {
+		cmd := exec.Command(os.Args[0], "-test.run=TestDispositionHelperProcess$", "-test.v")
+		cmd.Env = append(os.Environ(),
+			"ACRELAY_DISP_CANONICAL="+s.Canonical,
+			"ACRELAY_DISP_BARRIER="+barrier,
+			fmt.Sprintf("ACRELAY_DISP_FINDING=R0-F%d", i+1))
+		outs[i] = &strings.Builder{}
+		cmd.Stdout, cmd.Stderr = outs[i], outs[i]
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		cmds[i] = cmd
+	}
+	time.Sleep(150 * time.Millisecond) // let every child reach the barrier wait
+	if err := os.WriteFile(barrier, []byte("go"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i, cmd := range cmds {
+		if err := cmd.Wait(); err != nil {
+			t.Fatalf("helper %d failed: %v\n%s", i, err, outs[i].String())
+		}
+	}
+	st, err := LoadState(s.Canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispositioned := 0
+	for _, f := range st.Findings {
+		if f.Disposition != "" {
+			dispositioned++
+		}
+	}
+	if dispositioned != n { // a lost update would leave some finding undispositioned
+		t.Fatalf("lost updates under concurrent mutation: %d/%d findings dispositioned", dispositioned, n)
+	}
+	if st.Governance != string(kernel.GovClosable) {
+		t.Fatalf("all findings dispositioned but governance = %s", st.Governance)
 	}
 }
