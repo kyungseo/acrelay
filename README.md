@@ -84,7 +84,34 @@ discarded. Doctor failure, timeout, or malformed output records an empty,
 
 ```
 go build -o acrelay ./cmd/acrelay   # single binary, no runtime dependencies
-go vet ./... && go test ./...       # deterministic suite (fake adapter)
+go vet ./...
+go test ./... -race -count=1        # deterministic suite only
 ```
+
+The default Go suite isolates `HOME`, Claude/Codex config directories, XDG
+state, Git global/system config, and the vendor CLI lookup path inside each
+risky test package. Installed `claude` and `codex` commands are fail-fast
+sentinels in this mode; fake fixtures must explicitly shadow them. A
+post-suite barrier also rejects changes to the actual default
+`~/.acrelay/handles.json` footprint. The suite does not use user auth,
+external network access, or model/API cost.
+
+Installed-CLI smoke is a separate script-to-binary path and is never compiled
+into the default Go test suite. It requires both the explicit command and an
+environment opt-in:
+
+```
+ACRELAY_LIVE_SMOKE=1 ./scripts/live-smoke.sh claude
+ACRELAY_LIVE_SMOKE=1 ./scripts/live-smoke.sh codex
+```
+
+The live smoke performs an initial review, revises the synthetic target, and
+then re-reviews it through the stored reviewer session. It uses the selected
+CLI's current user auth/config, external network, and model/API budget. Acrelay
+does not edit vendor configuration, but the vendor CLI may maintain its own
+runtime/session state. The target, canonical record, session-handle store,
+prompt, and built binary are synthetic temporary files removed when the script
+exits. Run it only by explicit owner choice; deterministic test success does
+not imply live-smoke evidence.
 
 Uninstall by deleting the binary and, if desired, `~/.acrelay/`.
