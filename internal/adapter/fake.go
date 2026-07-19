@@ -26,6 +26,12 @@ type FakeAdapter struct {
 	Script          []FakeResult
 	PreDispatchFail error
 	Dispatched      int
+	// Test synchronization hooks (nil in normal use). When set, Dispatch
+	// closes DispatchEntered on entry — after the caller has already taken
+	// its pre-dispatch snapshot — and then blocks until DispatchGate is
+	// closed, letting a test interleave another writer deterministically.
+	DispatchEntered chan struct{}
+	DispatchGate    <-chan struct{}
 }
 
 func (f *FakeAdapter) Vendor() string { return f.VendorName }
@@ -63,6 +69,13 @@ func (f *FakeAdapter) PreDispatch(ctx context.Context, req Request, handles *Han
 }
 
 func (f *FakeAdapter) Dispatch(ctx context.Context, req Request, handles *HandleStore) (*Result, error) {
+	if f.DispatchEntered != nil {
+		close(f.DispatchEntered)
+		f.DispatchEntered = nil
+	}
+	if f.DispatchGate != nil {
+		<-f.DispatchGate
+	}
 	if f.Dispatched >= len(f.Script) {
 		return nil, fmt.Errorf("fake script exhausted after %d dispatches", f.Dispatched)
 	}

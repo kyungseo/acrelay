@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -406,6 +407,11 @@ func TestHandleStoreHelperProcessMutate(t *testing.T) {
 	path := os.Getenv("ACRELAY_HELPER_PATH")
 	if path == "" {
 		t.Skip("helper process entry — driven by TestHandleStoreConcurrentProcessesLoseNothing")
+	}
+	// Set the in-lock delay hook from test code only (R2-F2): production
+	// never reads this env var — the helper (a test binary) does.
+	if ms, err := strconv.Atoi(os.Getenv("ACRELAY_TEST_LOCK_DELAY_MS")); err == nil && ms > 0 {
+		afterLockAcquired = func() { time.Sleep(time.Duration(ms) * time.Millisecond) }
 	}
 	barrier := os.Getenv("ACRELAY_HELPER_BARRIER")
 	for { // all children release together — real critical-section overlap

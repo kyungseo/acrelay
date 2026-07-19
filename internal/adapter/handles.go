@@ -7,10 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
-	"time"
 )
 
 // HandleStore maps opaque random session references to native vendor resume
@@ -41,22 +39,16 @@ func (h *HandleStore) withExclusiveLock(fn func() error) error {
 		return fmt.Errorf("handle store lock failed: fail-closed, refusing unserialized mutation: %w", err)
 	}
 	defer syscall.Flock(int(fd.Fd()), syscall.LOCK_UN)
-	inLockTestDelay() // no-op unless ACRELAY_TEST_LOCK_DELAY_MS is set (test-only)
+	if afterLockAcquired != nil {
+		afterLockAcquired()
+	}
 	return fn()
 }
 
-// inLockTestDelay widens the mutation critical section for concurrency tests
-// so overlapping processes provably contend inside the lock, not merely at
-// the barrier. It is inert in production: the env var is never set there.
-func inLockTestDelay() {
-	ms := os.Getenv("ACRELAY_TEST_LOCK_DELAY_MS")
-	if ms == "" {
-		return
-	}
-	if d, err := strconv.Atoi(ms); err == nil && d > 0 {
-		time.Sleep(time.Duration(d) * time.Millisecond)
-	}
-}
+// afterLockAcquired is a hook invoked while holding the mutation lock. It is
+// nil in production — no env lookup, no delay on the real path — and is set
+// only by concurrency tests to widen the critical section (R2-F2).
+var afterLockAcquired func()
 
 type handleFile struct {
 	Version int                    `json:"version"`

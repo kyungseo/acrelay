@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -995,29 +994,58 @@ func noDuplicateStateSeqs(t *testing.T, canonical string) {
 	}
 }
 
-// R1-F1: a locked mutator (Disposition) and the Review append path run
-// concurrently on the same canonical. Whichever loses the race must fail
-// closed (CAS conflict → recovery), never overwrite the other — the state
-// lineage stays readable with unique sequence numbers. Only the Review
-// goroutine touches the fake adapter, so there is no test-double data race.
-func TestReviewAndMutatorDoNotClobber(t *testing.T) {
-	s, _, _ := newSession(t, []adapter.FakeResult{changesRequested("f1", "f2"), changesRequested("f3")})
+// R1-F1 / R2-F1: a Review whose append loses to a concurrent locked mutator
+// must fail closed, never clobber. The interleaving is forced, not hoped for:
+// the Review goroutine takes its pre-dispatch snapshot and then blocks inside
+// the fake adapter; a Disposition completes in that window; the Review is
+// released and its append CAS is now stale. We assert the exact fail-closed
+// outcome — Review errors into the recovery path, the disposition survives,
+// and the Review's round never reaches the canonical.
+func TestReviewLosingToMutatorFailsClosed(t *testing.T) {
+	s, fake, _ := newSession(t, []adapter.FakeResult{changesRequested("f1", "f2"), changesRequested("f3")})
 	if _, _, err := s.Review(context.Background(), "r0", adapter.Request{}); err != nil {
 		t.Fatal(err)
 	}
-	var wg sync.WaitGroup
-	wg.Add(2)
+	entered := make(chan struct{})
+	gate := make(chan struct{})
+	fake.DispatchEntered = entered
+	fake.DispatchGate = gate
+
+	var rErr error
+	done := make(chan struct{})
 	go func() {
-		defer wg.Done()
-		_, _ = Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil)
+		_, _, rErr = s.Review(context.Background(), "r1", adapter.Request{})
+		close(done)
 	}()
-	go func() {
-		defer wg.Done()
-		_, _, _ = s.Review(context.Background(), "r1", adapter.Request{}) // may hit CAS→recovery
-	}()
-	wg.Wait()
-	if _, err := LoadState(s.Canonical); err != nil {
-		t.Fatalf("state unreadable after concurrent writers: %v", err)
+
+	<-entered // Review has snapshotted and is now parked inside Dispatch
+	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
+		t.Fatal(err)
+	}
+	close(gate) // release Review; its pre-dispatch snapshot is now stale
+	<-done
+
+	if rErr == nil || !strings.Contains(rErr.Error(), "recovery") {
+		t.Fatalf("Review must fail closed into the recovery path, got: %v", rErr)
+	}
+	st, err := LoadState(s.Canonical)
+	if err != nil {
+		t.Fatalf("state unreadable after the race: %v", err)
+	}
+	if len(st.Rounds) != 1 {
+		t.Fatalf("the losing Review's round must not persist: got %d rounds", len(st.Rounds))
+	}
+	found := false
+	for _, f := range st.Findings {
+		if f.ID == "R0-F1" && f.Disposition != "" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the winning disposition must survive")
+	}
+	if recs, _ := pendingRecoveries(s.Canonical); len(recs) == 0 {
+		t.Fatal("the losing Review must leave a recovery transaction")
 	}
 	noDuplicateStateSeqs(t, s.Canonical)
 }
