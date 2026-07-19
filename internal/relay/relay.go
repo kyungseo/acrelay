@@ -35,7 +35,11 @@ const ReviewSchema = `{"type":"object","properties":{"verdict":{"type":"string",
 const (
 	KernelVersion  = "kernel v0.1"
 	ProfileVersion = "review-profile v0.1"
-	StoreVersion   = "store-md v0.1"
+	// store-md v0.2 adds CLOSED accountability fields (close actor/role/
+	// authority) as validated invariants (GB-CP-F1). The exact-version gate
+	// in validateState rejects pre-v0.2 canonicals, so there is no ambiguous
+	// legacy CLOSED state without accountability.
+	StoreVersion = "store-md v0.2"
 )
 
 // State is the machine-readable snapshot appended after every mutation.
@@ -242,6 +246,22 @@ func validateState(st *State, labelSeq int) error {
 			return fmt.Errorf("confirmation R%d exhausted attempts without escalation flag: fail-closed", c.RoundIndex)
 		}
 	}
+	// CLOSED accountability invariants (GB-CP-F1): a CLOSED objective must
+	// carry who closed it and, for a non-owner, the delegation basis; a state
+	// that is not CLOSED must not carry close metadata. A tampered artifact
+	// that strips or forges these fields fails closed on load.
+	closed := st.Governance == string(kernel.GovClosed)
+	hasCloseMeta := st.CloseActor != "" || st.CloseRole != "" || st.CloseAuthority != ""
+	if closed {
+		if strings.TrimSpace(st.CloseActor) == "" || strings.TrimSpace(st.CloseRole) == "" {
+			return fmt.Errorf("CLOSED state lacks close actor/role accountability: fail-closed")
+		}
+		if st.CloseRole != "owner" && strings.TrimSpace(st.CloseAuthority) == "" {
+			return fmt.Errorf("CLOSED by non-owner role %q without a declared authority basis: fail-closed", st.CloseRole)
+		}
+	} else if hasCloseMeta {
+		return fmt.Errorf("non-CLOSED state (%s) carries close accountability metadata: fail-closed", st.Governance)
+	}
 	return nil
 }
 
@@ -406,18 +426,20 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	req.Progress = func(state, detail string) {
 		s.report(state, "reviewer="+vendor+" "+detail)
 	}
+	// reviewerExec is the reviewer's execution disposition, set from the
+	// attempt's kernel state — never inferred from an error string (GB-CP-F2).
+	// It survives a later append/recovery error so a hard-cap that then fails
+	// to persist is still reported "unknown", not "failed".
+	var reviewerExec kernel.ExecutionState
 	defer func() {
 		switch {
-		case err != nil:
-			state := "failed"
-			if strings.Contains(err.Error(), "UNKNOWN") {
-				state = "unknown"
-			}
-			s.report(state, "reviewer="+vendor+": "+err.Error())
-		case st != nil && len(st.Rounds) > 0 && st.Rounds[len(st.Rounds)-1].Attempts[len(st.Rounds[len(st.Rounds)-1].Attempts)-1] == string(kernel.ExecUnknown):
-			s.report("unknown", "reviewer="+vendor+" hard-cap timeout")
-		case outcome == review.OutcomeFailed:
+		case reviewerExec == kernel.ExecUnknown:
+			s.report("unknown", "reviewer="+vendor+" execution UNKNOWN (hard-cap/external kill)")
+		case reviewerExec == kernel.ExecFailed || outcome == review.OutcomeFailed:
 			s.report("failed", "reviewer="+vendor+" execution failed")
+		case err != nil:
+			// never reached dispatch (guard / pre-dispatch / append conflict)
+			s.report("failed", "reviewer="+vendor+": "+err.Error())
 		default:
 			s.report("completed", "reviewer="+vendor+" outcome="+string(outcome))
 		}
@@ -529,6 +551,9 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 		_ = attempt.Transition(kernel.ExecRunning)
 		_ = attempt.Transition(kernel.ExecSucceeded)
 	}
+	// Capture the reviewer's execution disposition for the progress reporter
+	// before any append/recovery step can fail (GB-CP-F2).
+	reviewerExec = attempt.State
 
 	verdict := ""
 	var newFindings []review.Finding

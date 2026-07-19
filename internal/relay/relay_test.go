@@ -1168,3 +1168,96 @@ func TestOwnerCloseNeedsNoDelegation(t *testing.T) {
 		t.Fatalf("owner close must succeed without a delegation basis: %v", err)
 	}
 }
+
+// GB-CP-F1: validateState enforces CLOSED accountability invariants.
+func TestValidateStateClosedAccountability(t *testing.T) {
+	base := func() *State {
+		return &State{
+			Seq: 1, KernelVersion: KernelVersion, ProfileVersion: ProfileVersion, StoreVersion: StoreVersion,
+			TargetRevision: strings.Repeat("a", 64), Governance: string(kernel.GovClosed),
+			CloseActor: "owner", CloseRole: "owner",
+			Rounds: []RoundState{}, Findings: []review.Finding{},
+		}
+	}
+	if err := validateState(base(), 1); err != nil {
+		t.Fatalf("valid owner close rejected: %v", err)
+	}
+	strip := base()
+	strip.CloseActor, strip.CloseRole = "", ""
+	if err := validateState(strip, 1); err == nil {
+		t.Fatal("CLOSED without actor/role must fail")
+	}
+	nonOwner := base()
+	nonOwner.CloseActor, nonOwner.CloseRole, nonOwner.CloseAuthority = "driver", "driver", ""
+	if err := validateState(nonOwner, 1); err == nil {
+		t.Fatal("non-owner CLOSED without authority must fail")
+	}
+	delegated := base()
+	delegated.CloseActor, delegated.CloseRole, delegated.CloseAuthority = "driver", "driver", "owner-delegated"
+	if err := validateState(delegated, 1); err != nil {
+		t.Fatalf("valid delegated close rejected: %v", err)
+	}
+	leaked := base()
+	leaked.Governance = string(kernel.GovDecisionRequired)
+	if err := validateState(leaked, 1); err == nil {
+		t.Fatal("non-CLOSED state carrying close metadata must fail")
+	}
+}
+
+// GB-CP-F1: a digest-valid CLOSED block that omits accountability is still
+// rejected at the load boundary — the invariant is not bypassable by forging
+// a well-formed block.
+func TestLoadRejectsClosedWithoutAccountability(t *testing.T) {
+	dir := t.TempDir()
+	canonical := filepath.Join(dir, "c.md")
+	st := &State{
+		Seq: 0, KernelVersion: KernelVersion, ProfileVersion: ProfileVersion, StoreVersion: StoreVersion,
+		CollaborationID: "collab-x", ObjectiveID: "obj-x", Question: "q",
+		TargetLocation: "t", TargetRevision: strings.Repeat("a", 64),
+		Governance: string(kernel.GovClosed), // CLOSED but no accountability
+		Rounds:     []RoundState{}, Findings: []review.Finding{},
+	}
+	block, err := stateSection(st) // valid digest over the forged state
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(canonical, []byte(block), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadState(canonical); err == nil {
+		t.Fatal("a digest-valid CLOSED state without accountability must be rejected on load")
+	}
+}
+
+// GB-CP-F2: a hard-cap (execution UNKNOWN) whose append then conflicts must
+// still report progress "unknown" — the terminal state is derived from the
+// attempt's execution state, not the error string.
+func TestProgressUnknownSurvivesAppendConflict(t *testing.T) {
+	s, fake, _ := newSession(t, []adapter.FakeResult{
+		changesRequested("f1"),
+		{TimedOut: true, TimeoutKind: adapter.TimeoutHardCap},
+	})
+	if _, _, err := s.Review(context.Background(), "r0", adapter.Request{}); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	gate := make(chan struct{})
+	fake.DispatchEntered = entered
+	fake.DispatchGate = gate
+	var states []string
+	s.Reporter = func(state, _ string) { states = append(states, state) }
+	done := make(chan struct{})
+	go func() {
+		_, _, _ = s.Review(context.Background(), "r1", adapter.Request{})
+		close(done)
+	}()
+	<-entered // r1 has snapshotted and is parked inside Dispatch
+	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
+		t.Fatal(err)
+	}
+	close(gate) // r1 resumes: hard-cap UNKNOWN, then its append conflicts
+	<-done
+	if len(states) == 0 || states[len(states)-1] != "unknown" {
+		t.Fatalf("hard-cap + append conflict must report unknown, got %v", states)
+	}
+}
