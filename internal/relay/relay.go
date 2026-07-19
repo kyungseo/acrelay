@@ -55,6 +55,12 @@ type State struct {
 	Governance      string           `json:"governance"`
 	TerminalArbiter string           `json:"terminal_arbiter,omitempty"`
 	TerminalReason  string           `json:"terminal_reason,omitempty"`
+	// Closure accountability (GB-CX-F2): who closed the objective, in what
+	// role, and the declared authority basis. v1 is declared metadata only —
+	// no authentication or RBAC is claimed.
+	CloseActor     string `json:"close_actor,omitempty"`
+	CloseRole      string `json:"close_role,omitempty"`
+	CloseAuthority string `json:"close_authority,omitempty"`
 	SessionRef      string           `json:"session_ref,omitempty"`
 	Vendor          string           `json:"vendor,omitempty"`
 	SessionChanges  []SessionChange  `json:"session_changes,omitempty"`
@@ -122,6 +128,17 @@ type Session struct {
 	Handles   *adapter.HandleStore
 	Canonical string
 	Reset     *SessionReset // required to switch vendor/session
+	// Reporter, if set, receives observable reviewer progress states —
+	// started, running, completed, failed, unknown — each carrying the
+	// reviewer identity, so the user can follow the leg on any exit path
+	// (Blueprint progress contract). Optional.
+	Reporter func(state, detail string)
+}
+
+func (s *Session) report(state, detail string) {
+	if s.Reporter != nil {
+		s.Reporter(state, detail)
+	}
 }
 
 // TargetSnapshot computes the evidence-pointer digest of the target's raw
@@ -377,14 +394,40 @@ func pendingRecoveries(canonical string) ([]string, error) {
 }
 
 // Review runs one formal round: snapshots → commit → dispatch → validate →
-// append. It returns the updated state and the dispatch outcome.
-func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request) (*State, review.Outcome, error) {
-	if recs, err := pendingRecoveries(s.Canonical); err != nil {
-		return nil, "", err
+// append. It returns the updated state and the dispatch outcome. Observable
+// progress states (started / running / completed / failed / unknown) are
+// emitted through s.Reporter on every exit path, always carrying the reviewer
+// identity (Blueprint progress contract).
+func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request) (st *State, outcome review.Outcome, err error) {
+	vendor := s.Adapter.Vendor()
+	s.report("started", "reviewer="+vendor)
+	// "running" comes from the adapter once the child is actually running;
+	// the relay stamps it with the reviewer identity like every other state.
+	req.Progress = func(state, detail string) {
+		s.report(state, "reviewer="+vendor+" "+detail)
+	}
+	defer func() {
+		switch {
+		case err != nil:
+			state := "failed"
+			if strings.Contains(err.Error(), "UNKNOWN") {
+				state = "unknown"
+			}
+			s.report(state, "reviewer="+vendor+": "+err.Error())
+		case st != nil && len(st.Rounds) > 0 && st.Rounds[len(st.Rounds)-1].Attempts[len(st.Rounds[len(st.Rounds)-1].Attempts)-1] == string(kernel.ExecUnknown):
+			s.report("unknown", "reviewer="+vendor+" hard-cap timeout")
+		case outcome == review.OutcomeFailed:
+			s.report("failed", "reviewer="+vendor+" execution failed")
+		default:
+			s.report("completed", "reviewer="+vendor+" outcome="+string(outcome))
+		}
+	}()
+	if recs, rerr := pendingRecoveries(s.Canonical); rerr != nil {
+		return nil, "", rerr
 	} else if len(recs) > 0 {
 		return nil, "", fmt.Errorf("pending recovery transactions %v: reconcile before dispatching again (duplicate-execution guard)", recs)
 	}
-	st, err := LoadState(s.Canonical)
+	st, err = LoadState(s.Canonical)
 	if err != nil {
 		return nil, "", err
 	}
@@ -466,7 +509,6 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	if res != nil && !res.Started {
 		return nil, "", fmt.Errorf("child start failure (no round/attempt persisted): %w", dispatchErr)
 	}
-	var outcome review.Outcome
 	switch {
 	case res != nil && res.TimedOut:
 		_ = attempt.Transition(kernel.ExecRunning)
@@ -1095,7 +1137,18 @@ func closableAgainstDisk(st *State) error {
 
 // Close ends the objective through the fail-closed gate. It never promotes:
 // only a persisted CLOSABLE state can close (R1-CX-F1).
-func Close(canonical string) (*State, error) {
+// Close ends the objective through the fail-closed gate. It records who
+// closed it and under what declared authority (GB-CX-F2): owner is the
+// default arbiter, and a non-owner (e.g. a driver) may clean-close only with
+// a declared bounded-delegation basis — both are preserved in the canonical.
+// v1 is declared metadata only; no authentication or RBAC is claimed.
+func Close(canonical, actor, role, authority string) (*State, error) {
+	if strings.TrimSpace(actor) == "" || strings.TrimSpace(role) == "" {
+		return nil, fmt.Errorf("close refused: a declared actor and role are required (accountability)")
+	}
+	if role != "owner" && strings.TrimSpace(authority) == "" {
+		return nil, fmt.Errorf("close refused: role %q must declare its bounded-delegation authority basis (owner is the default arbiter)", role)
+	}
 	var out *State
 	err := withCanonicalLock(canonical, func() error {
 		rev, err := store.Revision(canonical)
@@ -1125,8 +1178,10 @@ func Close(canonical string) (*State, error) {
 			return err
 		}
 		st.Governance = string(kernel.GovClosed)
+		st.CloseActor, st.CloseRole, st.CloseAuthority = actor, role, authority
 		out = st
-		return appendState(canonical, st, "\n## closure\n- result: CLOSED\n", rev)
+		return appendState(canonical, st, fmt.Sprintf(
+			"\n## closure\n- result: CLOSED\n- actor: %s\n- role: %s\n- authority: %s\n", actor, role, authority), rev)
 	})
 	return out, err
 }

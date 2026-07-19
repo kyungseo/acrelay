@@ -141,7 +141,7 @@ func (a ClaudeAdapter) Dispatch(ctx context.Context, req Request, handles *Handl
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	cmd.Stdin = bytes.NewReader([]byte(req.Prompt))
-	runErr := cmd.Run()
+	runErr := runWithProgress(cmd, req.Progress)
 
 	res := &Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: exitCode(cmd), Started: cmd.ProcessState != nil}
 	if !res.Started {

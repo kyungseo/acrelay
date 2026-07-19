@@ -90,6 +90,9 @@ func (f *FakeAdapter) Dispatch(ctx context.Context, req Request, handles *Handle
 		res.ExitCode = -1
 		return res, fmt.Errorf("fake process never started (pre-dispatch failure, no attempt consumed)")
 	}
+	if req.Progress != nil {
+		req.Progress("running", "reviewer process started")
+	}
 	if fr.TimedOut {
 		res.TimeoutKind = fr.TimeoutKind
 		if res.TimeoutKind == "" {

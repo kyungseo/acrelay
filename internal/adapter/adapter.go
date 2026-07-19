@@ -207,6 +207,9 @@ type Request struct {
 	WorkingDir string
 	ResumeRef  string // session_ref to resume, "" = new session
 	Timeouts   Timeouts
+	// Progress, if set, is called with observable reviewer state transitions
+	// (e.g. "running" when the child process has started). Optional.
+	Progress func(state, detail string)
 }
 
 // Provenance records what was requested and what was observed.
@@ -328,6 +331,21 @@ func newGroupCmd(ctx context.Context, grace time.Duration, name string, args ...
 	}
 	cmd.WaitDelay = grace + 2*time.Second // backstop for the direct child
 	return cmd
+}
+
+// runWithProgress starts the child, emits a "running" progress event once the
+// process is actually running (the reviewer's observable start), then waits.
+// Splitting Start/Wait lets the caller surface running distinct from started
+// (Blueprint progress contract). A start failure emits nothing — the child
+// never ran — and is reported by the caller as a pre-dispatch failure.
+func runWithProgress(cmd *exec.Cmd, progress func(state, detail string)) error {
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if progress != nil {
+		progress("running", "reviewer process started")
+	}
+	return cmd.Wait()
 }
 
 // modelSelection classifies the request kind for provenance.

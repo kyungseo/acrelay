@@ -187,7 +187,7 @@ func (a CodexAdapter) Dispatch(ctx context.Context, req Request, handles *Handle
 	// Event-stream mode: startup and idle are observable-output timers wired
 	// to the JSONL stream (DR-811 §7).
 	go superviseTimeouts(tctx, tcancel, stdout.activity, timeouts)
-	runErr := cmd.Run()
+	runErr := runWithProgress(cmd, req.Progress)
 
 	res := &Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: exitCode(cmd), Started: cmd.ProcessState != nil}
 	if !res.Started {

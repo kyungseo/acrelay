@@ -61,7 +61,7 @@ func TestE2EApproveAndClose(t *testing.T) {
 	if st.SessionRef == "" {
 		t.Fatal("session_ref must be recorded")
 	}
-	st2, err := Close(s.Canonical)
+	st2, err := Close(s.Canonical, "owner", "owner", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,27 +80,27 @@ func TestE2EChangesRequestedClosureGate(t *testing.T) {
 	if outcome != review.OutcomeResultValid || st.Governance != string(kernel.GovDecisionRequired) {
 		t.Fatalf("changes-requested must yield DECISION_REQUIRED: %s %s", outcome, st.Governance)
 	}
-	if _, err := Close(s.Canonical); err == nil {
+	if _, err := Close(s.Canonical, "owner", "owner", ""); err == nil {
 		t.Fatal("close with undispositioned blocking findings must fail")
 	}
 	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Close(s.Canonical); err == nil {
+	if _, err := Close(s.Canonical, "owner", "owner", ""); err == nil {
 		t.Fatal("close with one remaining blocking finding must fail")
 	}
 	// needs-user without decision is rejected by closure, with decision passes
 	if _, err := Disposition(s.Canonical, "R0-F2", review.DispositionNeedsUser, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Close(s.Canonical); err == nil {
+	if _, err := Close(s.Canonical, "owner", "owner", ""); err == nil {
 		t.Fatal("needs-user without arbiter decision must block closure")
 	}
 	if _, err := Disposition(s.Canonical, "R0-F2", review.DispositionNeedsUser,
 		&review.ArbiterDecision{Arbiter: "owner", Reason: "accepted for alpha"}); err != nil {
 		t.Fatal(err)
 	}
-	if st3, err := Close(s.Canonical); err != nil || st3.Governance != string(kernel.GovClosed) {
+	if st3, err := Close(s.Canonical, "owner", "owner", ""); err != nil || st3.Governance != string(kernel.GovClosed) {
 		t.Fatalf("close after full disposition must succeed: %v", err)
 	}
 }
@@ -161,7 +161,7 @@ func TestE2ESessionContinuityAcrossRoundsAndObjectives(t *testing.T) {
 	if st1.SessionRef == "" || st1.SessionRef != st2.SessionRef {
 		t.Fatalf("rounds must reuse the session_ref: %s vs %s", st1.SessionRef, st2.SessionRef)
 	}
-	if _, err := Close(s.Canonical); err != nil {
+	if _, err := Close(s.Canonical, "owner", "owner", ""); err != nil {
 		t.Fatal(err)
 	}
 	// objective transition (DR-811 이관 fixture): same target needs prior
@@ -232,7 +232,7 @@ func TestE2ETimeoutKindSplitsExecutionState(t *testing.T) {
 		if outcome != review.OutcomeFailed || st.Rounds[0].Attempts[0] != string(kernel.ExecFailed) {
 			t.Fatalf("%s timeout must record FAILED, got %+v", kind, st.Rounds[0])
 		}
-		if _, err := Close(s.Canonical); err == nil {
+		if _, err := Close(s.Canonical, "owner", "owner", ""); err == nil {
 			t.Fatalf("%s timeout round must not be closable", kind)
 		}
 	}
@@ -300,13 +300,13 @@ func TestE2ERawEvidencePersisted(t *testing.T) {
 // R1-CX-F1: no closure without a valid review round.
 func TestR1CloseRequiresValidReview(t *testing.T) {
 	s, _, _ := newSession(t, []adapter.FakeResult{{Err: errors.New("boom")}})
-	if _, err := Close(s.Canonical); err == nil {
+	if _, err := Close(s.Canonical, "owner", "owner", ""); err == nil {
 		t.Fatal("init→close must be refused")
 	}
 	if _, _, err := s.Review(context.Background(), "x", adapter.Request{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Close(s.Canonical); err == nil {
+	if _, err := Close(s.Canonical, "owner", "owner", ""); err == nil {
 		t.Fatal("failed-round→close must be refused")
 	}
 }
@@ -318,7 +318,7 @@ func TestR1CloseRefusedAfterNeedsInput(t *testing.T) {
 	if _, _, err := s.Review(context.Background(), "x", adapter.Request{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Close(s.Canonical); err == nil {
+	if _, err := Close(s.Canonical, "owner", "owner", ""); err == nil {
 		t.Fatal("needs-input→close must be refused")
 	}
 }
@@ -370,7 +370,7 @@ func TestR1TargetEditMarksStale(t *testing.T) {
 	if !st.Rounds[0].Stale || st.Governance != "DECISION_REQUIRED" {
 		t.Fatalf("mid-dispatch target edit must mark stale + decision-required: %+v", st.Rounds[0])
 	}
-	if _, err := Close(s.Canonical); err == nil {
+	if _, err := Close(s.Canonical, "owner", "owner", ""); err == nil {
 		t.Fatal("stale result must not close")
 	}
 	// pre-dispatch stale target refuses dispatch entirely
@@ -717,7 +717,7 @@ func TestPostResultTargetEditBlocksClose(t *testing.T) {
 	if st.Governance == string(kernel.GovClosable) {
 		t.Fatal("disposition must not promote to CLOSABLE over an edited target")
 	}
-	if _, err := Close(s.Canonical); err == nil {
+	if _, err := Close(s.Canonical, "owner", "owner", ""); err == nil {
 		t.Fatal("close must be refused when the target changed after the reviewed round")
 	}
 }
@@ -736,7 +736,7 @@ func TestPersistedClosableReVerifiedAtClose(t *testing.T) {
 	if err := os.WriteFile(targetPath(dir), []byte("edited after closable"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Close(s.Canonical); err == nil {
+	if _, err := Close(s.Canonical, "owner", "owner", ""); err == nil {
 		t.Fatal("close must re-verify the target revision even from persisted CLOSABLE")
 	}
 }
@@ -771,7 +771,7 @@ func TestAdvanceEnablesSameObjectiveChain(t *testing.T) {
 		t.Fatalf("advance record missing/incorrect: %+v", st.Advances)
 	}
 	// advanced revision is un-reviewed: not closable yet
-	if _, err := Close(s.Canonical); err == nil {
+	if _, err := Close(s.Canonical, "owner", "owner", ""); err == nil {
 		t.Fatal("close after advance without a new round must be refused")
 	}
 	st2, outcome, err := s.Review(context.Background(), "re-review the revision", adapter.Request{})
@@ -784,7 +784,7 @@ func TestAdvanceEnablesSameObjectiveChain(t *testing.T) {
 	if fake.Dispatched != 2 {
 		t.Fatalf("expected 2 dispatches in one objective, got %d", fake.Dispatched)
 	}
-	st3, err := Close(s.Canonical)
+	st3, err := Close(s.Canonical, "owner", "owner", "")
 	if err != nil {
 		t.Fatalf("close after R1 over the advanced revision must succeed: %v", err)
 	}
@@ -814,7 +814,7 @@ func TestAdvanceFromClosableRequiresReReview(t *testing.T) {
 	if _, _, err := s.Review(context.Background(), "re-review", adapter.Request{}); err != nil {
 		t.Fatal(err)
 	}
-	if st2, err := Close(s.Canonical); err != nil || st2.Governance != string(kernel.GovClosed) {
+	if st2, err := Close(s.Canonical, "owner", "owner", ""); err != nil || st2.Governance != string(kernel.GovClosed) {
 		t.Fatalf("close after re-review must succeed: %v", err)
 	}
 }
@@ -1082,5 +1082,89 @@ func TestConfirmationBlockedByUnknownRound(t *testing.T) {
 	}
 	if fake.Dispatched != dispatchedBefore {
 		t.Fatalf("refused confirmation must not dispatch the reviewer: %d vs %d", fake.Dispatched, dispatchedBefore)
+	}
+}
+
+// GB-CX-F1: the reviewer's observable state is reported on every exit path
+// (started/running/completed on success; started/failed on failure), always
+// carrying the reviewer identity (Blueprint progress contract).
+func TestReviewReportsProgressStates(t *testing.T) {
+	collect := func(script []adapter.FakeResult) []string {
+		s, _, _ := newSession(t, script)
+		var events []string
+		s.Reporter = func(state, detail string) {
+			if !strings.Contains(detail, "reviewer=") {
+				t.Fatalf("progress %q lacks reviewer identity: %q", state, detail)
+			}
+			events = append(events, state)
+		}
+		_, _, _ = s.Review(context.Background(), "x", adapter.Request{})
+		return events
+	}
+	if got := collect([]adapter.FakeResult{approve()}); strings.Join(got, ",") != "started,running,completed" {
+		t.Fatalf("success path progress = %v", got)
+	}
+	if got := collect([]adapter.FakeResult{{TimedOut: true, TimeoutKind: adapter.TimeoutHardCap}}); strings.Join(got, ",") != "started,running,unknown" {
+		t.Fatalf("hard-cap path progress = %v", got)
+	}
+	if got := collect([]adapter.FakeResult{{TimedOut: true, TimeoutKind: adapter.TimeoutIdle}}); strings.Join(got, ",") != "started,running,failed" {
+		t.Fatalf("idle-timeout path progress = %v", got)
+	}
+	// pre-dispatch failure: started, then failed (no running — child never ran)
+	s, fake, _ := newSession(t, []adapter.FakeResult{approve()})
+	fake.PreDispatchFail = errorsNew("cli drift")
+	var events []string
+	s.Reporter = func(state, detail string) { events = append(events, state) }
+	_, _, _ = s.Review(context.Background(), "x", adapter.Request{})
+	if strings.Join(events, ",") != "started,failed" {
+		t.Fatalf("pre-dispatch failure progress = %v", events)
+	}
+}
+
+func errorsNew(s string) error { return errors.New(s) }
+
+// GB-CX-F2: a clean close records who closed the objective and under what
+// declared authority. Owner is the default arbiter; a non-owner role must
+// declare a bounded-delegation basis or the close is refused.
+func TestCloseRecordsActorAndAuthority(t *testing.T) {
+	// missing actor/role → refused
+	s, _, _ := newSession(t, []adapter.FakeResult{approve()})
+	if _, _, err := s.Review(context.Background(), "x", adapter.Request{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Close(s.Canonical, "", "owner", ""); err == nil {
+		t.Fatal("close without a declared actor must be refused")
+	}
+	// non-owner without an authority basis → refused
+	if _, err := Close(s.Canonical, "claude-driver", "driver", ""); err == nil {
+		t.Fatal("non-owner close without a delegation basis must be refused")
+	}
+	// non-owner WITH a declared basis → recorded
+	st, err := Close(s.Canonical, "claude-driver", "driver", "owner-delegated: reversible dogfood review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.CloseActor != "claude-driver" || st.CloseRole != "driver" || st.CloseAuthority == "" {
+		t.Fatalf("closure accountability not recorded: %+v", st)
+	}
+	if st.Governance != string(kernel.GovClosed) {
+		t.Fatalf("got %s", st.Governance)
+	}
+	// the accountability is persisted in the canonical, not just in memory
+	reloaded, _ := LoadState(s.Canonical)
+	if reloaded.CloseActor != "claude-driver" || reloaded.CloseAuthority == "" {
+		t.Fatalf("closure accountability not persisted: %+v", reloaded)
+	}
+}
+
+// Owner closes with no authority basis required (owner is the default arbiter).
+func TestOwnerCloseNeedsNoDelegation(t *testing.T) {
+	s, _, _ := newSession(t, []adapter.FakeResult{approve()})
+	if _, _, err := s.Review(context.Background(), "x", adapter.Request{}); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Close(s.Canonical, "owner", "owner", "")
+	if err != nil || st.Governance != string(kernel.GovClosed) {
+		t.Fatalf("owner close must succeed without a delegation basis: %v", err)
 	}
 }

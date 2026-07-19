@@ -105,11 +105,15 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 		if *resetMode != "" || *resetReason != "" {
 			s.Reset = &relay.SessionReset{Mode: *resetMode, Reason: *resetReason}
 		}
-		fmt.Fprintf(os.Stderr, "progress: started reviewer=%s\n", *reviewer)
+		// Surface every observable reviewer state (started/running/completed/
+		// failed/unknown) with reviewer identity, on success and failure alike.
+		s.Reporter = func(state, detail string) {
+			fmt.Fprintf(os.Stderr, "progress: %s %s\n", state, detail)
+		}
 		st, outcome, err := s.Review(context.Background(), p,
 			adapter.Request{Model: *model, Effort: *effort, WorkingDir: *workdir})
 		if err != nil {
-			fail(err)
+			fail(err) // the "failed"/"unknown" progress line was already emitted
 		}
 		fmt.Fprintf(os.Stderr, "progress: terminal session_ref=%s\n", st.SessionRef)
 		last := st.Rounds[len(st.Rounds)-1]
@@ -141,12 +145,15 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 	case "close":
 		fs := flag.NewFlagSet("close", flag.ExitOnError)
 		canonical := fs.String("canonical", "", "canonical record path")
+		actor := fs.String("actor", "", "who is closing (accountability)")
+		role := fs.String("role", "owner", "actor role: owner|driver|...")
+		authority := fs.String("authority", "", "bounded-delegation authority basis (required for non-owner roles)")
 		fs.Parse(args)
-		st, err := relay.Close(*canonical)
+		st, err := relay.Close(*canonical, *actor, *role, *authority)
 		if err != nil {
 			fail(err)
 		}
-		fmt.Printf("objective %s CLOSED\n", st.ObjectiveID)
+		fmt.Printf("objective %s CLOSED (actor=%s role=%s)\n", st.ObjectiveID, st.CloseActor, st.CloseRole)
 
 	case "advance":
 		fs := flag.NewFlagSet("advance", flag.ExitOnError)
