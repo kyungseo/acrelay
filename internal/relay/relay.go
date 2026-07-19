@@ -1,16 +1,13 @@
 // Package relay wires the kernel, review profile, store, and adapters into
-// the one-shot review flow. The wiring order follows R0-CX-F3:
-// preflight → revision snapshots (canonical AND target) → attempt commit →
-// dispatch → validate → append. State lives inside the canonical Markdown as
+// the one-shot review flow. The DR-813 wiring order is:
+// Prepare → revision snapshots → private dispatch journal → in-memory attempt
+// admission → child start/capture → transaction-tagged append. State lives inside the canonical Markdown as
 // relay-managed, sequence-numbered blocks parsed fence-aware (R1-CX-F2) —
 // the canonical document stays the single writable artifact (DR-811 §2).
 package relay
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -35,11 +32,10 @@ const ReviewSchema = `{"type":"object","properties":{"verdict":{"type":"string",
 const (
 	KernelVersion  = "kernel v0.1"
 	ProfileVersion = "review-profile v0.1"
-	// store-md v0.2 adds CLOSED accountability fields (close actor/role/
-	// authority) as validated invariants (GB-CP-F1). The exact-version gate
-	// in validateState rejects pre-v0.2 canonicals, so there is no ambiguous
-	// legacy CLOSED state without accountability.
-	StoreVersion = "store-md v0.2"
+	// store-md v0.3 binds every reviewer dispatch to a durable transaction
+	// identity. The exact-version gate deliberately rejects v0.2 canonicals;
+	// private-alpha callers re-init instead of mixing old/new invariants.
+	StoreVersion = "store-md v0.3"
 )
 
 // State is the machine-readable snapshot appended after every mutation.
@@ -53,37 +49,52 @@ type State struct {
 	ObjectiveID     string `json:"objective_id"`
 	Question        string `json:"question"`
 	// Target is an evidence pointer: location + raw-byte digest (R1-CX-F3).
-	TargetLocation  string           `json:"target_location"`
-	TargetRevision  string           `json:"target_revision"`
-	TargetResolved  string           `json:"target_resolved,omitempty"` // symlink resolution fact
-	Governance      string           `json:"governance"`
-	TerminalArbiter string           `json:"terminal_arbiter,omitempty"`
-	TerminalReason  string           `json:"terminal_reason,omitempty"`
+	TargetLocation  string `json:"target_location"`
+	TargetRevision  string `json:"target_revision"`
+	TargetResolved  string `json:"target_resolved,omitempty"` // symlink resolution fact
+	Governance      string `json:"governance"`
+	TerminalArbiter string `json:"terminal_arbiter,omitempty"`
+	TerminalReason  string `json:"terminal_reason,omitempty"`
 	// Closure accountability (GB-CX-F2): who closed the objective, in what
 	// role, and the declared authority basis. v1 is declared metadata only —
 	// no authentication or RBAC is claimed.
-	CloseActor     string `json:"close_actor,omitempty"`
-	CloseRole      string `json:"close_role,omitempty"`
-	CloseAuthority string `json:"close_authority,omitempty"`
-	SessionRef      string           `json:"session_ref,omitempty"`
-	Vendor          string           `json:"vendor,omitempty"`
-	SessionChanges  []SessionChange  `json:"session_changes,omitempty"`
-	Rounds          []RoundState     `json:"rounds"`
-	Confirmations   []ConfState      `json:"confirmations,omitempty"`
-	Findings        []review.Finding `json:"findings"`
-	PriorObjective  string           `json:"prior_objective,omitempty"`
-	MaterialDiff    string           `json:"material_difference,omitempty"`
-	Advances        []AdvanceState   `json:"advances,omitempty"`
+	CloseActor     string             `json:"close_actor,omitempty"`
+	CloseRole      string             `json:"close_role,omitempty"`
+	CloseAuthority string             `json:"close_authority,omitempty"`
+	SessionRef     string             `json:"session_ref,omitempty"`
+	Vendor         string             `json:"vendor,omitempty"`
+	SessionChanges []SessionChange    `json:"session_changes,omitempty"`
+	Rounds         []RoundState       `json:"rounds"`
+	Confirmations  []ConfState        `json:"confirmations,omitempty"`
+	Transactions   []TransactionState `json:"transactions,omitempty"`
+	Findings       []review.Finding   `json:"findings"`
+	PriorObjective string             `json:"prior_objective,omitempty"`
+	MaterialDiff   string             `json:"material_difference,omitempty"`
+	Advances       []AdvanceState     `json:"advances,omitempty"`
 }
 
 // RoundState mirrors one committed round.
 type RoundState struct {
-	Index    int      `json:"index"`
-	Attempts []string `json:"attempts"`
-	Verdict  string   `json:"verdict,omitempty"`
-	Outcome  string   `json:"outcome,omitempty"`
-	Stale    bool     `json:"stale,omitempty"`    // target changed mid-dispatch
-	Revision string   `json:"revision,omitempty"` // target revision this round reviewed (Gate A-3)
+	Index         int      `json:"index"`
+	Attempts      []string `json:"attempts"`
+	Verdict       string   `json:"verdict,omitempty"`
+	Outcome       string   `json:"outcome,omitempty"`
+	Stale         bool     `json:"stale,omitempty"`    // target changed mid-dispatch
+	Revision      string   `json:"revision,omitempty"` // target revision this round reviewed (Gate A-3)
+	TransactionID string   `json:"transaction_id"`
+}
+
+// TransactionState is the canonical execution identity for review and
+// confirmation dispatches. UNKNOWN is terminal and blocks re-dispatch;
+// abandoned records the owner-declared escape from an un-reconcilable journal.
+type TransactionState struct {
+	ID            string `json:"id"`
+	Kind          string `json:"kind"`
+	RoundIndex    int    `json:"round_index"`
+	AttemptIndex  int    `json:"attempt_index"`
+	Reviewer      string `json:"reviewer"`
+	Result        string `json:"result"` // captured | unknown | abandoned
+	JournalDigest string `json:"journal_digest,omitempty"`
 }
 
 // AdvanceState records one authorized target-revision advancement inside the
@@ -199,7 +210,13 @@ func LoadState(canonical string) (*State, error) {
 	if err := json.Unmarshal(raw, &st); err != nil {
 		return nil, fmt.Errorf("state block %d corrupt: fail-closed: %w", maxSeq, err)
 	}
-	return &st, validateState(&st, maxSeq)
+	if err := validateState(&st, maxSeq); err != nil {
+		return nil, err
+	}
+	if err := validateTransactionMarkers(doc, &st); err != nil {
+		return nil, err
+	}
+	return &st, nil
 }
 
 // validateState enforces persisted-state integrity (R1-CX-F2).
@@ -214,6 +231,9 @@ func validateState(st *State, labelSeq int) error {
 	for i, r := range st.Rounds {
 		if r.Index != i {
 			return fmt.Errorf("round index %d at position %d breaks continuity: fail-closed", r.Index, i)
+		}
+		if !transactionIDPattern.MatchString(r.TransactionID) {
+			return fmt.Errorf("round R%d transaction identity %q invalid: fail-closed", r.Index, r.TransactionID)
 		}
 	}
 	if !hex64.MatchString(st.TargetRevision) {
@@ -246,6 +266,27 @@ func validateState(st *State, labelSeq int) error {
 			return fmt.Errorf("confirmation R%d exhausted attempts without escalation flag: fail-closed", c.RoundIndex)
 		}
 	}
+	seenTx := map[string]bool{}
+	for _, tx := range st.Transactions {
+		if !transactionIDPattern.MatchString(tx.ID) || seenTx[tx.ID] {
+			return fmt.Errorf("transaction identity %q invalid or duplicated: fail-closed", tx.ID)
+		}
+		seenTx[tx.ID] = true
+		if tx.Kind != "review" && tx.Kind != "confirmation" && !(tx.Kind == "unknown" && tx.Result == "abandoned") {
+			return fmt.Errorf("transaction %s kind %q invalid: fail-closed", tx.ID, tx.Kind)
+		}
+		if tx.Result != "captured" && tx.Result != "unknown" && tx.Result != "abandoned" {
+			return fmt.Errorf("transaction %s result %q invalid: fail-closed", tx.ID, tx.Result)
+		}
+		if tx.Result == "abandoned" && !hex64.MatchString(tx.JournalDigest) {
+			return fmt.Errorf("abandoned transaction %s lacks a journal digest: fail-closed", tx.ID)
+		}
+	}
+	for _, r := range st.Rounds {
+		if !seenTx[r.TransactionID] {
+			return fmt.Errorf("round R%d transaction %s missing from transaction ledger: fail-closed", r.Index, r.TransactionID)
+		}
+	}
 	// CLOSED accountability invariants (GB-CP-F1): a CLOSED objective must
 	// carry who closed it and, for a non-owner, the delegation basis; a state
 	// that is not CLOSED must not carry close metadata. A tampered artifact
@@ -261,6 +302,22 @@ func validateState(st *State, labelSeq int) error {
 		}
 	} else if hasCloseMeta {
 		return fmt.Errorf("non-CLOSED state (%s) carries close accountability metadata: fail-closed", st.Governance)
+	}
+	return nil
+}
+
+func validateTransactionMarkers(doc string, st *State) error {
+	for _, tx := range st.Transactions {
+		if tx.Result == "abandoned" {
+			continue
+		}
+		marker, err := findTransactionMarker(doc, tx.ID)
+		if err != nil {
+			return err
+		}
+		if marker == nil || marker.Kind != tx.Kind {
+			return fmt.Errorf("transaction %s canonical marker missing or mismatched: fail-closed", tx.ID)
+		}
 	}
 	return nil
 }
@@ -345,6 +402,9 @@ func replaySteps(final kernel.ExecutionState) []kernel.ExecutionState {
 func Init(canonical, question, targetLocation, priorObjective, materialDiff string, targetSeenBefore bool) (*State, error) {
 	var out *State
 	err := withCanonicalLock(canonical, func() error {
+		if err := ensureNoPendingLocked(canonical); err != nil {
+			return err
+		}
 		rev, err := store.Revision(canonical)
 		if err != nil {
 			return err
@@ -383,10 +443,10 @@ func Init(canonical, question, targetLocation, priorObjective, materialDiff stri
 			return err
 		}
 		st := &State{
-			Seq:            carrySeq,
-			KernelVersion:  KernelVersion,
-			ProfileVersion: ProfileVersion,
-			StoreVersion:   StoreVersion,
+			Seq:             carrySeq,
+			KernelVersion:   KernelVersion,
+			ProfileVersion:  ProfileVersion,
+			StoreVersion:    StoreVersion,
 			CollaborationID: collabID, ObjectiveID: objID, Question: question,
 			TargetLocation: targetLocation, TargetRevision: targetDigest, TargetResolved: resolved,
 			Governance:     string(kernel.GovOpen),
@@ -406,11 +466,6 @@ func Init(canonical, question, targetLocation, priorObjective, materialDiff stri
 		return nil
 	})
 	return out, err
-}
-
-// pendingRecoveries lists unreconciled recovery transactions (R1-CX-F5).
-func pendingRecoveries(canonical string) ([]string, error) {
-	return filepath.Glob(canonical + ".recovery-*")
 }
 
 // Review runs one formal round: snapshots → commit → dispatch → validate →
@@ -444,10 +499,10 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 			s.report("completed", "reviewer="+vendor+" outcome="+string(outcome))
 		}
 	}()
-	if recs, rerr := pendingRecoveries(s.Canonical); rerr != nil {
+	if recs, rerr := pendingTransactions(s.Canonical); rerr != nil {
 		return nil, "", rerr
 	} else if len(recs) > 0 {
-		return nil, "", fmt.Errorf("pending recovery transactions %v: reconcile before dispatching again (duplicate-execution guard)", recs)
+		return nil, "", fmt.Errorf("pending transactions %v: reconcile or declared abandon before dispatching again (duplicate-execution guard)", recs)
 	}
 	st, err = LoadState(s.Canonical)
 	if err != nil {
@@ -465,6 +520,9 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	// retry (DR-811 §7).
 	if r := unknownRound(st); r >= 0 {
 		return nil, "", fmt.Errorf("round R%d ended UNKNOWN: re-dispatch forbidden until an owner resolves it (terminate the objective and open a follow-up) — no automatic retry", r)
+	}
+	if tx := unknownTransaction(st); tx != "" {
+		return nil, "", fmt.Errorf("transaction %s ended UNKNOWN: re-dispatch forbidden until an owner resolves it — no automatic retry", tx)
 	}
 	o, err := rehydrate(st)
 	if err != nil {
@@ -503,11 +561,13 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 		return nil, "", err
 	}
 	attempt := round.PrepareAttempt()
-	// 1. non-consuming preflight
-	if err := s.Adapter.PreDispatch(ctx, req, s.Handles); err != nil {
+	// 1. non-consuming preparation: ALL fallible pre-start work ends here.
+	prepared, err := s.Adapter.Prepare(ctx, req, s.Handles)
+	if err != nil {
 		_ = attempt.Transition(kernel.ExecFailed)
-		return nil, "", fmt.Errorf("pre-dispatch failure (no round/attempt consumed): %w", err)
+		return nil, "", fmt.Errorf("prepare failure (no round/attempt consumed): %w", err)
 	}
+	defer prepared.Close()
 	// 2. pre-dispatch snapshots: canonical AND target (R1-CX-F3)
 	snapshot, err := store.Revision(s.Canonical)
 	if err != nil {
@@ -520,16 +580,61 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	if targetNow != st.TargetRevision {
 		return nil, "", fmt.Errorf("target %s changed since objective init (stale): open a follow-up objective with a prior pointer", st.TargetLocation)
 	}
-	// 3. commit the attempt at the dispatch boundary
-	if err := round.CommitDispatch(attempt); err != nil {
+	// 3. Under the canonical flock, re-check the snapshot/lineage and create
+	// the owner-only journal. Guard check→journal create is one critical
+	// section; the lock is released before reviewer execution.
+	var journal *dispatchJournal
+	var journalPath string
+	err = withCanonicalLock(s.Canonical, func() error {
+		current, err := store.Revision(s.Canonical)
+		if err != nil {
+			return err
+		}
+		if current != snapshot {
+			return fmt.Errorf("canonical changed after preparation (expected %s, found %s): fail-closed before dispatch", snapshot[:12], current[:12])
+		}
+		fresh, err := LoadState(s.Canonical)
+		if err != nil {
+			return err
+		}
+		if fresh == nil || fresh.ObjectiveID != st.ObjectiveID || fresh.Seq != st.Seq || fresh.TargetRevision != st.TargetRevision {
+			return fmt.Errorf("canonical lineage changed after preparation: fail-closed before dispatch")
+		}
+		if diskTarget, _, err := TargetSnapshot(st.TargetLocation); err != nil || diskTarget != st.TargetRevision {
+			return fmt.Errorf("target changed after preparation: fail-closed before dispatch")
+		}
+		journal, journalPath, _, err = createDispatchJournalLocked(
+			s.Canonical, st, "review", round.Index, len(round.Attempts), vendor, snapshot)
+		return err
+	})
+	if err != nil {
 		return nil, "", err
 	}
-	// 4. dispatch
-	res, dispatchErr := s.Adapter.Dispatch(ctx, req, s.Handles)
+	// 4. CommitDispatch is in-memory admission only. The persisted budget is
+	// consumed later by the transaction-tagged captured/UNKNOWN append.
+	if err := round.CommitDispatch(attempt); err != nil {
+		if removeErr := removeDispatchJournal(journalPath); removeErr != nil {
+			return nil, "", fmt.Errorf("commit dispatch failed (%v) and journal cleanup failed (%v): reconcile required", err, removeErr)
+		}
+		return nil, "", err
+	}
+	// 5. One-shot start/capture. Prepared.Dispatch performs no preflight.
+	res, dispatchErr := prepared.Dispatch(ctx)
+	preparedCleanupErr := prepared.Close()
 	// child never started → the attempt is NOT persisted (R1-CX-F7): the
-	// in-memory commit is discarded with this rehydrated objective.
+	// in-memory commit is discarded with this rehydrated objective and the
+	// prepared journal is removed. Cleanup failure stays fail-closed.
 	if res != nil && !res.Started {
+		if removeErr := removeDispatchJournal(journalPath); removeErr != nil {
+			return nil, "", fmt.Errorf("child start failure (%v) and journal cleanup failed (%v): reconcile required", dispatchErr, removeErr)
+		}
+		if preparedCleanupErr != nil {
+			return nil, "", fmt.Errorf("child start failure (no round/attempt persisted): %v; prepared resource cleanup: %w", dispatchErr, preparedCleanupErr)
+		}
 		return nil, "", fmt.Errorf("child start failure (no round/attempt persisted): %w", dispatchErr)
+	}
+	if res == nil {
+		return nil, "", fmt.Errorf("dispatch returned no start evidence: journal %s remains PREPARED; reconcile as UNKNOWN", journalPath)
 	}
 	switch {
 	case res != nil && res.TimedOut:
@@ -585,11 +690,21 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	if res != nil && res.Provenance.SessionRef != "" {
 		st.SessionRef, st.Vendor = res.Provenance.SessionRef, s.Adapter.Vendor()
 	}
+	txResult := "captured"
+	journalPhase := journalPhaseCaptured
+	if attempt.State == kernel.ExecUnknown {
+		txResult, journalPhase = "unknown", journalPhaseUnknown
+	}
+	st.Transactions = append(st.Transactions, TransactionState{
+		ID: journal.TransactionID, Kind: "review", RoundIndex: round.Index,
+		AttemptIndex: attempt.Index, Reviewer: vendor, Result: txResult,
+	})
 	st.Findings = append(st.Findings, newFindings...)
 	st.Rounds = append(st.Rounds, RoundState{
 		Index: round.Index, Attempts: []string{string(attempt.State)},
 		Verdict: verdict, Outcome: string(outcome), Stale: stale,
-		Revision: st.TargetRevision, // pre-dispatch check guaranteed disk == this
+		Revision:      st.TargetRevision, // pre-dispatch check guaranteed disk == this
+		TransactionID: journal.TransactionID,
 	})
 	if !stale && outcome == review.OutcomeResultValid && verdict == string(review.VerdictApprove) && review.ClosureCheck(st.Findings) == nil {
 		st.Governance = string(kernel.GovClosable)
@@ -598,7 +713,8 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	}
 
 	label := fmt.Sprintf("r%da%d", round.Index, attempt.Index)
-	section := fmt.Sprintf("\n## round R%d attempt A%d\n- outcome: %s\n- verdict: %s\n- stale: %v\n", round.Index, attempt.Index, outcome, verdict, stale)
+	section := fmt.Sprintf("\n## round R%d attempt A%d\n- transaction_id: %s\n- outcome: %s\n- verdict: %s\n- stale: %v\n",
+		round.Index, attempt.Index, journal.TransactionID, outcome, verdict, stale)
 	if sessionChanged {
 		section += fmt.Sprintf("- session_change: mode=%s reason=%q\n", s.Reset.Mode, s.Reset.Reason)
 	}
@@ -611,24 +727,34 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	if dispatchErr != nil {
 		section += fmt.Sprintf("- dispatch_error: %q\n", dispatchErr.Error())
 	}
+	if preparedCleanupErr != nil {
+		section += fmt.Sprintf("- prepared_cleanup_error: %q\n", preparedCleanupErr.Error())
+	}
 	block, err := stateSection(st)
 	if err != nil {
 		return nil, "", err
 	}
 	section += block
+	if _, err := setJournalSection(journalPath, journal, journalPhase, section); err != nil {
+		return nil, "", fmt.Errorf("captured result could not be preserved in dispatch journal %s: %w", journalPath, err)
+	}
+	if beforeCanonicalAppend != nil {
+		beforeCanonicalAppend(journalPath)
+	}
+	sectionBytes, err := decodeJournalSection(journal)
+	if err != nil {
+		return nil, "", err
+	}
 	// Serialize the check→rename against every other canonical writer under
 	// the shared sidecar lock (R1-F1). Dispatch ran lock-free; only the final
 	// append is serialized. A conflict against the pre-dispatch snapshot goes
 	// to the recovery path.
 	appendErr := withCanonicalLock(s.Canonical, func() error {
-		if _, err := store.AppendAtomic(s.Canonical, section, snapshot); err != nil {
-			// R1-CX-F5: never lose the raw or the dispatch fact — persist an
-			// owner-only recovery transaction and block further dispatches.
-			rpath, rerr := writeRecovery(s.Canonical, section, st, snapshot)
-			if rerr != nil {
-				return fmt.Errorf("append conflict AND recovery write failed: %v / %v", err, rerr)
-			}
-			return fmt.Errorf("append conflict: %v — raw and dispatch fact preserved in recovery transaction %s (noncanonical, non-resumable); run reconcile before any further dispatch", err, rpath)
+		if _, err := store.AppendAtomic(s.Canonical, string(sectionBytes), snapshot); err != nil {
+			return fmt.Errorf("append conflict: %v — raw and dispatch fact remain in journal %s; reconcile before any further mutation", err, journalPath)
+		}
+		if err := removeDispatchJournal(journalPath); err != nil {
+			return fmt.Errorf("canonical append succeeded but journal cleanup failed: %w — reconcile performs idempotent cleanup", err)
 		}
 		return nil
 	})
@@ -638,140 +764,19 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	return st, outcome, nil
 }
 
-// recoveryPayload binds a recovery transaction to its canonical lineage
-// (R1-CX-F5 CP): objective, collaboration, expected state sequence, the
-// pre-dispatch snapshots, and the unappended section.
-type recoveryPayload struct {
-	Note            string `json:"note"`
-	CollaborationID string `json:"collaboration_id"`
-	ObjectiveID     string `json:"objective_id"`
-	Seq             int    `json:"seq"` // seq of the state embedded in Section (current+1 at reconcile time)
-	PreSnapshot     string `json:"pre_snapshot"`
-	TargetRevision  string `json:"target_revision"`
-	Section         string `json:"section"`
-}
-
-// writeRecovery persists the unappended section as an owner-only recovery
-// transaction (noncanonical, non-resumable).
-func writeRecovery(canonical, section string, st *State, preSnapshot string) (string, error) {
-	suffix := make([]byte, 4)
-	if _, err := rand.Read(suffix); err != nil {
-		return "", err
-	}
-	path := fmt.Sprintf("%s.recovery-%d-%s", canonical, os.Getpid(), hex.EncodeToString(suffix))
-	payload, err := json.Marshal(recoveryPayload{
-		Note:            "noncanonical recovery transaction — reconcile appends it to the canonical; it cannot be used for session resume or revision comparison",
-		CollaborationID: st.CollaborationID, ObjectiveID: st.ObjectiveID, Seq: st.Seq,
-		PreSnapshot: preSnapshot, TargetRevision: st.TargetRevision,
-		Section: base64.StdEncoding.EncodeToString([]byte(section)),
-	})
-	if err != nil {
-		return "", err
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	if _, err := f.Write(payload); err != nil {
-		return "", err
-	}
-	return path, f.Sync()
-}
-
-// Reconcile appends a pending recovery transaction to the canonical under a
-// fresh snapshot after verifying lineage: same collaboration/objective and
-// the exact next state sequence. Foreign or replayed transactions fail
-// closed (R1-CX-F5 CP).
-func Reconcile(canonical, recoveryPath string) (*State, error) {
-	b, err := os.ReadFile(recoveryPath)
-	if err != nil {
-		return nil, err
-	}
-	var payload recoveryPayload
-	if err := json.Unmarshal(b, &payload); err != nil {
-		return nil, fmt.Errorf("recovery transaction corrupt: fail-closed: %w", err)
-	}
-	section, err := base64.StdEncoding.DecodeString(payload.Section)
-	if err != nil {
-		return nil, fmt.Errorf("recovery transaction corrupt: fail-closed: %w", err)
-	}
-	// The lineage validation reads current state and the append must be
-	// consistent — hold the shared canonical lock across the whole
-	// load→validate→append critical section (R1-F1).
-	var out *State
-	lerr := withCanonicalLock(canonical, func() error {
-		cur, err := LoadState(canonical)
-		if err != nil {
-			return err
-		}
-		if cur == nil {
-			return fmt.Errorf("reconcile refused: canonical has no state")
-		}
-		if payload.CollaborationID != cur.CollaborationID || payload.ObjectiveID != cur.ObjectiveID {
-			return fmt.Errorf("reconcile refused: recovery belongs to objective %s/%s, canonical tracks %s/%s: fail-closed",
-				payload.CollaborationID, payload.ObjectiveID, cur.CollaborationID, cur.ObjectiveID)
-		}
-		if payload.Seq != cur.Seq+1 {
-			return fmt.Errorf("reconcile refused: recovery state seq %d does not follow current seq %d (replay or stale transaction): fail-closed", payload.Seq, cur.Seq)
-		}
-		if payload.TargetRevision != cur.TargetRevision {
-			return fmt.Errorf("reconcile refused: recovery target revision differs from canonical state: fail-closed")
-		}
-		if !hex64.MatchString(payload.PreSnapshot) {
-			return fmt.Errorf("reconcile refused: recovery pre-snapshot malformed: fail-closed")
-		}
-		// section ↔ lineage metadata 정합 (CP-2 F5): the embedded state block
-		// must exist at exactly payload.Seq and describe the same lineage.
-		secBlocks, err := store.ListBlocks(string(section))
-		if err != nil {
-			return fmt.Errorf("reconcile refused: recovery section integrity: %w", err)
-		}
-		var embedded *State
-		for _, b := range secBlocks {
-			if b.Label == fmt.Sprintf("%s%d", statePrefix, payload.Seq) {
-				raw, xerr := store.ExtractBlock(string(section), b.Label)
-				if xerr != nil {
-					return fmt.Errorf("reconcile refused: embedded state unreadable: %w", xerr)
-				}
-				var es State
-				if xerr := json.Unmarshal(raw, &es); xerr != nil {
-					return fmt.Errorf("reconcile refused: embedded state corrupt: %w", xerr)
-				}
-				embedded = &es
-			}
-		}
-		if embedded == nil {
-			return fmt.Errorf("reconcile refused: recovery section lacks state block seq %d: fail-closed", payload.Seq)
-		}
-		if embedded.ObjectiveID != payload.ObjectiveID || embedded.CollaborationID != payload.CollaborationID ||
-			embedded.TargetRevision != payload.TargetRevision || embedded.Seq != payload.Seq {
-			return fmt.Errorf("reconcile refused: recovery section state does not match lineage metadata: fail-closed")
-		}
-		rev, err := store.Revision(canonical)
-		if err != nil {
-			return err
-		}
-		// PreSnapshot 비교: divergence 여부를 감사 가능하게 기록한다. 동일하면
-		// canonical이 dispatch 이후 변하지 않았음을 뜻한다.
-		note := fmt.Sprintf("\n## reconcile\n- recovery: %s\n- pre_snapshot: %s\n- current_revision: %s\n- diverged_since_dispatch: %v\n",
-			filepath.Base(recoveryPath), payload.PreSnapshot, rev, rev != payload.PreSnapshot)
-		if _, err := store.AppendAtomic(canonical, note+string(section), rev); err != nil {
-			return err
-		}
-		if err := os.Remove(recoveryPath); err != nil {
-			return err
-		}
-		out, err = LoadState(canonical)
-		return err
-	})
-	return out, lerr
+// Reconcile applies or cleans up a DR-813 dispatch journal. store-md v0.3 is a
+// hard cutover: legacy .recovery-* sidecars are neither guarded nor loaded.
+func Reconcile(canonical, transactionPath string) (*State, error) {
+	return reconcileDispatchJournal(canonical, transactionPath)
 }
 
 // OpenConfirmation starts the bounded confirmation cycle for a round.
 func OpenConfirmation(canonical string, roundIndex int, ids []string) (*State, error) {
 	var out *State
 	err := withCanonicalLock(canonical, func() error {
+		if err := ensureNoPendingLocked(canonical); err != nil {
+			return err
+		}
 		rev, err := store.Revision(canonical)
 		if err != nil {
 			return err
@@ -890,13 +895,16 @@ func (s *Session) ConfirmWithReviewer(ctx context.Context, roundIndex int, expec
 	// honor the same duplicate-execution guards (R0-F1): never dispatch while
 	// a prior UNKNOWN round may still be running server-side, nor while an
 	// unreconciled recovery transaction is pending (DR-811 §7).
-	if recs, rerr := pendingRecoveries(s.Canonical); rerr != nil {
+	if recs, rerr := pendingTransactions(s.Canonical); rerr != nil {
 		return nil, false, rerr
 	} else if len(recs) > 0 {
-		return nil, false, fmt.Errorf("pending recovery transactions %v: reconcile before any confirmation dispatch (duplicate-execution guard)", recs)
+		return nil, false, fmt.Errorf("pending transactions %v: reconcile or declared abandon before any confirmation dispatch (duplicate-execution guard)", recs)
 	}
 	if r := unknownRound(st); r >= 0 {
 		return nil, false, fmt.Errorf("round R%d ended UNKNOWN: confirmation dispatch forbidden until an owner resolves it (terminate the objective and open a follow-up) — no automatic retry", r)
+	}
+	if tx := unknownTransaction(st); tx != "" {
+		return nil, false, fmt.Errorf("transaction %s ended UNKNOWN: confirmation dispatch forbidden until owner resolution — no automatic retry", tx)
 	}
 	var cs *ConfState
 	for i := range st.Confirmations {
@@ -951,6 +959,9 @@ func (s *Session) ConfirmWithReviewer(ctx context.Context, roundIndex int, expec
 		// writer's block. Reload, re-find the cycle, re-increment, then append.
 		var out *State
 		lerr := withCanonicalLock(s.Canonical, func() error {
+			if err := ensureNoPendingLocked(s.Canonical); err != nil {
+				return err
+			}
 			rev, err := store.Revision(s.Canonical)
 			if err != nil {
 				return err
@@ -1000,27 +1011,71 @@ For EACH of these finding IDs, judge only whether the claimed fix is actually re
 Output per the schema: results[] with id and status confirmed|not-confirmed. Do not issue a verdict, do not report new findings.`,
 		claimedDelta, strings.Join(ids, ", "))
 
-	if err := s.Adapter.PreDispatch(ctx, req, s.Handles); err != nil {
-		return nil, false, fmt.Errorf("confirmation pre-dispatch failure (nothing consumed): %w", err)
+	prepared, err := s.Adapter.Prepare(ctx, req, s.Handles)
+	if err != nil {
+		return nil, false, fmt.Errorf("confirmation prepare failure (nothing consumed): %w", err)
 	}
+	defer prepared.Close()
 	snapshot, err := store.Revision(s.Canonical)
 	if err != nil {
 		return nil, false, err
 	}
-	res, dispatchErr := s.Adapter.Dispatch(ctx, req, s.Handles)
+	var journal *dispatchJournal
+	var journalPath string
+	err = withCanonicalLock(s.Canonical, func() error {
+		current, err := store.Revision(s.Canonical)
+		if err != nil {
+			return err
+		}
+		if current != snapshot {
+			return fmt.Errorf("canonical changed after confirmation preparation: fail-closed before dispatch")
+		}
+		fresh, err := LoadState(s.Canonical)
+		if err != nil {
+			return err
+		}
+		if fresh == nil || fresh.ObjectiveID != st.ObjectiveID || fresh.Seq != st.Seq || fresh.TargetRevision != st.TargetRevision {
+			return fmt.Errorf("canonical lineage changed after confirmation preparation: fail-closed")
+		}
+		journal, journalPath, _, err = createDispatchJournalLocked(
+			s.Canonical, st, "confirmation", roundIndex, cyc.ValidAttempts, s.Adapter.Vendor(), snapshot)
+		return err
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	res, dispatchErr := prepared.Dispatch(ctx)
+	preparedCleanupErr := prepared.Close()
 	if res != nil && !res.Started {
+		if removeErr := removeDispatchJournal(journalPath); removeErr != nil {
+			return nil, false, fmt.Errorf("confirmation child start failed (%v) and journal cleanup failed (%v): reconcile required", dispatchErr, removeErr)
+		}
+		if preparedCleanupErr != nil {
+			return nil, false, fmt.Errorf("confirmation child start failure (nothing consumed): %v; prepared resource cleanup: %w", dispatchErr, preparedCleanupErr)
+		}
 		return nil, false, fmt.Errorf("confirmation child start failure (nothing consumed): %w", dispatchErr)
 	}
+	if res == nil {
+		return nil, false, fmt.Errorf("confirmation dispatch returned no start evidence: journal %s remains PREPARED; reconcile as UNKNOWN", journalPath)
+	}
 	label := fmt.Sprintf("conf-r%d-try%d", roundIndex, cyc.ValidAttempts+cyc.PreconditionFailures+1)
-	section := fmt.Sprintf("\n## confirmation attempt R%d\n- submitted: %s\n- claimed_delta: %q\n", roundIndex, strings.Join(ids, ", "), claimedDelta)
+	section := fmt.Sprintf("\n## confirmation attempt R%d\n- transaction_id: %s\n- submitted: %s\n- claimed_delta: %q\n",
+		roundIndex, journal.TransactionID, strings.Join(ids, ", "), claimedDelta)
 	if res != nil {
 		prov, _ := json.Marshal(res.Provenance)
 		section += fmt.Sprintf("- provenance: %s\n", prov)
 		section += store.EncodeBlock("raw_stdout "+label, res.Stdout)
 		section += store.EncodeBlock("raw_stderr "+label, res.Stderr)
 	}
+	if preparedCleanupErr != nil {
+		section += fmt.Sprintf("- prepared_cleanup_error: %q\n", preparedCleanupErr.Error())
+	}
 	done := false
-	if dispatchErr != nil || res == nil || res.Structured == nil {
+	txResult, journalPhase := "captured", journalPhaseCaptured
+	if res.TimedOut && res.TimeoutKind == adapter.TimeoutHardCap {
+		txResult, journalPhase = "unknown", journalPhaseUnknown
+		section += "- result: UNKNOWN (hard-cap/external kill) — no automatic retry\n"
+	} else if dispatchErr != nil || res.Structured == nil {
 		// failed or schema-less output: a validation failure, not a valid attempt
 		cyc.RecordPreconditionFailure()
 		section += fmt.Sprintf("- result: invalid (dispatch error or missing structured output)\n")
@@ -1038,6 +1093,10 @@ Output per the schema: results[] with id and status confirmed|not-confirmed. Do 
 	if res != nil && res.Provenance.SessionRef != "" {
 		st.SessionRef, st.Vendor = res.Provenance.SessionRef, s.Adapter.Vendor()
 	}
+	st.Transactions = append(st.Transactions, TransactionState{
+		ID: journal.TransactionID, Kind: "confirmation", RoundIndex: roundIndex,
+		AttemptIndex: journal.AttemptIndex, Reviewer: s.Adapter.Vendor(), Result: txResult,
+	})
 	cs.Outstanding = cyc.Outstanding()
 	cs.ValidAttempts = cyc.ValidAttempts
 	cs.PreconditionFailures = cyc.PreconditionFailures
@@ -1046,13 +1105,22 @@ Output per the schema: results[] with id and status confirmed|not-confirmed. Do 
 	if err != nil {
 		return nil, false, err
 	}
+	if _, err := setJournalSection(journalPath, journal, journalPhase, section+block); err != nil {
+		return nil, false, fmt.Errorf("confirmation result could not be preserved in dispatch journal %s: %w", journalPath, err)
+	}
+	if beforeCanonicalAppend != nil {
+		beforeCanonicalAppend(journalPath)
+	}
+	sectionBytes, err := decodeJournalSection(journal)
+	if err != nil {
+		return nil, false, err
+	}
 	appendErr := withCanonicalLock(s.Canonical, func() error {
-		if _, err := store.AppendAtomic(s.Canonical, section+block, snapshot); err != nil {
-			rpath, rerr := writeRecovery(s.Canonical, section+block, st, snapshot)
-			if rerr != nil {
-				return fmt.Errorf("confirmation append conflict AND recovery failed: %v / %v", err, rerr)
-			}
-			return fmt.Errorf("confirmation append conflict: %v — preserved in %s; reconcile required", err, rpath)
+		if _, err := store.AppendAtomic(s.Canonical, string(sectionBytes), snapshot); err != nil {
+			return fmt.Errorf("confirmation append conflict: %v — preserved in %s; reconcile required", err, journalPath)
+		}
+		if err := removeDispatchJournal(journalPath); err != nil {
+			return fmt.Errorf("confirmation append succeeded but journal cleanup failed: %w — reconcile performs idempotent cleanup", err)
 		}
 		return nil
 	})
@@ -1069,6 +1137,9 @@ func Disposition(canonical, findingID string, d review.Disposition, decision *re
 	}
 	var out *State
 	err := withCanonicalLock(canonical, func() error {
+		if err := ensureNoPendingLocked(canonical); err != nil {
+			return err
+		}
 		rev, err := store.Revision(canonical)
 		if err != nil {
 			return err
@@ -1125,6 +1196,15 @@ func unknownRound(st *State) int {
 	return -1
 }
 
+func unknownTransaction(st *State) string {
+	for _, tx := range st.Transactions {
+		if tx.Result == "unknown" {
+			return tx.ID
+		}
+	}
+	return ""
+}
+
 // latestReviewedCurrent reports whether the most recent round is a
 // result-valid, non-stale review of exactly the current TargetRevision. It
 // is the precondition for advancing (R0-F1): advancement continues the loop
@@ -1176,6 +1256,9 @@ func Close(canonical, actor, role, authority string) (*State, error) {
 	}
 	var out *State
 	err := withCanonicalLock(canonical, func() error {
+		if err := ensureNoPendingLocked(canonical); err != nil {
+			return err
+		}
 		rev, err := store.Revision(canonical)
 		if err != nil {
 			return err
@@ -1224,6 +1307,9 @@ func Close(canonical, actor, role, authority string) (*State, error) {
 func Advance(canonical, note string) (*State, error) {
 	var out *State
 	err := withCanonicalLock(canonical, func() error {
+		if err := ensureNoPendingLocked(canonical); err != nil {
+			return err
+		}
 		rev, err := store.Revision(canonical)
 		if err != nil {
 			return err
@@ -1273,6 +1359,9 @@ func Advance(canonical, note string) (*State, error) {
 func Terminate(canonical string, to kernel.GovernanceState, arbiter, reason string) (*State, error) {
 	var out *State
 	err := withCanonicalLock(canonical, func() error {
+		if err := ensureNoPendingLocked(canonical); err != nil {
+			return err
+		}
 		rev, err := store.Revision(canonical)
 		if err != nil {
 			return err
@@ -1353,8 +1442,8 @@ func Status(canonical string) (string, error) {
 	if len(open) > 0 {
 		fmt.Fprintf(&b, "undispositioned blocking findings: %s\n", strings.Join(open, ", "))
 	}
-	if recs, _ := pendingRecoveries(canonical); len(recs) > 0 {
-		fmt.Fprintf(&b, "PENDING RECOVERY: %s (reconcile required before dispatch)\n", strings.Join(recs, ", "))
+	if recs, _ := pendingTransactions(canonical); len(recs) > 0 {
+		fmt.Fprintf(&b, "PENDING TRANSACTION: %s (reconcile or declared abandon required before mutation)\n", strings.Join(recs, ", "))
 	}
 	return b.String(), nil
 }

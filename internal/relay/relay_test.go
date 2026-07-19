@@ -124,7 +124,7 @@ func TestE2ERoundBound(t *testing.T) {
 // F3 wiring: pre-dispatch failure consumes no round.
 func TestE2EPreDispatchFailureConsumesNothing(t *testing.T) {
 	s, fake, _ := newSession(t, []adapter.FakeResult{approve()})
-	fake.PreDispatchFail = errors.New("cli version drift")
+	fake.PrepareFail = errors.New("cli version drift")
 	if _, _, err := s.Review(context.Background(), "x", adapter.Request{}); err == nil {
 		t.Fatal("pre-dispatch failure must surface")
 	}
@@ -132,7 +132,7 @@ func TestE2EPreDispatchFailureConsumesNothing(t *testing.T) {
 	if len(st.Rounds) != 0 {
 		t.Fatal("pre-dispatch failure must not consume a round")
 	}
-	fake.PreDispatchFail = nil
+	fake.PrepareFail = nil
 	if _, _, err := s.Review(context.Background(), "x", adapter.Request{}); err != nil {
 		t.Fatal(err)
 	}
@@ -385,9 +385,26 @@ type mutatingAdapter struct {
 	path string
 }
 
-func (m *mutatingAdapter) Dispatch(ctx context.Context, req adapter.Request, h *adapter.HandleStore) (*adapter.Result, error) {
-	os.WriteFile(m.path, []byte("v2-edited-mid-dispatch"), 0o600)
-	return m.FakeAdapter.Dispatch(ctx, req, h)
+type beforeDispatchPrepared struct {
+	inner  adapter.PreparedInvocation
+	before func()
+}
+
+func (p *beforeDispatchPrepared) Dispatch(ctx context.Context) (*adapter.Result, error) {
+	p.before()
+	return p.inner.Dispatch(ctx)
+}
+
+func (p *beforeDispatchPrepared) Close() error { return p.inner.Close() }
+
+func (m *mutatingAdapter) Prepare(ctx context.Context, req adapter.Request, h *adapter.HandleStore) (adapter.PreparedInvocation, error) {
+	prepared, err := m.FakeAdapter.Prepare(ctx, req, h)
+	if err != nil {
+		return nil, err
+	}
+	return &beforeDispatchPrepared{inner: prepared, before: func() {
+		os.WriteFile(m.path, []byte("v2-edited-mid-dispatch"), 0o600)
+	}}, nil
 }
 
 // R1-CX-F4 (CP): confirmation is reviewer-judged, persists, and consumes no rounds.
@@ -486,16 +503,17 @@ func TestCPUnterminatedBlockFailsClosed(t *testing.T) {
 	}
 }
 
-// R1-CX-F5: append conflict → recovery transaction → dispatch blocked → reconcile.
+// DR-813: append conflict retains the captured dispatch journal, blocks
+// mutations, and reconciles idempotently.
 func TestR1AppendConflictRecovery(t *testing.T) {
 	s, fake, dir := newSession(t, []adapter.FakeResult{approve(), approve()})
 	conflicting := &conflictAdapter{FakeAdapter: fake, canonical: s.Canonical}
 	s.Adapter = conflicting
 	_, _, err := s.Review(context.Background(), "x", adapter.Request{})
-	if err == nil || !strings.Contains(err.Error(), "recovery transaction") {
-		t.Fatalf("append conflict must produce a recovery transaction: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "remain in journal") {
+		t.Fatalf("append conflict must retain the dispatch journal: %v", err)
 	}
-	recs, _ := filepath.Glob(s.Canonical + ".recovery-*")
+	recs, _ := filepath.Glob(s.Canonical + ".dispatch-*.json")
 	if len(recs) != 1 {
 		t.Fatalf("recovery file missing: %v", recs)
 	}
@@ -509,11 +527,9 @@ func TestR1AppendConflictRecovery(t *testing.T) {
 		!strings.Contains(err.Error(), "reconcile") {
 		t.Fatalf("pending recovery must block dispatch: %v", err)
 	}
-	// lineage: foreign recovery (tampered objective) must be refused
+	// A path outside the canonical-bound journal namespace is refused.
 	rb, _ := os.ReadFile(recs[0])
-	tampered := strings.Replace(string(rb), `"objective_id":"obj-`, `"objective_id":"obj-ffff`, 1)
 	foreign := recs[0] + "-foreign"
-	os.WriteFile(foreign, []byte(tampered), 0o600)
 	if _, err := Reconcile(s.Canonical, foreign); err == nil ||
 		!strings.Contains(err.Error(), "fail-closed") {
 		t.Fatalf("foreign recovery must be refused: %v", err)
@@ -523,18 +539,16 @@ func TestR1AppendConflictRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// replay: re-writing the same transaction must be refused by seq lineage
-	replay := s.Canonical + ".recovery-replay"
-	os.WriteFile(replay, rb, 0o600)
-	if _, err := Reconcile(s.Canonical, replay); err == nil ||
-		!strings.Contains(err.Error(), "seq") {
-		t.Fatalf("replayed recovery must be refused: %v", err)
+	// Replay after append is idempotent cleanup: marker+digest prove the
+	// transaction was already applied, so no second round is appended.
+	os.WriteFile(recs[0], rb, 0o600)
+	if _, err := Reconcile(s.Canonical, recs[0]); err != nil {
+		t.Fatalf("already-applied journal must clean up idempotently: %v", err)
 	}
-	os.Remove(replay)
 	if len(st.Rounds) != 1 || st.Rounds[0].Outcome != "result-valid" {
 		t.Fatalf("reconciled round missing: %+v", st.Rounds)
 	}
-	if recs, _ := filepath.Glob(s.Canonical + ".recovery-*"); len(recs) != 0 {
+	if recs, _ := filepath.Glob(s.Canonical + ".dispatch-*.json"); len(recs) != 0 {
 		t.Fatal("recovery file must be removed after reconcile")
 	}
 	// dispatch allowed again; round budget reflects the recovered attempt
@@ -549,11 +563,16 @@ type conflictAdapter struct {
 	canonical string
 }
 
-func (c *conflictAdapter) Dispatch(ctx context.Context, req adapter.Request, h *adapter.HandleStore) (*adapter.Result, error) {
-	f, _ := os.OpenFile(c.canonical, os.O_APPEND|os.O_WRONLY, 0o600)
-	f.WriteString("<!-- concurrent external edit during model run -->\n")
-	f.Close()
-	return c.FakeAdapter.Dispatch(ctx, req, h)
+func (c *conflictAdapter) Prepare(ctx context.Context, req adapter.Request, h *adapter.HandleStore) (adapter.PreparedInvocation, error) {
+	prepared, err := c.FakeAdapter.Prepare(ctx, req, h)
+	if err != nil {
+		return nil, err
+	}
+	return &beforeDispatchPrepared{inner: prepared, before: func() {
+		f, _ := os.OpenFile(c.canonical, os.O_APPEND|os.O_WRONLY, 0o600)
+		f.WriteString("<!-- concurrent external edit during model run -->\n")
+		f.Close()
+	}}, nil
 }
 
 // R1-CX-F6: vendor switch requires an explicit reset; rounds are preserved.
@@ -597,6 +616,12 @@ func TestR1StartFailureAndModelMismatch(t *testing.T) {
 	if len(st.Rounds) != 0 {
 		t.Fatal("start failure consumed a persisted round")
 	}
+	if pending, _ := pendingTransactions(s.Canonical); len(pending) != 0 {
+		t.Fatalf("explicit start failure must clean the prepared journal: %v", pending)
+	}
+	if fake.Prepared != 1 || fake.Dispatched != 1 {
+		t.Fatalf("start failure must cross Prepare/Dispatch once: prepared=%d dispatched=%d", fake.Prepared, fake.Dispatched)
+	}
 	fake.Script[1].ModelMismatch = true
 	_, outcome, err := s.Review(context.Background(), "x", adapter.Request{Model: "haiku"})
 	if err != nil {
@@ -607,15 +632,16 @@ func TestR1StartFailureAndModelMismatch(t *testing.T) {
 	}
 }
 
-
 // CP-2 F2: contradictory persisted confirmation combinations fail closed.
 func TestCP2StateConfirmationInvariants(t *testing.T) {
 	base := func() *State {
+		txID := "tx-" + strings.Repeat("1", 32)
 		return &State{
 			Seq: 1, KernelVersion: KernelVersion, ProfileVersion: ProfileVersion, StoreVersion: StoreVersion,
 			CollaborationID: "c", ObjectiveID: "o", TargetRevision: strings.Repeat("a", 64),
-			Governance: "OPEN",
-			Rounds:     []RoundState{{Index: 0}},
+			Governance:   "OPEN",
+			Rounds:       []RoundState{{Index: 0, TransactionID: txID}},
+			Transactions: []TransactionState{{ID: txID, Kind: "review", RoundIndex: 0, Result: "captured"}},
 		}
 	}
 	cases := []struct {
@@ -658,7 +684,7 @@ func TestCP2StateConfirmationInvariants(t *testing.T) {
 	}
 }
 
-// CP-2 F5: recovery section must match its lineage metadata.
+// CP-2 F5 carried forward: dispatch-journal section must match its lineage.
 func TestCP2ReconcileSectionLineage(t *testing.T) {
 	s, fake, _ := newSession(t, []adapter.FakeResult{approve(), approve()})
 	conflicting := &conflictAdapter{FakeAdapter: fake, canonical: s.Canonical}
@@ -666,7 +692,7 @@ func TestCP2ReconcileSectionLineage(t *testing.T) {
 	if _, _, err := s.Review(context.Background(), "x", adapter.Request{}); err == nil {
 		t.Fatal("expected append conflict")
 	}
-	recs, _ := filepath.Glob(s.Canonical + ".recovery-*")
+	recs, _ := filepath.Glob(s.Canonical + ".dispatch-*.json")
 	if len(recs) != 1 {
 		t.Fatal("recovery missing")
 	}
@@ -674,16 +700,15 @@ func TestCP2ReconcileSectionLineage(t *testing.T) {
 	rb, _ := os.ReadFile(recs[0])
 	var payload map[string]any
 	json.Unmarshal(rb, &payload)
-	sec, _ := base64.StdEncoding.DecodeString(payload["section"].(string))
+	sec, _ := base64.StdEncoding.DecodeString(payload["section_base64"].(string))
 	forged := strings.Replace(string(sec), "acrelay_state_", "acrelay_state_x", 1) // state block 라벨 훼손
-	payload["section"] = base64.StdEncoding.EncodeToString([]byte(forged))
+	payload["section_base64"] = base64.StdEncoding.EncodeToString([]byte(forged))
 	fb, _ := json.Marshal(payload)
-	forgedPath := recs[0] + "-forged"
-	os.WriteFile(forgedPath, fb, 0o600)
-	if _, err := Reconcile(s.Canonical, forgedPath); err == nil {
+	os.WriteFile(recs[0], fb, 0o600)
+	if _, err := Reconcile(s.Canonical, recs[0]); err == nil {
 		t.Fatal("recovery with mismatched section lineage must be refused")
 	}
-	os.Remove(forgedPath)
+	os.WriteFile(recs[0], rb, 0o600)
 	// 정상 reconcile은 divergence note와 함께 성공
 	st, err := Reconcile(s.Canonical, recs[0])
 	if err != nil {
@@ -994,14 +1019,9 @@ func noDuplicateStateSeqs(t *testing.T, canonical string) {
 	}
 }
 
-// R1-F1 / R2-F1: a Review whose append loses to a concurrent locked mutator
-// must fail closed, never clobber. The interleaving is forced, not hoped for:
-// the Review goroutine takes its pre-dispatch snapshot and then blocks inside
-// the fake adapter; a Disposition completes in that window; the Review is
-// released and its append CAS is now stale. We assert the exact fail-closed
-// outcome — Review errors into the recovery path, the disposition survives,
-// and the Review's round never reaches the canonical.
-func TestReviewLosingToMutatorFailsClosed(t *testing.T) {
+// DR-813: once the durable journal exists, a concurrent mutator is rejected
+// instead of racing the reviewer append. Mutation resumes after cleanup.
+func TestPendingJournalBlocksConcurrentMutator(t *testing.T) {
 	s, fake, _ := newSession(t, []adapter.FakeResult{changesRequested("f1", "f2"), changesRequested("f3")})
 	if _, _, err := s.Review(context.Background(), "r0", adapter.Request{}); err != nil {
 		t.Fatal(err)
@@ -1019,33 +1039,28 @@ func TestReviewLosingToMutatorFailsClosed(t *testing.T) {
 	}()
 
 	<-entered // Review has snapshotted and is now parked inside Dispatch
-	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
-		t.Fatal(err)
+	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err == nil ||
+		!strings.Contains(err.Error(), "pending transactions") {
+		t.Fatalf("pending journal must block concurrent disposition: %v", err)
 	}
-	close(gate) // release Review; its pre-dispatch snapshot is now stale
+	close(gate)
 	<-done
 
-	if rErr == nil || !strings.Contains(rErr.Error(), "recovery") {
-		t.Fatalf("Review must fail closed into the recovery path, got: %v", rErr)
+	if rErr != nil {
+		t.Fatalf("review should complete after the blocked mutator: %v", rErr)
 	}
 	st, err := LoadState(s.Canonical)
 	if err != nil {
 		t.Fatalf("state unreadable after the race: %v", err)
 	}
-	if len(st.Rounds) != 1 {
-		t.Fatalf("the losing Review's round must not persist: got %d rounds", len(st.Rounds))
+	if len(st.Rounds) != 2 {
+		t.Fatalf("the protected Review round must persist once: got %d rounds", len(st.Rounds))
 	}
-	found := false
-	for _, f := range st.Findings {
-		if f.ID == "R0-F1" && f.Disposition != "" {
-			found = true
-		}
+	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
+		t.Fatalf("mutation must resume after journal cleanup: %v", err)
 	}
-	if !found {
-		t.Fatal("the winning disposition must survive")
-	}
-	if recs, _ := pendingRecoveries(s.Canonical); len(recs) == 0 {
-		t.Fatal("the losing Review must leave a recovery transaction")
+	if pending, _ := pendingTransactions(s.Canonical); len(pending) != 0 {
+		t.Fatalf("successful review must clean its journal: %v", pending)
 	}
 	noDuplicateStateSeqs(t, s.Canonical)
 }
@@ -1112,7 +1127,7 @@ func TestReviewReportsProgressStates(t *testing.T) {
 	}
 	// pre-dispatch failure: started, then failed (no running — child never ran)
 	s, fake, _ := newSession(t, []adapter.FakeResult{approve()})
-	fake.PreDispatchFail = errorsNew("cli drift")
+	fake.PrepareFail = errorsNew("cli drift")
 	var events []string
 	s.Reporter = func(state, detail string) { events = append(events, state) }
 	_, _, _ = s.Review(context.Background(), "x", adapter.Request{})
@@ -1229,9 +1244,8 @@ func TestLoadRejectsClosedWithoutAccountability(t *testing.T) {
 	}
 }
 
-// GB-CP-F2: a hard-cap (execution UNKNOWN) whose append then conflicts must
-// still report progress "unknown" — the terminal state is derived from the
-// attempt's execution state, not the error string.
+// GB-CP-F2 + DR-813: a pending hard-cap dispatch blocks concurrent mutation
+// and still reports progress UNKNOWN from the attempt state.
 func TestProgressUnknownSurvivesAppendConflict(t *testing.T) {
 	s, fake, _ := newSession(t, []adapter.FakeResult{
 		changesRequested("f1"),
@@ -1252,10 +1266,11 @@ func TestProgressUnknownSurvivesAppendConflict(t *testing.T) {
 		close(done)
 	}()
 	<-entered // r1 has snapshotted and is parked inside Dispatch
-	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
-		t.Fatal(err)
+	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err == nil ||
+		!strings.Contains(err.Error(), "pending transactions") {
+		t.Fatalf("pending UNKNOWN dispatch must block mutation: %v", err)
 	}
-	close(gate) // r1 resumes: hard-cap UNKNOWN, then its append conflicts
+	close(gate) // r1 resumes and persists hard-cap UNKNOWN
 	<-done
 	if len(states) == 0 || states[len(states)-1] != "unknown" {
 		t.Fatalf("hard-cap + append conflict must report unknown, got %v", states)

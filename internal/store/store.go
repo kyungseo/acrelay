@@ -163,9 +163,97 @@ func ExtractBlock(stored, label string) ([]byte, error) {
 	return raw, nil
 }
 
+// WritePrivateAtomic replaces path with owner-only bytes using a same-dir
+// unique temp and atomic rename. Atomic rename is the process-crash
+// correctness boundary. File and parent-directory sync are attempted as
+// power-loss hardening; their failures are returned as a diagnostic but do
+// not turn a completed rename into a failed write (DR-813 §D).
+func WritePrivateAtomic(path string, data []byte) (diagnostic string, err error) {
+	suffix := make([]byte, 4)
+	if _, err := rand.Read(suffix); err != nil {
+		return "", err
+	}
+	tmp := filepath.Join(filepath.Dir(path),
+		fmt.Sprintf(".%s.tmp-%d-%s", filepath.Base(path), os.Getpid(), hex.EncodeToString(suffix)))
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(tmp)
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return "", err
+	}
+	var diagnostics []string
+	if err := f.Sync(); err != nil {
+		diagnostics = append(diagnostics, "file-sync-best-effort: "+err.Error())
+	}
+	if err := f.Close(); err != nil {
+		return strings.Join(diagnostics, "; "), err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return strings.Join(diagnostics, "; "), err
+	}
+	if diagnostic := SyncParentBestEffort(path); diagnostic != "" {
+		diagnostics = append(diagnostics, diagnostic)
+	}
+	diagnostic = strings.Join(diagnostics, "; ")
+	emitSyncDiagnostic(path, diagnostic)
+	return diagnostic, nil
+}
+
+// SyncParentBestEffort attempts the power-loss hardening step for a directory
+// entry. It never changes the success semantics of an already-completed
+// rename/remove and returns an observable capability diagnostic instead.
+func SyncParentBestEffort(path string) string {
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return "parent-directory-sync-unavailable: " + err.Error()
+	}
+	var diagnostics []string
+	if err := dir.Sync(); err != nil {
+		diagnostics = append(diagnostics, "parent-directory-sync-best-effort: "+err.Error())
+	}
+	if err := dir.Close(); err != nil {
+		diagnostics = append(diagnostics, "parent-directory-close: "+err.Error())
+	}
+	return strings.Join(diagnostics, "; ")
+}
+
+func emitSyncDiagnostic(path, diagnostic string) {
+	if diagnostic != "" {
+		// Rare capability/power-loss hardening failures remain observable while
+		// the process-crash-correct atomic rename stays successful. Use only the
+		// basename so diagnostics do not unnecessarily expose private paths.
+		fmt.Fprintf(os.Stderr, "acrelay: sync diagnostic for %s: %s\n", filepath.Base(path), diagnostic)
+	}
+}
+
+// RemovePrivate removes a private sidecar and best-effort syncs its parent
+// directory. A remove failure is correctness-significant; a sync failure is
+// diagnostic-only because the process-crash contract is already satisfied.
+func RemovePrivate(path string) error {
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	emitSyncDiagnostic(path, SyncParentBestEffort(path))
+	return nil
+
+}
+
+// RenamePrivate moves a private sidecar inside its filesystem and applies the
+// same best-effort parent-directory hardening without overclaiming power-loss
+// durability.
+func RenamePrivate(from, to string) error {
+	if err := os.Rename(from, to); err != nil {
+		return err
+	}
+	emitSyncDiagnostic(to, SyncParentBestEffort(to))
+	return nil
+}
+
 // AppendAtomic appends a section iff the canonical file still matches the
 // pre-dispatch expectedRev. On any drift it fails closed without writing.
-// The write path is unique-temp (same directory) -> fsync -> rename.
 var hexRev = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func AppendAtomic(path, section, expectedRev string) (newRev string, err error) {
@@ -180,30 +268,8 @@ func AppendAtomic(path, section, expectedRev string) (newRev string, err error) 
 		return "", fmt.Errorf("revision-conflict: canonical changed since pre-dispatch snapshot (expected %s, found %s): fail-closed",
 			expectedRev[:12], Digest(current)[:12])
 	}
-	suffix := make([]byte, 4)
-	if _, err := rand.Read(suffix); err != nil {
-		return "", err
-	}
-	tmp := filepath.Join(filepath.Dir(path),
-		fmt.Sprintf(".%s.tmp-%d-%s", filepath.Base(path), os.Getpid(), hex.EncodeToString(suffix)))
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return "", err
-	}
-	defer os.Remove(tmp)
 	next := append(current, []byte(section)...)
-	if _, err := f.Write(next); err != nil {
-		f.Close()
-		return "", err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return "", err
-	}
-	if err := f.Close(); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmp, path); err != nil {
+	if _, err := WritePrivateAtomic(path, next); err != nil {
 		return "", err
 	}
 	return Digest(next), nil

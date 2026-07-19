@@ -144,3 +144,27 @@ func TestNoTempLeftover(t *testing.T) {
 		}
 	}
 }
+
+func TestPrivateAtomicReplaceAndRemoveLifecycle(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "private.json")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WritePrivateAtomic(path, []byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("atomic replacement must be owner-only: info=%v err=%v", info, err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "new" {
+		t.Fatalf("atomic replacement wrote %q", got)
+	}
+	if err := RemovePrivate(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("private removal did not remove the sidecar: %v", err)
+	}
+}

@@ -100,32 +100,30 @@ func detectCodexVersion(ctx context.Context) (string, error) {
 	return firstNonEmptyLineField(banner, 1), nil
 }
 
-// PreDispatch runs preflight, the version gate, and resume-ref resolution
-// without consuming any budget.
-func (a CodexAdapter) PreDispatch(ctx context.Context, req Request, handles *HandleStore) error {
-	if err := a.Preflight(req); err != nil {
-		return err
-	}
-	observed, err := detectCodexVersion(ctx)
-	if err != nil {
-		return err
-	}
-	if err := PreflightVersion(a.Capability(), observed); err != nil {
-		return err
-	}
-	if req.ResumeRef != "" {
-		vendor, _, err := handles.Lookup(req.ResumeRef)
-		if err != nil {
-			return err
-		}
-		if vendor != "codex" {
-			return fmt.Errorf("session_ref %s belongs to %s, not codex: fail-closed", req.ResumeRef, vendor)
-		}
-	}
-	return nil
+type preparedCodex struct {
+	req             Request
+	handles         *HandleStore
+	args            []string
+	timeouts        Timeouts
+	observedVersion string
+	schemaPath      string
 }
 
-func (a CodexAdapter) Dispatch(ctx context.Context, req Request, handles *HandleStore) (*Result, error) {
+func (p *preparedCodex) Close() error {
+	if p.schemaPath == "" {
+		return nil
+	}
+	err := os.Remove(p.schemaPath)
+	p.schemaPath = ""
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+// Prepare completes request/version/resume/schema preparation before the
+// relay writes the dispatch journal. The returned invocation is one-shot.
+func (a CodexAdapter) Prepare(ctx context.Context, req Request, handles *HandleStore) (PreparedInvocation, error) {
 	if err := a.Preflight(req); err != nil {
 		return nil, err
 	}
@@ -133,14 +131,13 @@ func (a CodexAdapter) Dispatch(ctx context.Context, req Request, handles *Handle
 	if err != nil {
 		return nil, err
 	}
-	observedVersion, err := detectCodexVersion(ctx)
+	observed, err := detectCodexVersion(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if err := PreflightVersion(a.Capability(), observedVersion); err != nil {
+	if err := PreflightVersion(a.Capability(), observed); err != nil {
 		return nil, err
 	}
-
 	args := []string{"exec"}
 	if req.ResumeRef != "" {
 		vendor, h, err := handles.Lookup(req.ResumeRef)
@@ -163,22 +160,31 @@ func (a CodexAdapter) Dispatch(ctx context.Context, req Request, handles *Handle
 	if err != nil {
 		return nil, err
 	}
-	defer os.Remove(schemaFile.Name())
+	schemaPath := schemaFile.Name()
 	if _, err := schemaFile.WriteString(req.SchemaJSON); err != nil {
 		schemaFile.Close()
+		os.Remove(schemaPath)
 		return nil, err
 	}
-	schemaFile.Close()
-	args = append(args, "--output-schema", schemaFile.Name())
+	if err := schemaFile.Close(); err != nil {
+		os.Remove(schemaPath)
+		return nil, err
+	}
+	args = append(args, "--output-schema", schemaPath)
 	// Prompt travels over stdin ("-" positional) so leading-dash content can
 	// never be parsed as a flag.
 	args = append(args, "-")
+	return &preparedCodex{req: req, handles: handles, args: args, timeouts: timeouts,
+		observedVersion: observed, schemaPath: schemaPath}, nil
+}
 
-	hctx, hcancel := context.WithTimeout(ctx, timeouts.HardCap)
+func (p *preparedCodex) Dispatch(ctx context.Context) (*Result, error) {
+	req, handles := p.req, p.handles
+	hctx, hcancel := context.WithTimeout(ctx, p.timeouts.HardCap)
 	defer hcancel()
 	tctx, tcancel := context.WithCancelCause(hctx)
 	defer tcancel(nil)
-	cmd := newGroupCmd(tctx, timeouts.Grace, "codex", args...)
+	cmd := newGroupCmd(tctx, p.timeouts.Grace, "codex", p.args...)
 	cmd.Dir = req.WorkingDir
 	stdout := newWatchdogBuffer()
 	var stderr bytes.Buffer
@@ -186,7 +192,7 @@ func (a CodexAdapter) Dispatch(ctx context.Context, req Request, handles *Handle
 	cmd.Stdin = bytes.NewReader([]byte(req.Prompt))
 	// Event-stream mode: startup and idle are observable-output timers wired
 	// to the JSONL stream (DR-811 §7).
-	go superviseTimeouts(tctx, tcancel, stdout.activity, timeouts)
+	go superviseTimeouts(tctx, tcancel, stdout.activity, p.timeouts)
 	runErr := runWithProgress(cmd, req.Progress)
 
 	res := &Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: exitCode(cmd), Started: cmd.ProcessState != nil}
@@ -196,10 +202,10 @@ func (a CodexAdapter) Dispatch(ctx context.Context, req Request, handles *Handle
 	switch cause := context.Cause(tctx); {
 	case errors.Is(cause, ErrStartupTimeout):
 		res.TimedOut, res.TimeoutKind = true, TimeoutStartup
-		return res, fmt.Errorf("startup timeout after %v: FAILED(timeout:startup), no automatic retry", timeouts.Startup)
+		return res, fmt.Errorf("startup timeout after %v: FAILED(timeout:startup), no automatic retry", p.timeouts.Startup)
 	case errors.Is(cause, ErrIdleTimeout):
 		res.TimedOut, res.TimeoutKind = true, TimeoutIdle
-		return res, fmt.Errorf("idle timeout after %v of stream silence: FAILED(timeout:idle), no automatic retry", timeouts.Idle)
+		return res, fmt.Errorf("idle timeout after %v of stream silence: FAILED(timeout:idle), no automatic retry", p.timeouts.Idle)
 	case hctx.Err() == context.DeadlineExceeded:
 		res.TimedOut, res.TimeoutKind = true, TimeoutHardCap
 		return res, fmt.Errorf("hard-cap timeout: execution UNKNOWN, re-dispatch forbidden")
@@ -247,7 +253,7 @@ func (a CodexAdapter) Dispatch(ctx context.Context, req Request, handles *Handle
 		ModelSelection: modelSelection(req.Model),
 		RequestedModel: req.Model, ResolvedModel: "", ModelState: ObsAttested,
 		RequestedEffort: req.Effort, EffortState: effortState,
-		ManifestCLIVersion: a.Capability().CLIVersionChecked, ObservedCLIVersion: observedVersion,
+		ManifestCLIVersion: CodexAdapter{}.Capability().CLIVersionChecked, ObservedCLIVersion: p.observedVersion,
 		WorkingDir: req.WorkingDir, SessionRef: sessionRef, NewSession: newSession,
 	}
 	return res, nil

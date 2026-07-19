@@ -261,13 +261,20 @@ type Adapter interface {
 	// any dispatch and before any attempt is committed. Explicit-but-
 	// unsupported inputs fail here — never silently ignored.
 	Preflight(req Request) error
-	// PreDispatch runs every non-consuming check (preflight, CLI version
-	// probe, resume-ref resolution). A failure here must never consume a
-	// round or attempt (R0-CX-F3) — the relay commits the attempt only
-	// after PreDispatch succeeds.
-	PreDispatch(ctx context.Context, req Request, handles *HandleStore) error
-	// Dispatch runs exactly one child invocation. It never retries.
-	Dispatch(ctx context.Context, req Request, handles *HandleStore) (*Result, error)
+	// Prepare completes every fallible pre-start operation: request
+	// validation, CLI version probe, resume lookup, timeout calculation, and
+	// temporary schema creation. A prepared invocation owns any temporary
+	// resources until Close and has not consumed a round or attempt.
+	Prepare(ctx context.Context, req Request, handles *HandleStore) (PreparedInvocation, error)
+}
+
+// PreparedInvocation is a one-shot child invocation. After Prepare returns,
+// Dispatch may only construct/start the already-decided command and capture
+// its result; it must not repeat preflight, version/resume lookup, schema
+// creation, or other fallible preparation. Close releases prepared resources.
+type PreparedInvocation interface {
+	Dispatch(ctx context.Context) (*Result, error)
+	Close() error
 }
 
 // ValidateEffort implements the shared pre-dispatch effort check.
