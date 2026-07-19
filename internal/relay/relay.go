@@ -306,64 +306,69 @@ func replaySteps(final kernel.ExecutionState) []kernel.ExecutionState {
 // Init creates the collaboration/objective and writes the first canonical
 // section. The target is an evidence pointer (location + raw digest).
 func Init(canonical, question, targetLocation, priorObjective, materialDiff string, targetSeenBefore bool) (*State, error) {
-	prev, err := LoadState(canonical)
-	if err != nil {
-		return nil, err
-	}
-	if prev != nil && !kernel.IsGovTerminal(kernel.GovernanceState(prev.Governance)) {
-		return nil, fmt.Errorf("canonical already tracks objective %s in state %s: close or terminate it first", prev.ObjectiveID, prev.Governance)
-	}
-	targetDigest, resolved, err := TargetSnapshot(targetLocation)
-	if err != nil {
-		return nil, err
-	}
-	collabID, err := kernel.NewID("collab")
-	if err != nil {
-		return nil, err
-	}
-	objID, err := kernel.NewID("obj")
-	if err != nil {
-		return nil, err
-	}
-	carrySessionRef, carryVendor, carrySeq := "", "", 0
-	if prev != nil {
-		collabID = prev.CollaborationID // same collaboration continues across objectives
-		// DR-811 §1: related objectives keep the same reviewer session.
-		carrySessionRef, carryVendor = prev.SessionRef, prev.Vendor
-		// monotonic across the collaboration — a restarted sequence would
-		// resurrect the previous objective's state as "latest".
-		carrySeq = prev.Seq
-	}
-	o := kernel.NewObjective(objID, collabID, question, targetDigest)
-	o.PriorObjective, o.MaterialDifference = priorObjective, materialDiff
-	if err := o.ValidateSameTargetLink(targetSeenBefore); err != nil {
-		return nil, err
-	}
-	st := &State{
-		Seq:            carrySeq,
-		KernelVersion:  KernelVersion,
-		ProfileVersion: ProfileVersion,
-		StoreVersion:   StoreVersion,
-		CollaborationID: collabID, ObjectiveID: objID, Question: question,
-		TargetLocation: targetLocation, TargetRevision: targetDigest, TargetResolved: resolved,
-		Governance:     string(kernel.GovOpen),
-		PriorObjective: priorObjective, MaterialDiff: materialDiff,
-		SessionRef: carrySessionRef, Vendor: carryVendor,
-	}
-	rev, err := store.Revision(canonical)
-	if err != nil {
-		return nil, err
-	}
-	block, err := stateSection(st)
-	if err != nil {
-		return nil, err
-	}
-	section := fmt.Sprintf("\n## objective %s\n- collaboration: %s\n- question: %s\n- target: %s sha256=%s\n%s",
-		objID, collabID, question, targetLocation, targetDigest, block)
-	if _, err := store.AppendAtomic(canonical, section, rev); err != nil {
-		return nil, err
-	}
-	return st, nil
+	var out *State
+	err := withCanonicalLock(canonical, func() error {
+		rev, err := store.Revision(canonical)
+		if err != nil {
+			return err
+		}
+		prev, err := LoadState(canonical)
+		if err != nil {
+			return err
+		}
+		if prev != nil && !kernel.IsGovTerminal(kernel.GovernanceState(prev.Governance)) {
+			return fmt.Errorf("canonical already tracks objective %s in state %s: close or terminate it first", prev.ObjectiveID, prev.Governance)
+		}
+		targetDigest, resolved, err := TargetSnapshot(targetLocation)
+		if err != nil {
+			return err
+		}
+		collabID, err := kernel.NewID("collab")
+		if err != nil {
+			return err
+		}
+		objID, err := kernel.NewID("obj")
+		if err != nil {
+			return err
+		}
+		carrySessionRef, carryVendor, carrySeq := "", "", 0
+		if prev != nil {
+			collabID = prev.CollaborationID // same collaboration continues across objectives
+			// DR-811 §1: related objectives keep the same reviewer session.
+			carrySessionRef, carryVendor = prev.SessionRef, prev.Vendor
+			// monotonic across the collaboration — a restarted sequence would
+			// resurrect the previous objective's state as "latest".
+			carrySeq = prev.Seq
+		}
+		o := kernel.NewObjective(objID, collabID, question, targetDigest)
+		o.PriorObjective, o.MaterialDifference = priorObjective, materialDiff
+		if err := o.ValidateSameTargetLink(targetSeenBefore); err != nil {
+			return err
+		}
+		st := &State{
+			Seq:            carrySeq,
+			KernelVersion:  KernelVersion,
+			ProfileVersion: ProfileVersion,
+			StoreVersion:   StoreVersion,
+			CollaborationID: collabID, ObjectiveID: objID, Question: question,
+			TargetLocation: targetLocation, TargetRevision: targetDigest, TargetResolved: resolved,
+			Governance:     string(kernel.GovOpen),
+			PriorObjective: priorObjective, MaterialDiff: materialDiff,
+			SessionRef: carrySessionRef, Vendor: carryVendor,
+		}
+		block, err := stateSection(st)
+		if err != nil {
+			return err
+		}
+		section := fmt.Sprintf("\n## objective %s\n- collaboration: %s\n- question: %s\n- target: %s sha256=%s\n%s",
+			objID, collabID, question, targetLocation, targetDigest, block)
+		if _, err := store.AppendAtomic(canonical, section, rev); err != nil {
+			return err
+		}
+		out = st
+		return nil
+	})
+	return out, err
 }
 
 // pendingRecoveries lists unreconciled recovery transactions (R1-CX-F5).
@@ -544,14 +549,24 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 		return nil, "", err
 	}
 	section += block
-	if _, err := store.AppendAtomic(s.Canonical, section, snapshot); err != nil {
-		// R1-CX-F5: never lose the raw or the dispatch fact — persist an
-		// owner-only recovery transaction and block further dispatches.
-		rpath, rerr := writeRecovery(s.Canonical, section, st, snapshot)
-		if rerr != nil {
-			return nil, "", fmt.Errorf("append conflict AND recovery write failed: %v / %v", err, rerr)
+	// Serialize the check→rename against every other canonical writer under
+	// the shared sidecar lock (R1-F1). Dispatch ran lock-free; only the final
+	// append is serialized. A conflict against the pre-dispatch snapshot goes
+	// to the recovery path.
+	appendErr := withCanonicalLock(s.Canonical, func() error {
+		if _, err := store.AppendAtomic(s.Canonical, section, snapshot); err != nil {
+			// R1-CX-F5: never lose the raw or the dispatch fact — persist an
+			// owner-only recovery transaction and block further dispatches.
+			rpath, rerr := writeRecovery(s.Canonical, section, st, snapshot)
+			if rerr != nil {
+				return fmt.Errorf("append conflict AND recovery write failed: %v / %v", err, rerr)
+			}
+			return fmt.Errorf("append conflict: %v — raw and dispatch fact preserved in recovery transaction %s (noncanonical, non-resumable); run reconcile before any further dispatch", err, rpath)
 		}
-		return nil, "", fmt.Errorf("append conflict: %v — raw and dispatch fact preserved in recovery transaction %s (noncanonical, non-resumable); run reconcile before any further dispatch", err, rpath)
+		return nil
+	})
+	if appendErr != nil {
+		return nil, "", appendErr
 	}
 	return st, outcome, nil
 }
@@ -614,68 +629,76 @@ func Reconcile(canonical, recoveryPath string) (*State, error) {
 	if err != nil {
 		return nil, fmt.Errorf("recovery transaction corrupt: fail-closed: %w", err)
 	}
-	cur, err := LoadState(canonical)
-	if err != nil {
-		return nil, err
-	}
-	if cur == nil {
-		return nil, fmt.Errorf("reconcile refused: canonical has no state")
-	}
-	if payload.CollaborationID != cur.CollaborationID || payload.ObjectiveID != cur.ObjectiveID {
-		return nil, fmt.Errorf("reconcile refused: recovery belongs to objective %s/%s, canonical tracks %s/%s: fail-closed",
-			payload.CollaborationID, payload.ObjectiveID, cur.CollaborationID, cur.ObjectiveID)
-	}
-	if payload.Seq != cur.Seq+1 {
-		return nil, fmt.Errorf("reconcile refused: recovery state seq %d does not follow current seq %d (replay or stale transaction): fail-closed", payload.Seq, cur.Seq)
-	}
-	if payload.TargetRevision != cur.TargetRevision {
-		return nil, fmt.Errorf("reconcile refused: recovery target revision differs from canonical state: fail-closed")
-	}
-	if !hex64.MatchString(payload.PreSnapshot) {
-		return nil, fmt.Errorf("reconcile refused: recovery pre-snapshot malformed: fail-closed")
-	}
-	// section ↔ lineage metadata 정합 (CP-2 F5): the embedded state block
-	// must exist at exactly payload.Seq and describe the same lineage.
-	secBlocks, err := store.ListBlocks(string(section))
-	if err != nil {
-		return nil, fmt.Errorf("reconcile refused: recovery section integrity: %w", err)
-	}
-	var embedded *State
-	for _, b := range secBlocks {
-		if b.Label == fmt.Sprintf("%s%d", statePrefix, payload.Seq) {
-			raw, xerr := store.ExtractBlock(string(section), b.Label)
-			if xerr != nil {
-				return nil, fmt.Errorf("reconcile refused: embedded state unreadable: %w", xerr)
-			}
-			var es State
-			if xerr := json.Unmarshal(raw, &es); xerr != nil {
-				return nil, fmt.Errorf("reconcile refused: embedded state corrupt: %w", xerr)
-			}
-			embedded = &es
+	// The lineage validation reads current state and the append must be
+	// consistent — hold the shared canonical lock across the whole
+	// load→validate→append critical section (R1-F1).
+	var out *State
+	lerr := withCanonicalLock(canonical, func() error {
+		cur, err := LoadState(canonical)
+		if err != nil {
+			return err
 		}
-	}
-	if embedded == nil {
-		return nil, fmt.Errorf("reconcile refused: recovery section lacks state block seq %d: fail-closed", payload.Seq)
-	}
-	if embedded.ObjectiveID != payload.ObjectiveID || embedded.CollaborationID != payload.CollaborationID ||
-		embedded.TargetRevision != payload.TargetRevision || embedded.Seq != payload.Seq {
-		return nil, fmt.Errorf("reconcile refused: recovery section state does not match lineage metadata: fail-closed")
-	}
-	rev, err := store.Revision(canonical)
-	if err != nil {
-		return nil, err
-	}
-	// PreSnapshot 비교: divergence 여부를 감사 가능하게 기록한다. 동일하면
-	// canonical이 dispatch 이후 변하지 않았음을 뜻한다.
-	note := fmt.Sprintf("\n## reconcile\n- recovery: %s\n- pre_snapshot: %s\n- current_revision: %s\n- diverged_since_dispatch: %v\n",
-		filepath.Base(recoveryPath), payload.PreSnapshot, rev, rev != payload.PreSnapshot)
-	if _, err := store.AppendAtomic(canonical, note+string(section), rev); err != nil {
-		return nil, err
-	}
-	if err := os.Remove(recoveryPath); err != nil {
-		return nil, err
-	}
-	return LoadState(canonical)
+		if cur == nil {
+			return fmt.Errorf("reconcile refused: canonical has no state")
+		}
+		if payload.CollaborationID != cur.CollaborationID || payload.ObjectiveID != cur.ObjectiveID {
+			return fmt.Errorf("reconcile refused: recovery belongs to objective %s/%s, canonical tracks %s/%s: fail-closed",
+				payload.CollaborationID, payload.ObjectiveID, cur.CollaborationID, cur.ObjectiveID)
+		}
+		if payload.Seq != cur.Seq+1 {
+			return fmt.Errorf("reconcile refused: recovery state seq %d does not follow current seq %d (replay or stale transaction): fail-closed", payload.Seq, cur.Seq)
+		}
+		if payload.TargetRevision != cur.TargetRevision {
+			return fmt.Errorf("reconcile refused: recovery target revision differs from canonical state: fail-closed")
+		}
+		if !hex64.MatchString(payload.PreSnapshot) {
+			return fmt.Errorf("reconcile refused: recovery pre-snapshot malformed: fail-closed")
+		}
+		// section ↔ lineage metadata 정합 (CP-2 F5): the embedded state block
+		// must exist at exactly payload.Seq and describe the same lineage.
+		secBlocks, err := store.ListBlocks(string(section))
+		if err != nil {
+			return fmt.Errorf("reconcile refused: recovery section integrity: %w", err)
+		}
+		var embedded *State
+		for _, b := range secBlocks {
+			if b.Label == fmt.Sprintf("%s%d", statePrefix, payload.Seq) {
+				raw, xerr := store.ExtractBlock(string(section), b.Label)
+				if xerr != nil {
+					return fmt.Errorf("reconcile refused: embedded state unreadable: %w", xerr)
+				}
+				var es State
+				if xerr := json.Unmarshal(raw, &es); xerr != nil {
+					return fmt.Errorf("reconcile refused: embedded state corrupt: %w", xerr)
+				}
+				embedded = &es
+			}
+		}
+		if embedded == nil {
+			return fmt.Errorf("reconcile refused: recovery section lacks state block seq %d: fail-closed", payload.Seq)
+		}
+		if embedded.ObjectiveID != payload.ObjectiveID || embedded.CollaborationID != payload.CollaborationID ||
+			embedded.TargetRevision != payload.TargetRevision || embedded.Seq != payload.Seq {
+			return fmt.Errorf("reconcile refused: recovery section state does not match lineage metadata: fail-closed")
+		}
+		rev, err := store.Revision(canonical)
+		if err != nil {
+			return err
+		}
+		// PreSnapshot 비교: divergence 여부를 감사 가능하게 기록한다. 동일하면
+		// canonical이 dispatch 이후 변하지 않았음을 뜻한다.
+		note := fmt.Sprintf("\n## reconcile\n- recovery: %s\n- pre_snapshot: %s\n- current_revision: %s\n- diverged_since_dispatch: %v\n",
+			filepath.Base(recoveryPath), payload.PreSnapshot, rev, rev != payload.PreSnapshot)
+		if _, err := store.AppendAtomic(canonical, note+string(section), rev); err != nil {
+			return err
+		}
+		if err := os.Remove(recoveryPath); err != nil {
+			return err
+		}
+		out, err = LoadState(canonical)
+		return err
+	})
+	return out, lerr
 }
 
 // OpenConfirmation starts the bounded confirmation cycle for a round.
@@ -849,8 +872,10 @@ func (s *Session) ConfirmWithReviewer(ctx context.Context, roundIndex int, expec
 	if terr != nil || expectedTargetRev != st.TargetRevision || targetNow != st.TargetRevision {
 		cyc.RecordPreconditionFailure()
 		cs.PreconditionFailures = cyc.PreconditionFailures
-		return st, false, appendState(s.Canonical, st,
-			fmt.Sprintf("\n## confirmation precondition-failure R%d\n- expected: %s\n- state: %s\n", roundIndex, expectedTargetRev, st.TargetRevision), loadRev)
+		return st, false, withCanonicalLock(s.Canonical, func() error {
+			return appendState(s.Canonical, st,
+				fmt.Sprintf("\n## confirmation precondition-failure R%d\n- expected: %s\n- state: %s\n", roundIndex, expectedTargetRev, st.TargetRevision), loadRev)
+		})
 	}
 	// confirmation must run in the same reviewer session (contract): a
 	// different vendor is only possible through the explicit reset path.
@@ -912,12 +937,18 @@ Output per the schema: results[] with id and status confirmed|not-confirmed. Do 
 	if err != nil {
 		return nil, false, err
 	}
-	if _, err := store.AppendAtomic(s.Canonical, section+block, snapshot); err != nil {
-		rpath, rerr := writeRecovery(s.Canonical, section+block, st, snapshot)
-		if rerr != nil {
-			return nil, false, fmt.Errorf("confirmation append conflict AND recovery failed: %v / %v", err, rerr)
+	appendErr := withCanonicalLock(s.Canonical, func() error {
+		if _, err := store.AppendAtomic(s.Canonical, section+block, snapshot); err != nil {
+			rpath, rerr := writeRecovery(s.Canonical, section+block, st, snapshot)
+			if rerr != nil {
+				return fmt.Errorf("confirmation append conflict AND recovery failed: %v / %v", err, rerr)
+			}
+			return fmt.Errorf("confirmation append conflict: %v — preserved in %s; reconcile required", err, rpath)
 		}
-		return nil, false, fmt.Errorf("confirmation append conflict: %v — preserved in %s; reconcile required", err, rpath)
+		return nil
+	})
+	if appendErr != nil {
+		return nil, false, appendErr
 	}
 	return st, done, nil
 }

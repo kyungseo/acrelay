@@ -10,12 +10,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/kyungseo/acrelay/internal/adapter"
 	"github.com/kyungseo/acrelay/internal/kernel"
 	"github.com/kyungseo/acrelay/internal/review"
+	"github.com/kyungseo/acrelay/internal/store"
 )
 
 func newSession(t *testing.T, script []adapter.FakeResult) (*Session, *adapter.FakeAdapter, string) {
@@ -968,4 +970,54 @@ func TestConcurrentCanonicalMutatorsSerialize(t *testing.T) {
 	if st.Governance != string(kernel.GovClosable) {
 		t.Fatalf("all findings dispositioned but governance = %s", st.Governance)
 	}
+}
+
+// noDuplicateStateSeqs fails if any acrelay_state_N block appears twice —
+// the signature of two writers clobbering each other's lineage (R1-F1).
+func noDuplicateStateSeqs(t *testing.T, canonical string) {
+	t.Helper()
+	b, err := os.ReadFile(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks, err := store.ListBlocks(string(b))
+	if err != nil {
+		t.Fatalf("canonical integrity: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, bl := range blocks {
+		if strings.HasPrefix(bl.Label, statePrefix) {
+			if seen[bl.Label] {
+				t.Fatalf("duplicate state block %s — canonical writers clobbered", bl.Label)
+			}
+			seen[bl.Label] = true
+		}
+	}
+}
+
+// R1-F1: a locked mutator (Disposition) and the Review append path run
+// concurrently on the same canonical. Whichever loses the race must fail
+// closed (CAS conflict → recovery), never overwrite the other — the state
+// lineage stays readable with unique sequence numbers. Only the Review
+// goroutine touches the fake adapter, so there is no test-double data race.
+func TestReviewAndMutatorDoNotClobber(t *testing.T) {
+	s, _, _ := newSession(t, []adapter.FakeResult{changesRequested("f1", "f2"), changesRequested("f3")})
+	if _, _, err := s.Review(context.Background(), "r0", adapter.Request{}); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, _ = Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil)
+	}()
+	go func() {
+		defer wg.Done()
+		_, _, _ = s.Review(context.Background(), "r1", adapter.Request{}) // may hit CAS→recovery
+	}()
+	wg.Wait()
+	if _, err := LoadState(s.Canonical); err != nil {
+		t.Fatalf("state unreadable after concurrent writers: %v", err)
+	}
+	noDuplicateStateSeqs(t, s.Canonical)
 }

@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // HandleStore maps opaque random session references to native vendor resume
@@ -39,7 +41,21 @@ func (h *HandleStore) withExclusiveLock(fn func() error) error {
 		return fmt.Errorf("handle store lock failed: fail-closed, refusing unserialized mutation: %w", err)
 	}
 	defer syscall.Flock(int(fd.Fd()), syscall.LOCK_UN)
+	inLockTestDelay() // no-op unless ACRELAY_TEST_LOCK_DELAY_MS is set (test-only)
 	return fn()
+}
+
+// inLockTestDelay widens the mutation critical section for concurrency tests
+// so overlapping processes provably contend inside the lock, not merely at
+// the barrier. It is inert in production: the env var is never set there.
+func inLockTestDelay() {
+	ms := os.Getenv("ACRELAY_TEST_LOCK_DELAY_MS")
+	if ms == "" {
+		return
+	}
+	if d, err := strconv.Atoi(ms); err == nil && d > 0 {
+		time.Sleep(time.Duration(d) * time.Millisecond)
+	}
 }
 
 type handleFile struct {

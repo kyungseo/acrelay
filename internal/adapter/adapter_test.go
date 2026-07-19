@@ -419,7 +419,6 @@ func TestHandleStoreHelperProcessMutate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helper register: %v", err)
 	}
-	time.Sleep(3 * time.Millisecond) // widen the window between concurrent mutators
 	switch os.Getenv("ACRELAY_HELPER_OP") {
 	case "rotate":
 		if _, err := s.Rotate(ref, "codex", os.Getenv("ACRELAY_HELPER_HANDLE")+"-rot"); err != nil {
@@ -438,22 +437,33 @@ func TestHandleStoreConcurrentProcessesLoseNothing(t *testing.T) {
 	barrier := path + ".barrier"
 	const n = 12
 	// ops cycle register-only / register+rotate / register+delete so all
-	// three mutators contend on the same file at once.
+	// three mutators contend on the same file at once. Each child's expected
+	// per-op outcome is recorded so we verify outcomes, not just a count.
 	ops := []string{"", "rotate", "delete"}
-	wantEntries := 0
+	wantHandles := map[string]bool{} // handle values that MUST survive
+	bannedHandles := map[string]bool{}
 	cmds := make([]*exec.Cmd, n)
 	outs := make([]*strings.Builder, n)
 	for i := range cmds {
 		op := ops[i%len(ops)]
-		if op != "delete" { // register-only and rotate each leave exactly one entry
-			wantEntries++
+		base := "thread-proc-" + string(rune('a'+i))
+		switch op {
+		case "": // register-only: original handle survives
+			wantHandles[base] = true
+		case "rotate": // rotate: new handle survives, original gone
+			wantHandles[base+"-rot"] = true
+			bannedHandles[base] = true
+		case "delete": // delete: nothing survives for this child
+			bannedHandles[base] = true
+			bannedHandles[base+"-rot"] = true
 		}
 		cmd := exec.Command(os.Args[0], "-test.run=TestHandleStoreHelperProcessMutate$", "-test.v")
 		cmd.Env = append(os.Environ(),
 			"ACRELAY_HELPER_PATH="+path,
 			"ACRELAY_HELPER_BARRIER="+barrier,
 			"ACRELAY_HELPER_OP="+op,
-			"ACRELAY_HELPER_HANDLE=thread-proc-"+string(rune('a'+i)))
+			"ACRELAY_TEST_LOCK_DELAY_MS=4", // widen the in-lock critical section
+			"ACRELAY_HELPER_HANDLE="+base)
 		outs[i] = &strings.Builder{}
 		cmd.Stdout, cmd.Stderr = outs[i], outs[i]
 		if err := cmd.Start(); err != nil {
@@ -475,7 +485,24 @@ func TestHandleStoreConcurrentProcessesLoseNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(f.Entries) != wantEntries { // a lost update from any of the 3 mutators changes this count
-		t.Fatalf("cross-process mutator race: %d entries survived, want %d", len(f.Entries), wantEntries)
+	got := map[string]bool{}
+	for _, e := range f.Entries {
+		got[e.Handle] = true
+	}
+	if len(got) != len(f.Entries) {
+		t.Fatalf("duplicate handle values in store — a mutator clobbered another: %d entries, %d distinct handles", len(f.Entries), len(got))
+	}
+	for h := range wantHandles {
+		if !got[h] { // a lost register/rotate update
+			t.Fatalf("handle %q missing — a concurrent mutator lost this update", h)
+		}
+	}
+	for h := range bannedHandles {
+		if got[h] { // a lost rotate/delete update left stale state
+			t.Fatalf("handle %q survived — a concurrent rotate/delete update was lost", h)
+		}
+	}
+	if len(got) != len(wantHandles) {
+		t.Fatalf("store has %d handles, want exactly %d", len(got), len(wantHandles))
 	}
 }
