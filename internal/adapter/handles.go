@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -57,11 +58,13 @@ type handleFile struct {
 }
 
 type handleEntry struct {
-	Vendor string `json:"vendor"`
-	Handle string `json:"handle"`
+	Vendor     string `json:"vendor"`
+	Handle     string `json:"handle"`
+	ProfileID  string `json:"profile_id"`
+	WorkingDir string `json:"working_dir"`
 }
 
-const handleFileVersion = 1
+const handleFileVersion = 2
 
 // load reads the store. A missing file yields an empty store; a corrupt,
 // version-mismatched, or group/other-accessible file fails closed — it is
@@ -117,17 +120,23 @@ func newRef(existing map[string]handleEntry) (string, error) {
 	return "", fmt.Errorf("session_ref collision retry exhausted: fail-closed")
 }
 
-func validateEntry(vendor, nativeHandle string) error {
-	if strings.TrimSpace(vendor) == "" || strings.TrimSpace(nativeHandle) == "" {
-		return fmt.Errorf("vendor and native handle must be nonempty: fail-closed (empty handles are never stored)")
+func validateEntry(vendor, nativeHandle, profileID, workingDir string) error {
+	if strings.TrimSpace(vendor) == "" || strings.TrimSpace(nativeHandle) == "" || strings.TrimSpace(profileID) == "" || strings.TrimSpace(workingDir) == "" {
+		return fmt.Errorf("vendor, native handle, trust profile, and working directory must be nonempty: fail-closed")
+	}
+	if !filepath.IsAbs(workingDir) {
+		return fmt.Errorf("handle working directory must be absolute: fail-closed")
+	}
+	if strings.HasSuffix(profileID, "/"+WorkingDirNeutral) && !isNeutralNamespacePath(workingDir) {
+		return fmt.Errorf("neutral handle working directory must use the acrelay-owned temp namespace: fail-closed")
 	}
 	return nil
 }
 
 // Register stores a native handle under a fresh random reference and
 // returns the reference. Existing entries are preserved.
-func (h *HandleStore) Register(vendor, nativeHandle string) (string, error) {
-	if err := validateEntry(vendor, nativeHandle); err != nil {
+func (h *HandleStore) Register(vendor, nativeHandle, profileID, workingDir string) (string, error) {
+	if err := validateEntry(vendor, nativeHandle, profileID, workingDir); err != nil {
 		return "", err
 	}
 	var ref string
@@ -140,7 +149,7 @@ func (h *HandleStore) Register(vendor, nativeHandle string) (string, error) {
 		if err != nil {
 			return err
 		}
-		f.Entries[r] = handleEntry{Vendor: vendor, Handle: nativeHandle}
+		f.Entries[r] = handleEntry{Vendor: vendor, Handle: nativeHandle, ProfileID: profileID, WorkingDir: workingDir}
 		if err := h.save(f); err != nil {
 			return err
 		}
@@ -152,26 +161,26 @@ func (h *HandleStore) Register(vendor, nativeHandle string) (string, error) {
 
 // Lookup resolves a reference. A missing reference fails closed — the
 // caller must never silently fall back to a new session (DR-811 §1).
-func (h *HandleStore) Lookup(ref string) (vendor, nativeHandle string, err error) {
+func (h *HandleStore) Lookup(ref string) (vendor, nativeHandle, profileID, workingDir string, err error) {
 	f, err := h.load()
 	if err != nil {
-		return "", "", err
+		return "", "", "", "", err
 	}
 	e, ok := f.Entries[ref]
 	if !ok {
-		return "", "", fmt.Errorf("session_ref %s not found: fail-closed (no silent new-session fallback)", ref)
+		return "", "", "", "", fmt.Errorf("session_ref %s not found: fail-closed (no silent new-session fallback)", ref)
 	}
-	return e.Vendor, e.Handle, nil
+	if err := validateEntry(e.Vendor, e.Handle, e.ProfileID, e.WorkingDir); err != nil {
+		return "", "", "", "", fmt.Errorf("session_ref %s invalid: %w", ref, err)
+	}
+	return e.Vendor, e.Handle, e.ProfileID, e.WorkingDir, nil
 }
 
 // Rotate replaces the native handle behind a reference with a new handle of
 // the SAME vendor under a new reference (session reset semantics) and
 // removes the old reference. The caller records the reset reason in the
 // canonical record.
-func (h *HandleStore) Rotate(oldRef, vendor, newHandle string) (string, error) {
-	if err := validateEntry(vendor, newHandle); err != nil {
-		return "", err
-	}
+func (h *HandleStore) Rotate(oldRef, vendor, newHandle, profileID string) (string, error) {
 	var ref string
 	err := h.withExclusiveLock(func() error {
 		f, err := h.load()
@@ -185,12 +194,18 @@ func (h *HandleStore) Rotate(oldRef, vendor, newHandle string) (string, error) {
 		if old.Vendor != vendor {
 			return fmt.Errorf("rotation vendor mismatch: ref %s belongs to %s, not %s: fail-closed", oldRef, old.Vendor, vendor)
 		}
+		if old.ProfileID != profileID {
+			return fmt.Errorf("rotation trust profile mismatch: ref %s belongs to %s, not %s: fail-closed", oldRef, old.ProfileID, profileID)
+		}
+		if err := validateEntry(vendor, newHandle, profileID, old.WorkingDir); err != nil {
+			return err
+		}
 		delete(f.Entries, oldRef)
 		r, err := newRef(f.Entries)
 		if err != nil {
 			return err
 		}
-		f.Entries[r] = handleEntry{Vendor: vendor, Handle: newHandle}
+		f.Entries[r] = handleEntry{Vendor: vendor, Handle: newHandle, ProfileID: profileID, WorkingDir: old.WorkingDir}
 		if err := h.save(f); err != nil {
 			return err
 		}
@@ -202,15 +217,25 @@ func (h *HandleStore) Rotate(oldRef, vendor, newHandle string) (string, error) {
 
 // Delete removes a reference (collaboration retention cleanup).
 func (h *HandleStore) Delete(ref string) error {
-	return h.withExclusiveLock(func() error {
+	var removed handleEntry
+	err := h.withExclusiveLock(func() error {
 		f, err := h.load()
 		if err != nil {
 			return err
 		}
-		if _, ok := f.Entries[ref]; !ok {
+		e, ok := f.Entries[ref]
+		if !ok {
 			return fmt.Errorf("session_ref %s not found for deletion", ref)
 		}
+		if strings.HasSuffix(e.ProfileID, "/"+WorkingDirNeutral) && !isNeutralNamespacePath(e.WorkingDir) {
+			return fmt.Errorf("refusing unsafe neutral working-directory cleanup %q: handle retained", e.WorkingDir)
+		}
+		removed = e
 		delete(f.Entries, ref)
 		return h.save(f)
 	})
+	if err != nil || !strings.HasSuffix(removed.ProfileID, "/"+WorkingDirNeutral) {
+		return err
+	}
+	return os.RemoveAll(filepath.Clean(removed.WorkingDir))
 }

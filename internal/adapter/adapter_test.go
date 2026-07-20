@@ -28,11 +28,177 @@ func TestValidateEffort(t *testing.T) {
 	}
 }
 
+func approvedTestPolicy(t *testing.T) TrustPolicy {
+	t.Helper()
+	p, err := NewTrustPolicy("test-owner", true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func approvedTestRequest(t *testing.T, req Request) Request {
+	t.Helper()
+	req.TrustPolicy = approvedTestPolicy(t)
+	if req.SubjectRoot == "" {
+		base := req.WorkingDir
+		if base == "" {
+			base = t.TempDir()
+		}
+		req.SubjectRoot = filepath.Join(base, "subject-root")
+		if err := os.MkdirAll(req.SubjectRoot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	req.WorkingDir = ""
+	return req
+}
+
+func testHandleWorkingDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "acrelay-review-root-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+func hasArgSequence(args []string, want ...string) bool {
+	for i := 0; i+len(want) <= len(args); i++ {
+		match := true
+		for j := range want {
+			if args[i+j] != want[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+func TestTrustPolicyApprovalContract(t *testing.T) {
+	if _, err := NewTrustPolicy("owner", false, false); err == nil || !strings.Contains(err.Error(), EgressApprovalID) {
+		t.Fatalf("missing egress approval must fail closed: %v", err)
+	}
+	if _, err := NewTrustPolicy("", true, false); err == nil {
+		t.Fatal("approval actor is required")
+	}
+	neutral := approvedTestPolicy(t)
+	unsafe, err := NewTrustPolicy("test-owner", true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if neutral.ProfileID == unsafe.ProfileID || unsafe.WorkingDirMode != WorkingDirInTarget {
+		t.Fatalf("execution modes must have distinct stable profile identities: neutral=%+v unsafe=%+v", neutral, unsafe)
+	}
+	tampered := neutral
+	tampered.ProfileID = unsafe.ProfileID
+	if err := tampered.Validate(); err == nil {
+		t.Fatal("profile/mode mismatch must fail closed")
+	}
+	unknown := neutral
+	unknown.Approvals = append(unknown.Approvals, ApprovalRecord{
+		ID: "future-owner-gate", Actor: "test-owner", Decision: "approved", Scope: "future bounded scope",
+	})
+	if err := unknown.Validate(); err != nil {
+		t.Fatalf("well-formed future approvals must remain preservable: %v", err)
+	}
+}
+
+func TestPrepareExecutionRootModes(t *testing.T) {
+	subjectRoot := filepath.Join(t.TempDir(), "subject")
+	if err := os.MkdirAll(subjectRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	neutral := approvedTestPolicy(t)
+	prepared, cleanup, err := prepareExecutionRoot(Request{SubjectRoot: subjectRoot, TrustPolicy: neutral}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanup == "" || prepared.WorkingDir != cleanup {
+		t.Fatalf("default neutral mode must create an owned temp cwd: req=%+v cleanup=%q", prepared, cleanup)
+	}
+	if inside, err := pathWithin(subjectRoot, cleanup); err != nil || inside {
+		t.Fatalf("neutral cwd must be outside subject: inside=%v err=%v", inside, err)
+	}
+	st, err := os.Stat(cleanup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o700 {
+		t.Fatalf("neutral cwd must be owner-only: mode=%v", st.Mode())
+	}
+	resumed, resumedCleanup, err := prepareExecutionRoot(Request{SubjectRoot: subjectRoot, TrustPolicy: neutral}, cleanup)
+	if err != nil || resumed.WorkingDir != cleanup || resumedCleanup != "" {
+		t.Fatalf("neutral resume must reuse the handle-bound cwd without taking cleanup ownership: req=%+v cleanup=%q err=%v", resumed, resumedCleanup, err)
+	}
+	if _, _, err := prepareExecutionRoot(Request{SubjectRoot: subjectRoot, WorkingDir: cleanup, TrustPolicy: neutral}, cleanup); err == nil {
+		t.Fatal("caller-supplied neutral cwd must stay forbidden even when it names the stored cwd")
+	}
+	if err := os.RemoveAll(cleanup); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), cleanup); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := prepareExecutionRoot(Request{SubjectRoot: subjectRoot, TrustPolicy: neutral}, cleanup); err == nil {
+		t.Fatal("retargeting a stored neutral cwd to a symlink must fail closed")
+	}
+	if err := os.Remove(cleanup); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := prepareExecutionRoot(Request{SubjectRoot: subjectRoot, WorkingDir: subjectRoot, TrustPolicy: neutral}, ""); err == nil {
+		t.Fatal("neutral profile must reject caller-supplied cwd")
+	}
+	if _, _, err := prepareExecutionRoot(Request{SubjectRoot: subjectRoot, WorkingDir: t.TempDir(), TrustPolicy: neutral}, ""); err == nil {
+		t.Fatal("neutral profile must reject even an external caller-supplied cwd")
+	}
+	unsafe, err := NewTrustPolicy("test-owner", true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, cleanup, err = prepareExecutionRoot(Request{SubjectRoot: subjectRoot, TrustPolicy: unsafe}, "")
+	if err != nil || cleanup != "" || prepared.WorkingDir != subjectRoot {
+		t.Fatalf("approved in-target mode must use subject root: req=%+v cleanup=%q err=%v", prepared, cleanup, err)
+	}
+	outside := t.TempDir()
+	if _, _, err := prepareExecutionRoot(Request{SubjectRoot: subjectRoot, WorkingDir: outside, TrustPolicy: unsafe}, ""); err == nil {
+		t.Fatal("in-target profile must reject an outside cwd")
+	}
+	boundInTarget := filepath.Join(subjectRoot, "reviewer-cwd")
+	if err := os.Mkdir(boundInTarget, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if resumed, _, err := prepareExecutionRoot(Request{SubjectRoot: subjectRoot, TrustPolicy: unsafe}, boundInTarget); err != nil || resumed.WorkingDir != boundInTarget {
+		t.Fatalf("in-target resume must reuse its handle-bound cwd: req=%+v err=%v", resumed, err)
+	}
+	if _, _, err := prepareExecutionRoot(Request{SubjectRoot: subjectRoot, WorkingDir: subjectRoot, TrustPolicy: unsafe}, boundInTarget); err == nil {
+		t.Fatal("in-target resume must reject a different caller cwd without explicit reset")
+	}
+	resolvedTemp, err := filepath.EvalSymlinks(os.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := prepareExecutionRoot(Request{SubjectRoot: resolvedTemp, TrustPolicy: neutral}, ""); err == nil ||
+		!strings.Contains(err.Error(), "neutral reviewer cwd unavailable") {
+		t.Fatalf("subject containing the system temp root must fail closed: %v", err)
+	}
+}
+
 func TestHandleStoreLifecycle(t *testing.T) {
 	dir := t.TempDir()
 	h := &HandleStore{Path: filepath.Join(dir, "handles.json")}
 
-	ref1, err := h.Register("claude", "native-uuid-1")
+	profile := profileID(WorkingDirNeutral)
+	workdir1 := testHandleWorkingDir(t)
+	ref1, err := h.Register("claude", "native-uuid-1", profile, workdir1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,35 +211,39 @@ func TestHandleStoreLifecycle(t *testing.T) {
 		t.Fatalf("handle store mode %o, want 0600", st.Mode().Perm())
 	}
 	// merge preserved
-	ref2, _ := h.Register("codex", "thread-2")
-	if _, nh, err := h.Lookup(ref1); err != nil || nh != "native-uuid-1" {
+	workdir2 := testHandleWorkingDir(t)
+	ref2, _ := h.Register("codex", "thread-2", profile, workdir2)
+	if _, nh, storedProfile, storedWorkingDir, err := h.Lookup(ref1); err != nil || nh != "native-uuid-1" || storedProfile != profile || storedWorkingDir != workdir1 {
 		t.Fatalf("first entry lost after second register: %v", err)
 	}
 	// randomness: two registrations of the same handle produce distinct refs
-	ref3, _ := h.Register("claude", "native-uuid-1")
+	ref3, _ := h.Register("claude", "native-uuid-1", profile, testHandleWorkingDir(t))
 	if ref1 == ref3 {
 		t.Fatal("references must be random, not derived from the handle")
 	}
 	// rotation: old ref removed, new ref resolves
-	ref4, err := h.Rotate(ref2, "codex", "thread-2b")
+	ref4, err := h.Rotate(ref2, "codex", "thread-2b", profile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := h.Lookup(ref2); err == nil {
+	if _, _, _, _, err := h.Lookup(ref2); err == nil {
 		t.Fatal("rotated-away ref must fail closed")
 	}
-	if _, nh, _ := h.Lookup(ref4); nh != "thread-2b" {
+	if _, nh, storedProfile, storedWorkingDir, _ := h.Lookup(ref4); nh != "thread-2b" || storedProfile != profile || storedWorkingDir != workdir2 {
 		t.Fatal("rotated ref must resolve to the new handle")
 	}
 	// deletion
 	if err := h.Delete(ref4); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := h.Lookup(ref4); err == nil {
+	if _, err := os.Stat(workdir2); !os.IsNotExist(err) {
+		t.Fatalf("neutral handle deletion must remove its owned working directory: %v", err)
+	}
+	if _, _, _, _, err := h.Lookup(ref4); err == nil {
 		t.Fatal("deleted ref must fail closed")
 	}
 	// missing ref fails closed (no silent new-session fallback)
-	if _, _, err := h.Lookup("sref-doesnotexist"); err == nil ||
+	if _, _, _, _, err := h.Lookup("sref-doesnotexist"); err == nil ||
 		!strings.Contains(err.Error(), "no silent new-session fallback") {
 		t.Fatalf("missing ref must fail closed with explicit contract: %v", err)
 	}
@@ -85,17 +255,27 @@ func TestHandleStoreCorruptFailsClosed(t *testing.T) {
 	if err := os.WriteFile(h.Path, []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.Register("claude", "x"); err == nil {
+	if _, err := h.Register("claude", "x", profileID(WorkingDirNeutral), testHandleWorkingDir(t)); err == nil {
 		t.Fatal("corrupt store must fail closed, never be overwritten")
 	}
 	if b, _ := os.ReadFile(h.Path); string(b) != "{not json" {
 		t.Fatal("corrupt store content must remain untouched")
 	}
 	// unsupported version fails closed
+	os.WriteFile(h.Path, []byte(`{"version":1,"entries":{"legacy":{"vendor":"claude","handle":"native"}}}`), 0o600)
+	if _, _, _, _, err := (&HandleStore{Path: h.Path}).Lookup("legacy"); err == nil ||
+		!strings.Contains(err.Error(), "version 1 unsupported") {
+		t.Fatalf("handle store v1 must fail closed: %v", err)
+	}
 	os.WriteFile(h.Path, []byte(`{"version":99,"entries":{}}`), 0o600)
-	if _, _, err := (&HandleStore{Path: h.Path}).Lookup("any"); err == nil ||
+	if _, _, _, _, err := (&HandleStore{Path: h.Path}).Lookup("any"); err == nil ||
 		!strings.Contains(err.Error(), "version") {
 		t.Fatalf("version mismatch must fail closed: %v", err)
+	}
+	os.WriteFile(h.Path, []byte(`{"version":2,"entries":{"cwd-less":{"vendor":"claude","handle":"native","profile_id":"review-input-trust-v1/neutral"}}}`), 0o600)
+	if _, _, _, _, err := (&HandleStore{Path: h.Path}).Lookup("cwd-less"); err == nil ||
+		!strings.Contains(err.Error(), "working directory") {
+		t.Fatalf("handle store v2 entry without bound cwd must fail closed: %v", err)
 	}
 }
 
@@ -214,14 +394,133 @@ func installAdapterCLI(t *testing.T, name, script string) (string, string) {
 	return dir, logPath
 }
 
-func TestChangedVersionAndHelpDriftDoNotBlockCompatibleDispatch(t *testing.T) {
+func TestRestrictedAdapterCommandSurfaceInitialAndResume(t *testing.T) {
 	tests := []struct {
-		name           string
-		script         string
-		adapter        Adapter
-		wantVersion    string
-		wantModel      string
-		wantModelState ObservationState
+		name   string
+		script string
+		make   func() Adapter
+		check  func(*testing.T, PreparedInvocation, bool)
+	}{
+		{
+			name: "claude",
+			script: `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "2.1.215 (Claude Code)"; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
+exit 99
+`,
+			make: func() Adapter { return ClaudeAdapter{} },
+			check: func(t *testing.T, invocation PreparedInvocation, resume bool) {
+				p := invocation.(*preparedClaude)
+				if !hasArgSequence(p.args, "--safe-mode") ||
+					!hasArgSequence(p.args, "--add-dir", p.req.SubjectRoot) ||
+					!hasArgSequence(p.args, "--strict-mcp-config") ||
+					!hasArgSequence(p.args, "--mcp-config", `{"mcpServers":{}}`) ||
+					!hasArgSequence(p.args, "--tools", "Read,Glob,Grep") ||
+					!hasArgSequence(p.args, "--permission-mode", "dontAsk") ||
+					!hasArgSequence(p.args, "--system-prompt", ReviewerTrustSystemPrompt) {
+					t.Fatalf("Claude restriction argv incomplete: %q", p.args)
+				}
+				joined := strings.Join(p.args, " ")
+				if strings.Contains(joined, "Write") || strings.Contains(joined, "Edit") || strings.Contains(joined, "Bash") {
+					t.Fatalf("Claude write-capable tool leaked into argv: %q", p.args)
+				}
+				if hasArgSequence(p.args, "--resume", "native-session") != resume {
+					t.Fatalf("Claude resume argv mismatch: resume=%v args=%q", resume, p.args)
+				}
+			},
+		},
+		{
+			name: "codex",
+			script: `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
+if [ "$1" = "doctor" ]; then echo '{"checks":{"config.load":{"status":"ok","details":{"model":"test-model","provider":"test"}}}}'; exit 0; fi
+if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config --ignore-rules --strict-config --sandbox'; exit 0; fi
+if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
+exit 99
+`,
+			make: func() Adapter { return CodexAdapter{} },
+			check: func(t *testing.T, invocation PreparedInvocation, resume bool) {
+				p := invocation.(*preparedCodex)
+				if !hasArgSequence(p.args, "exec", "--ignore-user-config", "--ignore-rules", "--strict-config", "--sandbox", "read-only", "--skip-git-repo-check", "--json") {
+					t.Fatalf("Codex restriction argv incomplete: %q", p.args)
+				}
+				if hasArgSequence(p.args, "--dangerously-bypass-approvals-and-sandbox") {
+					t.Fatalf("Codex unrestricted fallback leaked into argv: %q", p.args)
+				}
+				if hasArgSequence(p.args, "resume", "native-session") != resume {
+					t.Fatalf("Codex resume argv mismatch: resume=%v args=%q", resume, p.args)
+				}
+				if p.args[len(p.args)-1] != "-" {
+					t.Fatalf("Codex prompt must remain stdin positional: %q", p.args)
+				}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, _ := installAdapterCLI(t, tc.name, tc.script)
+			handles := &HandleStore{Path: filepath.Join(dir, "handles.json")}
+			base := approvedTestRequest(t, Request{Prompt: "review", SchemaJSON: `{"type":"object"}`})
+			initial, err := tc.make().Prepare(context.Background(), base, handles)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.check(t, initial, false)
+			initialCwd := ""
+			switch p := initial.(type) {
+			case *preparedClaude:
+				initialCwd = p.req.WorkingDir
+			case *preparedCodex:
+				initialCwd = p.req.WorkingDir
+			}
+			if err := initial.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(initialCwd); !os.IsNotExist(err) {
+				t.Fatalf("neutral cwd must be removed by Close: %s err=%v", initialCwd, err)
+			}
+			resumeWorkingDir := testHandleWorkingDir(t)
+			ref, err := handles.Register(tc.name, "native-session", base.TrustPolicy.ProfileID, resumeWorkingDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			base.ResumeRef = ref
+			resumed, err := tc.make().Prepare(context.Background(), base, handles)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.check(t, resumed, true)
+			switch p := resumed.(type) {
+			case *preparedClaude:
+				if p.req.WorkingDir != resumeWorkingDir {
+					t.Fatalf("Claude resume must reuse handle-bound cwd: got=%q want=%q", p.req.WorkingDir, resumeWorkingDir)
+				}
+			case *preparedCodex:
+				if p.req.WorkingDir != resumeWorkingDir {
+					t.Fatalf("Codex resume must reuse handle-bound cwd: got=%q want=%q", p.req.WorkingDir, resumeWorkingDir)
+				}
+			}
+			if err := resumed.Close(); err != nil {
+				t.Fatal(err)
+			}
+			unsafe, err := NewTrustPolicy("test-owner", true, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			base.TrustPolicy = unsafe
+			if prepared, err := tc.make().Prepare(context.Background(), base, handles); err == nil || prepared != nil ||
+				!strings.Contains(err.Error(), "trust profile mismatch") {
+				t.Fatalf("resume under a different trust profile must fail closed: prepared=%v err=%v", prepared, err)
+			}
+		})
+	}
+}
+
+func TestRestrictionVersionDriftBlocksBeforeDispatch(t *testing.T) {
+	tests := []struct {
+		name    string
+		script  string
+		adapter Adapter
 	}{
 		{
 			name: "claude",
@@ -231,8 +530,7 @@ if [ "$1" = "--version" ]; then echo "9.9.9 (Claude Code)"; exit 0; fi
 if [ "$1" = "--help" ]; then echo "reformatted capability reference"; exit 0; fi
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"session-new","structured_output":{"verdict":"approve","findings":[]},"modelUsage":{"claude-default":{}}}'
 `,
-			adapter: ClaudeAdapter{}, wantVersion: "9.9.9", wantModel: "claude-default",
-			wantModelState: ObsVerified,
+			adapter: ClaudeAdapter{},
 		},
 		{
 			name: "codex",
@@ -248,45 +546,22 @@ printf '%s\n' '{"type":"thread.started","thread_id":"thread-new"}'
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"verdict\":\"approve\",\"findings\":[]}"}}'
 printf '%s\n' '{"type":"turn.completed"}'
 `,
-			adapter: CodexAdapter{}, wantVersion: "9.9.9", wantModel: "codex-default",
-			wantModelState: ObsAttested,
+			adapter: CodexAdapter{},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			dir, logPath := installAdapterCLI(t, tc.name, tc.script)
-			prepared, err := tc.adapter.Prepare(context.Background(), Request{
+			prepared, err := tc.adapter.Prepare(context.Background(), approvedTestRequest(t, Request{
 				Prompt: "review", SchemaJSON: `{"type":"object"}`, WorkingDir: dir,
-			}, &HandleStore{Path: filepath.Join(dir, "handles.json")})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer prepared.Close()
-			res, err := prepared.Dispatch(context.Background())
-			if err != nil {
-				t.Fatalf("compatible actual command must dispatch after advisory help drift: %v", err)
-			}
-			if res.Provenance.ObservedCLIVersion != tc.wantVersion ||
-				res.Provenance.KnownGoodCLIVersion == tc.wantVersion {
-				t.Fatalf("changed version provenance not preserved: %+v", res.Provenance)
-			}
-			if res.Provenance.CapabilityProbeState != ProbeInconclusive {
-				t.Fatalf("reformatted help must be diagnostic-only: %+v", res.Provenance)
-			}
-			if res.Provenance.ResolvedModel != tc.wantModel || res.Provenance.ModelState != tc.wantModelState {
-				t.Fatalf("resolved model provenance mismatch: %+v", res.Provenance)
-			}
-			provJSON, _ := json.Marshal(res.Provenance)
-			if strings.Contains(string(provJSON), "must/not/persist") {
-				t.Fatalf("non-allowlisted doctor field leaked into provenance: %s", provJSON)
+			}), &HandleStore{Path: filepath.Join(dir, "handles.json")})
+			if err == nil || prepared != nil || !strings.Contains(err.Error(), "owner gate required") ||
+				!strings.Contains(err.Error(), "unrestricted fallback forbidden") {
+				t.Fatalf("version drift must fail before dispatch: prepared=%v err=%v", prepared, err)
 			}
 			calls, _ := os.ReadFile(logPath)
-			for _, line := range strings.Split(string(calls), "\n") {
-				if strings.Contains(line, "--output-schema") || strings.Contains(line, "--json-schema") {
-					if strings.Contains(line, "--model") || strings.Contains(line, " -m ") {
-						t.Fatalf("platform-default dispatch must not send a model override: %q", line)
-					}
-				}
+			if !strings.Contains(string(calls), "--version") || strings.Contains(string(calls), "--output-schema") || strings.Contains(string(calls), "--json-schema") {
+				t.Fatalf("version drift must stop before reviewer dispatch: %q", calls)
 			}
 		})
 	}
@@ -294,7 +569,7 @@ printf '%s\n' '{"type":"turn.completed"}'
 
 func TestCodexDoctorFailureIsUnverifiedAndNonblocking(t *testing.T) {
 	script := `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "codex-cli 7.7.7"; exit 0; fi
+if [ "$1" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
 if [ "$1" = "doctor" ]; then echo 'not-json'; exit 1; fi
 if [ "$2" = "--help" ]; then echo '--json --output-schema'; exit 0; fi
 if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
@@ -303,9 +578,9 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{
 printf '%s\n' '{"type":"turn.completed"}'
 `
 	dir, _ := installAdapterCLI(t, "codex", script)
-	prepared, err := (CodexAdapter{}).Prepare(context.Background(), Request{
+	prepared, err := (CodexAdapter{}).Prepare(context.Background(), approvedTestRequest(t, Request{
 		Prompt: "review", SchemaJSON: `{"type":"object"}`, WorkingDir: dir,
-	}, &HandleStore{Path: filepath.Join(dir, "handles.json")})
+	}), &HandleStore{Path: filepath.Join(dir, "handles.json")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +597,7 @@ printf '%s\n' '{"type":"turn.completed"}'
 
 func TestCodexDoctorTimeoutIsUnverifiedAndNonblocking(t *testing.T) {
 	script := `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "codex-cli 7.7.8"; exit 0; fi
+if [ "$1" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
 if [ "$1" = "doctor" ]; then sleep 2; exit 0; fi
 if [ "$2" = "--help" ]; then echo '--json --output-schema'; exit 0; fi
 if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
@@ -334,9 +609,9 @@ printf '%s\n' '{"type":"turn.completed"}'
 	previousTimeout := codexModelProbeTimeout
 	codexModelProbeTimeout = 100 * time.Millisecond
 	defer func() { codexModelProbeTimeout = previousTimeout }()
-	prepared, err := (CodexAdapter{}).Prepare(context.Background(), Request{
+	prepared, err := (CodexAdapter{}).Prepare(context.Background(), approvedTestRequest(t, Request{
 		Prompt: "review", SchemaJSON: `{"type":"object"}`, WorkingDir: dir,
-	}, &HandleStore{Path: filepath.Join(dir, "handles.json")})
+	}), &HandleStore{Path: filepath.Join(dir, "handles.json")})
 	if err != nil {
 		t.Fatalf("doctor timeout must not fail Prepare: %v", err)
 	}
@@ -360,8 +635,8 @@ func TestAdvisoryProbePassDoesNotMaskActualCommandFailure(t *testing.T) {
 		{
 			name: "claude",
 			script: `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "9.1.0 (Claude Code)"; exit 0; fi
-if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume'; exit 0; fi
+if [ "$1" = "--version" ]; then echo "2.1.215 (Claude Code)"; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
 echo 'unknown option --json-schema' >&2
 exit 2
 `,
@@ -370,9 +645,9 @@ exit 2
 		{
 			name: "codex",
 			script: `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "codex-cli 9.1.0"; exit 0; fi
+if [ "$1" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
 if [ "$1" = "doctor" ]; then echo '{}'; exit 0; fi
-if [ "$2" = "--help" ]; then echo '--json --output-schema'; exit 0; fi
+if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config --ignore-rules --strict-config --sandbox'; exit 0; fi
 if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
 echo 'unknown option --output-schema' >&2
 exit 2
@@ -383,9 +658,9 @@ exit 2
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			dir, _ := installAdapterCLI(t, tc.name, tc.script)
-			prepared, err := tc.adapter.Prepare(context.Background(), Request{
+			prepared, err := tc.adapter.Prepare(context.Background(), approvedTestRequest(t, Request{
 				Prompt: "review", SchemaJSON: `{"type":"object"}`, WorkingDir: dir,
-			}, &HandleStore{Path: filepath.Join(dir, "handles.json")})
+			}), &HandleStore{Path: filepath.Join(dir, "handles.json")})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -410,7 +685,7 @@ func TestMissingOrMalformedStructuredOutputFailsAfterStart(t *testing.T) {
 		{
 			name: "claude",
 			script: `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "8.8.8 (Claude Code)"; exit 0; fi
+if [ "$1" = "--version" ]; then echo "2.1.215 (Claude Code)"; exit 0; fi
 if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume'; exit 0; fi
 echo '{"type":"result","subtype":"success","is_error":false,"session_id":"session-no-output","modelUsage":{"claude-default":{}}}'
 `,
@@ -419,7 +694,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"session_id":"sessio
 		{
 			name: "codex",
 			script: `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "codex-cli 8.8.8"; exit 0; fi
+if [ "$1" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
 if [ "$1" = "doctor" ]; then echo '{}'; exit 0; fi
 if [ "$2" = "--help" ]; then echo '--json --output-schema'; exit 0; fi
 if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
@@ -433,9 +708,9 @@ printf '%s\n' '{"type":"turn.completed"}'
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			dir, _ := installAdapterCLI(t, tc.name, tc.script)
-			prepared, err := tc.adapter.Prepare(context.Background(), Request{
+			prepared, err := tc.adapter.Prepare(context.Background(), approvedTestRequest(t, Request{
 				Prompt: "review", SchemaJSON: `{"type":"object"}`, WorkingDir: dir,
-			}, &HandleStore{Path: filepath.Join(dir, "handles.json")})
+			}), &HandleStore{Path: filepath.Join(dir, "handles.json")})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -449,12 +724,13 @@ printf '%s\n' '{"type":"turn.completed"}'
 }
 
 func TestPreflightRequiresSchema(t *testing.T) {
+	dir := t.TempDir()
 	for _, a := range []Adapter{ClaudeAdapter{}, CodexAdapter{}} {
 		if err := a.Preflight(Request{Prompt: "x"}); err == nil ||
 			!strings.Contains(err.Error(), "SchemaJSON") {
 			t.Fatalf("%s: missing schema must fail preflight: %v", a.Vendor(), err)
 		}
-		if err := a.Preflight(Request{Prompt: "x", SchemaJSON: `{"type":"object"}`}); err != nil {
+		if err := a.Preflight(approvedTestRequest(t, Request{Prompt: "x", SchemaJSON: `{"type":"object"}`, WorkingDir: dir})); err != nil {
 			t.Fatalf("%s: valid request must pass preflight: %v", a.Vendor(), err)
 		}
 	}
@@ -500,9 +776,9 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
 			t.Setenv("ACRELAY_TEST_LOG", logPath)
 			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			handles := &HandleStore{Path: filepath.Join(dir, "handles.json")}
-			prepared, err := tc.make().Prepare(context.Background(), Request{
+			prepared, err := tc.make().Prepare(context.Background(), approvedTestRequest(t, Request{
 				Prompt: "review", SchemaJSON: `{"type":"object"}`, WorkingDir: dir,
-			}, handles)
+			}), handles)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -561,26 +837,34 @@ func TestTimeoutsValidate(t *testing.T) {
 func TestHandleStoreHardening(t *testing.T) {
 	dir := t.TempDir()
 	h := &HandleStore{Path: filepath.Join(dir, "handles.json")}
-	if _, err := h.Register("", "x"); err == nil {
+	profile := profileID(WorkingDirNeutral)
+	workingDir := testHandleWorkingDir(t)
+	if _, err := h.Register("", "x", profile, workingDir); err == nil {
 		t.Fatal("empty vendor must be refused")
 	}
-	if _, err := h.Register("claude", "  "); err == nil {
+	if _, err := h.Register("claude", "  ", profile, workingDir); err == nil {
 		t.Fatal("blank handle must be refused")
 	}
-	ref, err := h.Register("claude", "native-1")
+	if _, err := h.Register("claude", "native-1", "", workingDir); err == nil {
+		t.Fatal("blank trust profile must be refused")
+	}
+	if _, err := h.Register("claude", "native-1", profile, "relative"); err == nil {
+		t.Fatal("relative handle working directory must be refused")
+	}
+	ref, err := h.Register("claude", "native-1", profile, workingDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(ref) != len("sref-")+32 {
 		t.Fatalf("expected 128-bit ref, got %s", ref)
 	}
-	if _, err := h.Rotate(ref, "codex", "thread-1"); err == nil ||
+	if _, err := h.Rotate(ref, "codex", "thread-1", profile); err == nil ||
 		!strings.Contains(err.Error(), "vendor mismatch") {
 		t.Fatalf("cross-vendor rotation must fail closed: %v", err)
 	}
 	// permission exposure fails closed on load
 	os.Chmod(h.Path, 0o644)
-	if _, _, err := h.Lookup(ref); err == nil ||
+	if _, _, _, _, err := h.Lookup(ref); err == nil ||
 		!strings.Contains(err.Error(), "permission") {
 		t.Fatalf("group/other-readable store must fail closed: %v", err)
 	}
@@ -712,11 +996,15 @@ func TestHandleStoreConcurrentRegisterLosesNothing(t *testing.T) {
 	path := filepath.Join(dir, "handles.json")
 	const n = 12
 	errs := make(chan error, n)
+	workingDirs := make([]string, n)
+	for i := range workingDirs {
+		workingDirs[i] = testHandleWorkingDir(t)
+	}
 	for i := 0; i < n; i++ {
 		go func(i int) {
 			// separate HandleStore values → separate lock fds, like separate processes
 			s := &HandleStore{Path: path}
-			_, err := s.Register("codex", "thread-"+string(rune('a'+i)))
+			_, err := s.Register("codex", "thread-"+string(rune('a'+i)), profileID(WorkingDirNeutral), workingDirs[i])
 			errs <- err
 		}(i)
 	}
@@ -764,13 +1052,19 @@ func TestHandleStoreHelperProcessMutate(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	s := &HandleStore{Path: path}
-	ref, err := s.Register("codex", os.Getenv("ACRELAY_HELPER_HANDLE"))
+	profile := profileID(WorkingDirNeutral)
+	workingDir, err := os.MkdirTemp("", "acrelay-review-root-helper-")
+	if err != nil {
+		t.Fatalf("helper working directory: %v", err)
+	}
+	defer os.RemoveAll(workingDir)
+	ref, err := s.Register("codex", os.Getenv("ACRELAY_HELPER_HANDLE"), profile, workingDir)
 	if err != nil {
 		t.Fatalf("helper register: %v", err)
 	}
 	switch os.Getenv("ACRELAY_HELPER_OP") {
 	case "rotate":
-		if _, err := s.Rotate(ref, "codex", os.Getenv("ACRELAY_HELPER_HANDLE")+"-rot"); err != nil {
+		if _, err := s.Rotate(ref, "codex", os.Getenv("ACRELAY_HELPER_HANDLE")+"-rot", profile); err != nil {
 			t.Fatalf("helper rotate: %v", err)
 		}
 	case "delete":

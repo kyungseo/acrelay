@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 )
 
 // FakeResult scripts one dispatch outcome for deterministic fixtures.
@@ -51,12 +52,20 @@ func (f *FakeAdapter) Preflight(req Request) error {
 }
 
 type preparedFake struct {
-	adapter *FakeAdapter
-	req     Request
-	handles *HandleStore
+	adapter    *FakeAdapter
+	req        Request
+	handles    *HandleStore
+	cleanupDir string
 }
 
-func (p *preparedFake) Close() error { return nil }
+func (p *preparedFake) Close() error {
+	if p.cleanupDir == "" {
+		return nil
+	}
+	err := os.RemoveAll(p.cleanupDir)
+	p.cleanupDir = ""
+	return err
+}
 
 func (f *FakeAdapter) Prepare(ctx context.Context, req Request, handles *HandleStore) (PreparedInvocation, error) {
 	if err := f.Preflight(req); err != nil {
@@ -65,17 +74,26 @@ func (f *FakeAdapter) Prepare(ctx context.Context, req Request, handles *HandleS
 	if f.PrepareFail != nil {
 		return nil, f.PrepareFail
 	}
+	resumeWorkingDir := ""
 	if req.ResumeRef != "" {
-		vendor, _, err := handles.Lookup(req.ResumeRef)
+		vendor, _, profileID, workingDir, err := handles.Lookup(req.ResumeRef)
 		if err != nil {
 			return nil, err
 		}
 		if vendor != f.VendorName {
 			return nil, fmt.Errorf("session_ref %s belongs to %s, not %s: fail-closed", req.ResumeRef, vendor, f.VendorName)
 		}
+		if profileID != req.TrustPolicy.ProfileID {
+			return nil, fmt.Errorf("session_ref %s trust profile mismatch: explicit session reset required, fail-closed", req.ResumeRef)
+		}
+		resumeWorkingDir = workingDir
+	}
+	preparedReq, cleanupDir, err := prepareExecutionRoot(req, resumeWorkingDir)
+	if err != nil {
+		return nil, err
 	}
 	f.Prepared++
-	return &preparedFake{adapter: f, req: req, handles: handles}, nil
+	return &preparedFake{adapter: f, req: preparedReq, handles: handles, cleanupDir: cleanupDir}, nil
 }
 
 func (p *preparedFake) Dispatch(ctx context.Context) (*Result, error) {
@@ -120,10 +138,11 @@ func (p *preparedFake) Dispatch(ctx context.Context) (*Result, error) {
 	sessionRef := req.ResumeRef
 	newSession := false
 	if sessionRef == "" {
-		ref, err := handles.Register(f.VendorName, f.NativeHandle)
+		ref, err := handles.Register(f.VendorName, f.NativeHandle, req.TrustPolicy.ProfileID, req.WorkingDir)
 		if err != nil {
 			return res, err
 		}
+		p.cleanupDir = ""
 		sessionRef, newSession = ref, true
 	}
 	mm := res.Provenance.ModelMismatch
@@ -135,7 +154,11 @@ func (p *preparedFake) Dispatch(ctx context.Context) (*Result, error) {
 		ObservedCLIVersion: "fake-1", ObservedCLIVersionBanner: "fake-1",
 		CLIVersionSource: "fake adapter", CapabilityProbeState: ProbeObserved,
 		CapabilityProbeDiagnostic: "fake required capabilities observed",
-		SessionRef:                sessionRef, NewSession: newSession,
+		WorkingDir:                req.WorkingDir, WorkingDirMode: req.TrustPolicy.WorkingDirMode,
+		SubjectRoot: req.SubjectRoot, TrustProfileID: req.TrustPolicy.ProfileID,
+		RestrictionEvidenceState: ObsVerified, EgressApprovalID: EgressApprovalID,
+		EgressApprovalRecorded: true,
+		SessionRef:             sessionRef, NewSession: newSession,
 	}
 	return res, nil
 }

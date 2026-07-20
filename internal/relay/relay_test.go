@@ -20,6 +20,15 @@ import (
 	"github.com/kyungseo/acrelay/internal/subject"
 )
 
+func approvedPolicy(t *testing.T) adapter.TrustPolicy {
+	t.Helper()
+	p, err := adapter.NewTrustPolicy("test-owner", true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 func newSession(t *testing.T, script []adapter.FakeResult) (*Session, *adapter.FakeAdapter, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -33,7 +42,7 @@ func newSession(t *testing.T, script []adapter.FakeResult) (*Session, *adapter.F
 		Handles:   &adapter.HandleStore{Path: filepath.Join(dir, "handles.json")},
 		Canonical: filepath.Join(dir, "canonical.md"),
 	}
-	if _, err := Init(s.Canonical, "is hello ok?", target, "", "", false); err != nil {
+	if _, err := Init(s.Canonical, "is hello ok?", target, "", "", false, approvedPolicy(t)); err != nil {
 		t.Fatal(err)
 	}
 	return s, fake, dir
@@ -62,6 +71,7 @@ func bindValidSubject(t *testing.T, st *State) *State {
 	t.Helper()
 	st.SubjectSpec, st.Subject = validSubject(t)
 	st.TargetRevision = st.Subject.Aggregate
+	st.TrustPolicy = approvedPolicy(t)
 	return st
 }
 
@@ -71,6 +81,70 @@ func approve() adapter.FakeResult {
 
 func changesRequested(findings ...any) adapter.FakeResult {
 	return adapter.FakeResult{Structured: map[string]any{"verdict": "changes-requested", "findings": findings}}
+}
+
+func TestInitRequiresDurableEgressApprovalBeforeArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+	canonical := filepath.Join(dir, "canonical.md")
+	if err := os.WriteFile(target, []byte("target"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missingApproval := adapter.TrustPolicy{
+		Version: adapter.TrustPolicyVersion, ProfileID: adapter.TrustProfileBaseID + "/" + adapter.WorkingDirNeutral,
+		WorkingDirMode: adapter.WorkingDirNeutral,
+	}
+	if _, err := Init(canonical, "q", target, "", "", false, missingApproval); err == nil ||
+		!strings.Contains(err.Error(), adapter.EgressApprovalID) {
+		t.Fatalf("missing owner egress approval must fail closed: %v", err)
+	}
+	for _, path := range []string{canonical, canonical + ".lock"} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("failed trust preflight must not create %s: %v", path, err)
+		}
+	}
+}
+
+func TestTrustPolicyPersistsAndProfileMismatchBlocksSessionCarry(t *testing.T) {
+	s, _, dir := newSession(t, []adapter.FakeResult{approve()})
+	st, _, err := s.Review(context.Background(), "review", adapter.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.TrustPolicy.ProfileID != approvedPolicy(t).ProfileID || len(st.TrustPolicy.Approvals) != 1 {
+		t.Fatalf("objective trust policy was not preserved: %+v", st.TrustPolicy)
+	}
+	doc, err := os.ReadFile(s.Canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(doc), `"EgressApprovalRecorded":true`) ||
+		!strings.Contains(string(doc), `"RestrictionEvidenceState":"verified"`) ||
+		!strings.Contains(string(doc), `"TrustProfileID":"`+st.TrustPolicy.ProfileID+`"`) {
+		t.Fatalf("dispatch provenance lacks trust/egress evidence: %s", doc)
+	}
+	if _, err := Close(s.Canonical, "owner", "owner", ""); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.Revision(s.Canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsafe, err := adapter.NewTrustPolicy("test-owner", true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Init(s.Canonical, "follow-up", targetPath(dir), st.ObjectiveID, "unsafe cwd requested", true, unsafe); err == nil ||
+		!strings.Contains(err.Error(), "trust profile") {
+		t.Fatalf("session carry across trust profiles must fail closed: %v", err)
+	}
+	after, err := store.Revision(s.Canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatal("profile mismatch must not mutate canonical state")
+	}
 }
 
 // E2E happy path: init → review(approve) → close.
@@ -247,7 +321,7 @@ func newMultiSubjectSession(t *testing.T, script []adapter.FakeResult) (*Session
 	}
 	fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "multi", Script: script}
 	s := &Session{Adapter: fake, Handles: &adapter.HandleStore{Path: filepath.Join(dir, "handles.json")}, Canonical: filepath.Join(dir, "canonical.md")}
-	if _, err := InitSubject(s.Canonical, "review exact set", spec, "", "", false); err != nil {
+	if _, err := InitSubject(s.Canonical, "review exact set", spec, "", "", false, approvedPolicy(t)); err != nil {
 		t.Fatal(err)
 	}
 	return s, fake, first, second
@@ -260,7 +334,7 @@ func TestInitSubjectRejectsCanonicalRuntimeSelfConflict(t *testing.T) {
 			t.Fatal(err)
 		}
 		canonical := filepath.Join(root, "review.md")
-		_, err := InitSubject(canonical, "q", subject.Spec{Kind: subject.KindSubtree, Root: root}, "", "", false)
+		_, err := InitSubject(canonical, "q", subject.Spec{Kind: subject.KindSubtree, Root: root}, "", "", false, approvedPolicy(t))
 		if err == nil || !strings.Contains(err.Error(), "canonical self-conflict") {
 			t.Fatalf("self-conflicting subtree init error = %v", err)
 		}
@@ -281,7 +355,7 @@ func TestInitSubjectRejectsCanonicalRuntimeSelfConflict(t *testing.T) {
 			Kind: subject.KindSubtree, Root: root,
 			Exclude: []string{"review.md", "review.md.lock"},
 		}
-		_, err := InitSubject(canonical, "q", spec, "", "", false)
+		_, err := InitSubject(canonical, "q", spec, "", "", false, approvedPolicy(t))
 		if err == nil || !strings.Contains(err.Error(), ".dispatch-") {
 			t.Fatalf("dynamic journal namespace init error = %v", err)
 		}
@@ -294,7 +368,7 @@ func TestInitSubjectRejectsCanonicalRuntimeSelfConflict(t *testing.T) {
 			t.Fatal(err)
 		}
 		spec := subject.Spec{Kind: subject.KindFiles, Root: root, Members: []string{"review.md"}}
-		_, err := InitSubject(canonical, "q", spec, "", "", false)
+		_, err := InitSubject(canonical, "q", spec, "", "", false, approvedPolicy(t))
 		if err == nil || !strings.Contains(err.Error(), "canonical self-conflict") {
 			t.Fatalf("explicit canonical member init error = %v", err)
 		}
@@ -313,7 +387,7 @@ func TestInitSubjectRejectsCanonicalRuntimeSelfConflict(t *testing.T) {
 		}
 		canonical := filepath.Join(root, "review.md")
 		spec := subject.Spec{Kind: subject.KindSubtree, Root: root, Include: []string{"src"}}
-		st, err := InitSubject(canonical, "q", spec, "", "", false)
+		st, err := InitSubject(canonical, "q", spec, "", "", false, approvedPolicy(t))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -335,7 +409,7 @@ func TestInitSubjectRejectsCanonicalRuntimeSelfConflict(t *testing.T) {
 		}
 		canonical := filepath.Join(root, ".acrelay", "review.md")
 		spec := subject.Spec{Kind: subject.KindSubtree, Root: root, Exclude: []string{".acrelay"}}
-		st, err := InitSubject(canonical, "q", spec, "", "", false)
+		st, err := InitSubject(canonical, "q", spec, "", "", false, approvedPolicy(t))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -450,10 +524,10 @@ func TestE2ESessionContinuityAcrossRoundsAndObjectives(t *testing.T) {
 	}
 	// objective transition (DR-811 이관 fixture): same target needs prior
 	// pointer, and the reviewer session carries over.
-	if _, err := Init(s.Canonical, "follow-up?", targetPath(dir), "", "", true); err == nil {
+	if _, err := Init(s.Canonical, "follow-up?", targetPath(dir), "", "", true, approvedPolicy(t)); err == nil {
 		t.Fatal("same-target objective without prior pointer must fail closed")
 	}
-	stNew, err := Init(s.Canonical, "follow-up?", targetPath(dir), st2.ObjectiveID, "narrowed to store layer", true)
+	stNew, err := Init(s.Canonical, "follow-up?", targetPath(dir), st2.ObjectiveID, "narrowed to store layer", true, approvedPolicy(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -661,7 +735,7 @@ func TestR1TargetEditMarksStale(t *testing.T) {
 	fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "n1"}
 	s := &Session{Adapter: fake, Handles: &adapter.HandleStore{Path: filepath.Join(dir, "h.json")},
 		Canonical: filepath.Join(dir, "c.md")}
-	if _, err := Init(s.Canonical, "q", target, "", "", false); err != nil {
+	if _, err := Init(s.Canonical, "q", target, "", "", false, approvedPolicy(t)); err != nil {
 		t.Fatal(err)
 	}
 	// fake dispatch mutates the target mid-flight via script hook: simulate
@@ -749,7 +823,7 @@ func TestConcurrentFirstReviewBoundBinding(t *testing.T) {
 			if err := os.WriteFile(target, []byte("package target"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := Init(canonical, "q", target, "", "", false); err != nil {
+			if _, err := Init(canonical, "q", target, "", "", false, approvedPolicy(t)); err != nil {
 				t.Fatal(err)
 			}
 			ready := make(chan struct{}, 2)
@@ -1771,7 +1845,7 @@ func TestLoadRejectsTamperedSubjectManifest(t *testing.T) {
 	if err := os.WriteFile(target, []byte("target"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	st, err := Init(canonical, "q", target, "", "", false)
+	st, err := Init(canonical, "q", target, "", "", false, approvedPolicy(t))
 	if err != nil {
 		t.Fatal(err)
 	}
