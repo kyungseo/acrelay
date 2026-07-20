@@ -29,6 +29,9 @@ var isolatedEnvKeys = []string{
 	"GIT_CONFIG_NOSYSTEM",
 	"GIT_TERMINAL_PROMPT",
 	"PATH",
+	"TMPDIR",
+	"TMP",
+	"TEMP",
 	testRootEnv,
 	sentinelDirEnv,
 	sentinelLogEnv,
@@ -108,8 +111,9 @@ func configureIsolatedEnvironment(root string) (*isolatedEnvironment, func(), er
 	xdg := filepath.Join(root, "xdg")
 	claudeConfig := filepath.Join(root, "claude-config")
 	codexHome := filepath.Join(root, "codex-home")
+	tempRoot := filepath.Join(root, "tmp")
 	sentinelDir := filepath.Join(root, "sentinel-bin")
-	for _, dir := range []string{home, xdg, claudeConfig, codexHome, sentinelDir} {
+	for _, dir := range []string{home, xdg, claudeConfig, codexHome, tempRoot, sentinelDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, func() {}, err
 		}
@@ -140,6 +144,9 @@ func configureIsolatedEnvironment(root string) (*isolatedEnvironment, func(), er
 		"GIT_CONFIG_NOSYSTEM": "1",
 		"GIT_TERMINAL_PROMPT": "0",
 		"PATH":                sentinelDir + string(os.PathListSeparator) + originalPath,
+		"TMPDIR":              tempRoot,
+		"TMP":                 tempRoot,
+		"TEMP":                tempRoot,
 		testRootEnv:           root,
 		sentinelDirEnv:        sentinelDir,
 		sentinelLogEnv:        sentinelLog,

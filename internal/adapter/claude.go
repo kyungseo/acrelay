@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
@@ -80,7 +81,7 @@ func detectClaudeVersion(ctx context.Context) (string, string, error) {
 
 func probeClaudeCapabilities(ctx context.Context) (string, string) {
 	out, truncated, err := runBoundedProbe(ctx, 15*time.Second, "claude", "--help")
-	return assessHelpProbe(out, truncated, err, "--output-format", "--json-schema", "--resume")
+	return assessHelpProbe(out, truncated, err, "--output-format", "--json-schema", "--resume", "--safe-mode", "--add-dir", "--tools", "--permission-mode", "--system-prompt")
 }
 
 type preparedClaude struct {
@@ -89,9 +90,17 @@ type preparedClaude struct {
 	args       []string
 	timeouts   Timeouts
 	provenance Provenance
+	cleanupDir string
 }
 
-func (p *preparedClaude) Close() error { return nil }
+func (p *preparedClaude) Close() error {
+	if p.cleanupDir == "" {
+		return nil
+	}
+	err := os.RemoveAll(p.cleanupDir)
+	p.cleanupDir = ""
+	return err
+}
 
 // Prepare completes every fallible operation before the relay creates the
 // dispatch journal. Dispatch therefore starts the already-decided command;
@@ -108,32 +117,60 @@ func (a ClaudeAdapter) Prepare(ctx context.Context, req Request, handles *Handle
 	if err != nil {
 		return nil, err
 	}
-	if err := PreflightVersion(a.Capability(), observed); err != nil {
+	if err := VerifyRestrictionEvidence(a.Capability(), observed); err != nil {
 		return nil, err
 	}
 	probeState, probeDiagnostic := probeClaudeCapabilities(ctx)
-	args := []string{"-p", "--output-format", "json", "--json-schema", req.SchemaJSON}
-	if req.Model != "" {
-		args = append(args, "--model", req.Model)
-	}
-	if req.Effort != "" {
-		args = append(args, "--effort", req.Effort)
-	}
+	resumeHandle := ""
+	resumeWorkingDir := ""
 	if req.ResumeRef != "" {
-		vendor, h, err := handles.Lookup(req.ResumeRef)
+		vendor, h, profileID, workingDir, err := handles.Lookup(req.ResumeRef)
 		if err != nil {
 			return nil, err
 		}
 		if vendor != "claude" {
 			return nil, fmt.Errorf("session_ref %s belongs to %s, not claude: fail-closed", req.ResumeRef, vendor)
 		}
-		args = append(args, "--resume", h)
+		if profileID != req.TrustPolicy.ProfileID {
+			return nil, fmt.Errorf("session_ref %s trust profile mismatch (%s != %s): explicit session reset required, fail-closed",
+				req.ResumeRef, profileID, req.TrustPolicy.ProfileID)
+		}
+		resumeHandle = h
+		resumeWorkingDir = workingDir
+	}
+	preparedReq, cleanupDir, err := prepareExecutionRoot(req, resumeWorkingDir)
+	if err != nil {
+		return nil, err
+	}
+	req = preparedReq
+	args := []string{
+		"-p",
+		"--safe-mode",
+		"--add-dir", req.SubjectRoot,
+		"--no-chrome",
+		"--disable-slash-commands",
+		"--strict-mcp-config",
+		"--mcp-config", `{"mcpServers":{}}`,
+		"--tools", "Read,Glob,Grep",
+		"--permission-mode", "dontAsk",
+		"--system-prompt", ReviewerTrustSystemPrompt,
+		"--output-format", "json",
+		"--json-schema", req.SchemaJSON,
+	}
+	if req.Model != "" {
+		args = append(args, "--model", req.Model)
+	}
+	if req.Effort != "" {
+		args = append(args, "--effort", req.Effort)
+	}
+	if resumeHandle != "" {
+		args = append(args, "--resume", resumeHandle)
 	}
 	prov := baseProvenance(a.Capability(), req, observed, banner, "claude --version",
 		probeState, probeDiagnostic)
 	prov.ModelState = ObsUnverified
 	prov.ModelSource = "claude terminal envelope:modelUsage"
-	return &preparedClaude{req: req, handles: handles, args: args, timeouts: timeouts, provenance: prov}, nil
+	return &preparedClaude{req: req, handles: handles, args: args, timeouts: timeouts, provenance: prov, cleanupDir: cleanupDir}, nil
 }
 
 func (p *preparedClaude) Dispatch(ctx context.Context) (*Result, error) {
@@ -178,10 +215,13 @@ func (p *preparedClaude) Dispatch(ctx context.Context) (*Result, error) {
 	sessionRef := req.ResumeRef
 	newSession := false
 	if sessionRef == "" {
-		ref, err := handles.Register("claude", env.SessionID)
+		ref, err := handles.Register("claude", env.SessionID, req.TrustPolicy.ProfileID, req.WorkingDir)
 		if err != nil {
 			return res, err
 		}
+		// The vendor binds resume lookup to cwd. Transfer the fresh neutral
+		// directory to the private handle lifecycle after registration.
+		p.cleanupDir = ""
 		sessionRef, newSession = ref, true
 	}
 	resolved, modelState := "", ObservationState(ObsUnverified)

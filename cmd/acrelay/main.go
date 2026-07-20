@@ -88,6 +88,9 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 		prior := fs.String("prior", "", "prior objective ID (same-target follow-up)")
 		diff := fs.String("material-diff", "", "material difference vs prior objective")
 		seen := fs.Bool("seen-before", false, "target manifest was reviewed before")
+		approvalActor := fs.String("approval-actor", "", "declared owner identity for trust approvals")
+		ackEgress := fs.Bool("ack-vendor-egress", false, "approve vendor processing of content, absolute/resolved paths, and metadata")
+		inTargetWorkdir := fs.Bool("allow-in-target-workdir", false, "approve unsafe reviewer cwd inside subject (code-execution/read/egress risk)")
 		fs.Parse(args)
 		if *canonical == "" || *question == "" {
 			fail(fmt.Errorf("init requires -canonical and -question"))
@@ -96,7 +99,11 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 		if err != nil {
 			fail(err)
 		}
-		st, err := relay.InitSubject(*canonical, *question, spec, *prior, *diff, *seen)
+		policy, err := adapter.NewTrustPolicy(*approvalActor, *ackEgress, *inTargetWorkdir)
+		if err != nil {
+			fail(err)
+		}
+		st, err := relay.InitSubject(*canonical, *question, spec, *prior, *diff, *seen, policy)
 		if err != nil {
 			fail(err)
 		}
@@ -112,7 +119,7 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 		effort := fs.String("effort", "", "explicit effort (default: omitted, no flag sent)")
 		roundBound := fs.String("round-bound", "", "objective formal round bound 1..5 (first review default: 3)")
 		handles := fs.String("handles", defaultHandles(), "session handle store path")
-		workdir := fs.String("workdir", "", "reviewer working directory (default: current)")
+		workdir := fs.String("workdir", "", "reviewer cwd (default: private neutral temp root; in-target requires init approval)")
 		resetMode := fs.String("session-reset", "", "second-opinion|context-reset|resume-failure|unrelated")
 		resetReason := fs.String("session-reset-reason", "", "reason for the session reset")
 		fs.Parse(args)
@@ -232,6 +239,7 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 		model := fs.String("model", "", "explicit model")
 		effort := fs.String("effort", "", "explicit effort")
 		handles := fs.String("handles", defaultHandles(), "session handle store path")
+		workdir := fs.String("workdir", "", "reviewer cwd (default: objective trust profile mode)")
 		fs.Parse(args)
 		split := func(v string) []string {
 			if strings.TrimSpace(v) == "" {
@@ -261,7 +269,7 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 			}
 			cSess := &relay.Session{Adapter: a, Handles: &adapter.HandleStore{Path: *handles}, Canonical: *canonical}
 			st, done, err := cSess.ConfirmWithReviewer(context.Background(), *round, *expected, split(*submit), *delta,
-				adapter.Request{Model: *model, Effort: *effort})
+				adapter.Request{Model: *model, Effort: *effort, WorkingDir: *workdir})
 			if err != nil {
 				fail(err)
 			}
