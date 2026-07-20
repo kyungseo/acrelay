@@ -23,6 +23,7 @@ import (
 	"github.com/kyungseo/acrelay/internal/kernel"
 	"github.com/kyungseo/acrelay/internal/review"
 	"github.com/kyungseo/acrelay/internal/store"
+	"github.com/kyungseo/acrelay/internal/subject"
 )
 
 // ReviewSchema is the canonical ReviewResult JSON schema sent to every
@@ -33,10 +34,11 @@ const ReviewSchema = `{"type":"object","properties":{"verdict":{"type":"string",
 const (
 	KernelVersion  = "kernel v0.2"
 	ProfileVersion = "review-profile v0.1"
-	// store-md v0.4 adds the immutable objective-level formal round bound.
-	// The exact-version gate deliberately rejects v0.3 canonicals;
+	// store-md v0.5 replaces a single raw-byte target with a typed,
+	// domain-separated subject manifest. The exact-version gate deliberately
+	// rejects v0.4 canonicals;
 	// private-alpha callers re-init instead of mixing old/new invariants.
-	StoreVersion = "store-md v0.4"
+	StoreVersion = "store-md v0.5"
 )
 
 // State is the machine-readable snapshot appended after every mutation.
@@ -50,13 +52,14 @@ type State struct {
 	CollaborationID  string `json:"collaboration_id"`
 	ObjectiveID      string `json:"objective_id"`
 	Question         string `json:"question"`
-	// Target is an evidence pointer: location + raw-byte digest (R1-CX-F3).
-	TargetLocation  string `json:"target_location"`
-	TargetRevision  string `json:"target_revision"`
-	TargetResolved  string `json:"target_resolved,omitempty"` // symlink resolution fact
-	Governance      string `json:"governance"`
-	TerminalArbiter string `json:"terminal_arbiter,omitempty"`
-	TerminalReason  string `json:"terminal_reason,omitempty"`
+	// SubjectSpec is the immutable selector; Subject is the resolved manifest.
+	// TargetRevision remains the kernel-facing aggregate evidence pointer.
+	SubjectSpec     subject.Spec     `json:"subject_spec"`
+	Subject         subject.Snapshot `json:"subject"`
+	TargetRevision  string           `json:"target_revision"`
+	Governance      string           `json:"governance"`
+	TerminalArbiter string           `json:"terminal_arbiter,omitempty"`
+	TerminalReason  string           `json:"terminal_reason,omitempty"`
 	// Closure accountability (GB-CX-F2): who closed the objective, in what
 	// role, and the declared authority basis. v1 is declared metadata only —
 	// no authentication or RBAC is claimed.
@@ -182,20 +185,6 @@ func resolveFormalRoundBound(stored, requested int) (int, error) {
 	return stored, nil
 }
 
-// TargetSnapshot computes the evidence-pointer digest of the target's raw
-// bytes, recording symlink resolution as a fact.
-func TargetSnapshot(location string) (digest, resolved string, err error) {
-	resolved = location
-	if r, lerr := filepath.EvalSymlinks(location); lerr == nil {
-		resolved = r
-	}
-	b, err := os.ReadFile(resolved)
-	if err != nil {
-		return "", "", fmt.Errorf("target %s unreadable: %w", location, err)
-	}
-	return store.Digest(b), resolved, nil
-}
-
 const statePrefix = "acrelay_state_"
 
 // LoadState returns the highest-sequence state block. Parsing is
@@ -278,6 +267,12 @@ func validateState(st *State, labelSeq int) error {
 	}
 	if !hex64.MatchString(st.TargetRevision) {
 		return fmt.Errorf("target revision %q is not a sha256 hex digest: fail-closed", st.TargetRevision)
+	}
+	if err := subject.ValidatePersisted(st.SubjectSpec, st.Subject); err != nil {
+		return fmt.Errorf("subject manifest invalid: %w", err)
+	}
+	if st.TargetRevision != st.Subject.Aggregate {
+		return fmt.Errorf("target revision does not match subject aggregate: fail-closed")
 	}
 	seenConf := map[int]bool{}
 	for _, c := range st.Confirmations {
@@ -442,11 +437,85 @@ func replaySteps(final kernel.ExecutionState) []kernel.ExecutionState {
 	return []kernel.ExecutionState{final}
 }
 
-// Init creates the collaboration/objective and writes the first canonical
-// section. The target is an evidence pointer (location + raw digest).
+// Init keeps the single-file CLI/API shorthand while using the same typed,
+// domain-separated subject contract as every multi-file selector.
 func Init(canonical, question, targetLocation, priorObjective, materialDiff string, targetSeenBefore bool) (*State, error) {
+	spec, err := subject.SingleFile(targetLocation)
+	if err != nil {
+		return nil, err
+	}
+	return InitSubject(canonical, question, spec, priorObjective, materialDiff, targetSeenBefore)
+}
+
+func runtimeArtifactLogicalPath(canonical, resolvedRoot string) (string, bool, error) {
+	absCanonical, err := filepath.Abs(canonical)
+	if err != nil {
+		return "", false, fmt.Errorf("canonical absolute path: %w", err)
+	}
+	resolvedParent, err := filepath.EvalSymlinks(filepath.Dir(absCanonical))
+	if err != nil {
+		return "", false, fmt.Errorf("resolve canonical parent: %w", err)
+	}
+	candidate := filepath.Join(resolvedParent, filepath.Base(absCanonical))
+	rel, err := filepath.Rel(resolvedRoot, candidate)
+	if err != nil {
+		return "", false, fmt.Errorf("compare canonical and subject root: %w", err)
+	}
+	if rel == ".." || filepath.IsAbs(rel) || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false, nil
+	}
+	return filepath.ToSlash(rel), true, nil
+}
+
+func validateSubjectRuntimeIsolation(canonical string, spec subject.Spec, resolvedRoot string) error {
+	logical, inside, err := runtimeArtifactLogicalPath(canonical, resolvedRoot)
+	if err != nil {
+		return err
+	}
+	if !inside {
+		return nil
+	}
+	conflict := func(artifact string) error {
+		return fmt.Errorf("init refused: subject selector includes acrelay runtime artifact %s (canonical self-conflict); move -canonical outside the subject or, for a subtree selector, exclude its containing directory: fail-closed", artifact)
+	}
+	for _, artifact := range []string{logical, logical + ".lock"} {
+		selected, err := subject.SelectsLogical(spec, artifact)
+		if err != nil {
+			return err
+		}
+		if selected {
+			return conflict(artifact)
+		}
+	}
+	for _, prefix := range []string{logical + ".dispatch-", logical + ".quarantine-"} {
+		selected, err := subject.MaySelectNewFilenamePrefix(spec, prefix)
+		if err != nil {
+			return err
+		}
+		if selected {
+			return conflict(prefix + "<runtime-id>.json")
+		}
+	}
+	return nil
+}
+
+// InitSubject creates an objective bound to a normalized local subject set.
+func InitSubject(canonical, question string, input subject.Spec, priorObjective, materialDiff string, targetSeenBefore bool) (*State, error) {
+	spec, err := subject.Normalize(input, "")
+	if err != nil {
+		return nil, err
+	}
+	// Non-consuming preflight before withCanonicalLock creates canonical.lock:
+	// reject selectors that would review acrelay's own mutable artifacts.
+	resolvedRoot, err := subject.ResolveRoot(spec)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateSubjectRuntimeIsolation(canonical, spec, resolvedRoot); err != nil {
+		return nil, err
+	}
 	var out *State
-	err := withCanonicalLock(canonical, func() error {
+	err = withCanonicalLock(canonical, func() error {
 		if err := ensureNoPendingLocked(canonical); err != nil {
 			return err
 		}
@@ -461,8 +530,13 @@ func Init(canonical, question, targetLocation, priorObjective, materialDiff stri
 		if prev != nil && !kernel.IsGovTerminal(kernel.GovernanceState(prev.Governance)) {
 			return fmt.Errorf("canonical already tracks objective %s in state %s: close or terminate it first", prev.ObjectiveID, prev.Governance)
 		}
-		targetDigest, resolved, err := TargetSnapshot(targetLocation)
+		snapshot, err := subject.Resolve(spec)
 		if err != nil {
+			return err
+		}
+		// Re-check under the canonical lock against the authoritative resolved
+		// root. A root/parent symlink retarget after preflight fails closed.
+		if err := validateSubjectRuntimeIsolation(canonical, spec, snapshot.ResolvedRoot); err != nil {
 			return err
 		}
 		collabID, err := kernel.NewID("collab")
@@ -482,7 +556,7 @@ func Init(canonical, question, targetLocation, priorObjective, materialDiff stri
 			// resurrect the previous objective's state as "latest".
 			carrySeq = prev.Seq
 		}
-		o := kernel.NewObjective(objID, collabID, question, targetDigest)
+		o := kernel.NewObjective(objID, collabID, question, snapshot.Aggregate)
 		o.PriorObjective, o.MaterialDifference = priorObjective, materialDiff
 		if err := o.ValidateSameTargetLink(targetSeenBefore); err != nil {
 			return err
@@ -493,7 +567,7 @@ func Init(canonical, question, targetLocation, priorObjective, materialDiff stri
 			ProfileVersion:  ProfileVersion,
 			StoreVersion:    StoreVersion,
 			CollaborationID: collabID, ObjectiveID: objID, Question: question,
-			TargetLocation: targetLocation, TargetRevision: targetDigest, TargetResolved: resolved,
+			SubjectSpec: spec, Subject: snapshot, TargetRevision: snapshot.Aggregate,
 			Governance:     string(kernel.GovOpen),
 			PriorObjective: priorObjective, MaterialDiff: materialDiff,
 			SessionRef: carrySessionRef, Vendor: carryVendor,
@@ -502,8 +576,8 @@ func Init(canonical, question, targetLocation, priorObjective, materialDiff stri
 		if err != nil {
 			return err
 		}
-		section := fmt.Sprintf("\n## objective %s\n- collaboration: %s\n- question: %s\n- target: %s sha256=%s\n%s",
-			objID, collabID, question, targetLocation, targetDigest, block)
+		section := fmt.Sprintf("\n## objective %s\n- collaboration: %s\n- question: %s\n- subject: %s\n- aggregate: %s\n%s",
+			objID, collabID, question, subject.Summary(spec, snapshot), snapshot.Aggregate, block)
 		if _, err := store.AppendAtomic(canonical, section, rev); err != nil {
 			return err
 		}
@@ -511,6 +585,19 @@ func Init(canonical, question, targetLocation, priorObjective, materialDiff stri
 		return nil
 	})
 	return out, err
+}
+
+func subjectPrompt(st *State, prompt string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Review subject (exact aggregate %s, selector %s):\n- declared root: %s\n- resolved root: %s\n",
+		st.TargetRevision, st.SubjectSpec.Kind, st.SubjectSpec.Root, st.Subject.ResolvedRoot)
+	for _, member := range st.Subject.Members {
+		fmt.Fprintf(&b, "- %s sha256=%s kind=%s resolved=%s\n",
+			member.LogicalPath, member.Digest, member.Kind, member.ResolvedPath)
+	}
+	b.WriteString("\n")
+	b.WriteString(prompt)
+	return b.String()
 }
 
 // Review runs one formal round: snapshots → commit → dispatch → validate →
@@ -613,7 +700,7 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 		req.ResumeRef = "" // authorized new session; round counters are untouched
 		sessionChanged = true
 	}
-	req.Prompt = prompt
+	req.Prompt = subjectPrompt(st, prompt)
 	req.SchemaJSON = ReviewSchema
 
 	// 1. non-consuming preparation: ALL fallible pre-start work ends here.
@@ -622,17 +709,17 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 		return nil, "", fmt.Errorf("prepare failure (no round/attempt consumed): %w", err)
 	}
 	defer prepared.Close()
-	// 2. pre-dispatch snapshots: canonical AND target (R1-CX-F3)
+	// 2. pre-dispatch snapshots: canonical AND complete subject manifest.
 	snapshot, err := store.Revision(s.Canonical)
 	if err != nil {
 		return nil, "", err
 	}
-	targetNow, _, err := TargetSnapshot(st.TargetLocation)
+	targetNow, err := subject.Resolve(st.SubjectSpec)
 	if err != nil {
-		return nil, "", fmt.Errorf("pre-dispatch target snapshot: %w", err)
+		return nil, "", fmt.Errorf("pre-dispatch subject snapshot: %w", err)
 	}
-	if targetNow != st.TargetRevision {
-		return nil, "", fmt.Errorf("target %s changed since objective init (stale): open a follow-up objective with a prior pointer", st.TargetLocation)
+	if targetNow.Aggregate != st.TargetRevision {
+		return nil, "", fmt.Errorf("subject changed since objective init (stale): advance the objective or open a follow-up objective with a prior pointer")
 	}
 	// 3. Under the canonical flock, re-check the snapshot/lineage, bind an
 	// unbound objective to its immutable policy, then create the owner-only
@@ -670,8 +757,8 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 		if fresh == nil || fresh.ObjectiveID != st.ObjectiveID || fresh.Seq != st.Seq || fresh.TargetRevision != st.TargetRevision {
 			return fmt.Errorf("canonical lineage changed after preparation: fail-closed before dispatch")
 		}
-		if diskTarget, _, err := TargetSnapshot(st.TargetLocation); err != nil || diskTarget != st.TargetRevision {
-			return fmt.Errorf("target changed after preparation: fail-closed before dispatch")
+		if diskSubject, err := subject.Resolve(st.SubjectSpec); err != nil || diskSubject.Aggregate != st.TargetRevision {
+			return fmt.Errorf("subject changed after preparation: fail-closed before dispatch")
 		}
 		freshBound, err := resolveFormalRoundBound(fresh.FormalRoundBound, s.FormalRoundBound)
 		if err != nil {
@@ -791,9 +878,9 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 			}
 		}
 	}
-	// post-dispatch target re-check: change marks the result stale (DR-811)
+	// post-dispatch complete-subject re-check: change marks the result stale.
 	stale := false
-	if after, _, terr := TargetSnapshot(st.TargetLocation); terr != nil || after != st.TargetRevision {
+	if after, terr := subject.Resolve(st.SubjectSpec); terr != nil || after.Aggregate != st.TargetRevision {
 		stale = true
 	}
 
@@ -874,7 +961,7 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	return st, outcome, nil
 }
 
-// Reconcile applies or cleans up a DR-813 dispatch journal. store-md v0.4 is a
+// Reconcile applies or cleans up a DR-813 dispatch journal. store-md v0.5 is a
 // hard cutover: legacy .recovery-* sidecars are neither guarded nor loaded.
 func Reconcile(canonical, transactionPath string) (*State, error) {
 	return reconcileDispatchJournal(canonical, transactionPath)
@@ -1060,9 +1147,9 @@ func (s *Session) ConfirmWithReviewer(ctx context.Context, roundIndex int, expec
 			return nil, false, fmt.Errorf("confirmation ID %q is not a dispositioned finding: fail-closed (no dispatch)", id)
 		}
 	}
-	// precondition BEFORE any dispatch: exact target revision
-	targetNow, _, terr := TargetSnapshot(st.TargetLocation)
-	if terr != nil || expectedTargetRev != st.TargetRevision || targetNow != st.TargetRevision {
+	// precondition BEFORE any dispatch: exact complete-subject aggregate.
+	targetNow, terr := subject.Resolve(st.SubjectSpec)
+	if terr != nil || expectedTargetRev != st.TargetRevision || targetNow.Aggregate != st.TargetRevision {
 		// Record the non-consuming precondition failure under the lock against
 		// FRESH state (R0-F3): re-reading only the revision would append a
 		// block with the stale in-memory Seq and collide with a concurrent
@@ -1115,11 +1202,11 @@ func (s *Session) ConfirmWithReviewer(ctx context.Context, roundIndex int, expec
 		return nil, false, fmt.Errorf("confirmation must use the stored reviewer session (%s): vendor switch is not allowed inside a confirmation cycle", st.Vendor)
 	}
 	req.SchemaJSON = ConfirmSchema
-	req.Prompt = fmt.Sprintf(`Confirmation pass (bounded). You previously reviewed this target and requested changes.
+	req.Prompt = subjectPrompt(st, fmt.Sprintf(`Confirmation pass (bounded). You previously reviewed this subject and requested changes.
 Claimed delta: %s
 For EACH of these finding IDs, judge only whether the claimed fix is actually reflected: %s
 Output per the schema: results[] with id and status confirmed|not-confirmed. Do not issue a verdict, do not report new findings.`,
-		claimedDelta, strings.Join(ids, ", "))
+		claimedDelta, strings.Join(ids, ", ")))
 
 	prepared, err := s.Adapter.Prepare(ctx, req, s.Handles)
 	if err != nil {
@@ -1147,6 +1234,9 @@ Output per the schema: results[] with id and status confirmed|not-confirmed. Do 
 		if fresh == nil || fresh.ObjectiveID != st.ObjectiveID || fresh.Seq != st.Seq || fresh.TargetRevision != st.TargetRevision {
 			return fmt.Errorf("canonical lineage changed after confirmation preparation: fail-closed")
 		}
+		if diskSubject, err := subject.Resolve(fresh.SubjectSpec); err != nil || diskSubject.Aggregate != fresh.TargetRevision {
+			return fmt.Errorf("subject changed after confirmation preparation: fail-closed before dispatch")
+		}
 		journal, journalPath, _, err = createDispatchJournalLocked(
 			s.Canonical, st, "confirmation", roundIndex, cyc.ValidAttempts, s.Adapter.Vendor(), snapshot)
 		return err
@@ -1171,6 +1261,8 @@ Output per the schema: results[] with id and status confirmed|not-confirmed. Do 
 	if dispatchErr == nil && res.Structured == nil && !res.TimedOut {
 		dispatchErr = fmt.Errorf("adapter returned no structured output: FAILED, no automatic retry")
 	}
+	postSubject, postSubjectErr := subject.Resolve(st.SubjectSpec)
+	subjectStale := postSubjectErr != nil || postSubject.Aggregate != st.TargetRevision
 	label := fmt.Sprintf("conf-r%d-try%d", roundIndex, cyc.ValidAttempts+cyc.PreconditionFailures+1)
 	section := fmt.Sprintf("\n## confirmation attempt R%d\n- transaction_id: %s\n- submitted: %s\n- claimed_delta: %q\n",
 		roundIndex, journal.TransactionID, strings.Join(ids, ", "), claimedDelta)
@@ -1188,6 +1280,9 @@ Output per the schema: results[] with id and status confirmed|not-confirmed. Do 
 	if res.TimedOut && res.TimeoutKind == adapter.TimeoutHardCap {
 		txResult, journalPhase = "unknown", journalPhaseUnknown
 		section += "- result: UNKNOWN (hard-cap/external kill) — no automatic retry\n"
+	} else if subjectStale {
+		cyc.RecordPreconditionFailure()
+		section += "- result: invalid (subject changed during confirmation) — no valid attempt consumed\n"
 	} else if dispatchErr != nil || res.Structured == nil {
 		// Failed or schema-less output is captured durably, but does not consume a
 		// valid confirmation attempt. The execution marker below carries FAILED.
@@ -1281,7 +1376,7 @@ func Disposition(canonical, findingID string, d review.Disposition, decision *re
 			return fmt.Errorf("finding %s not found", findingID)
 		}
 		// Promotion to CLOSABLE happens here and only here (R1-CX-F1) — and
-		// only when a valid, non-stale round reviewed the target bytes on disk
+		// only when a valid, non-stale round reviewed the subject set on disk
 		// right now (Gate A-3: a post-result target edit blocks promotion).
 		if st.Governance == string(kernel.GovDecisionRequired) && review.ClosureCheck(st.Findings) == nil &&
 			closableAgainstDisk(st) == nil {
@@ -1338,20 +1433,20 @@ func latestReviewedCurrent(st *State) bool {
 }
 
 // closableAgainstDisk is the fail-closed closure precondition (Gate A-3):
-// some valid, non-stale round must have reviewed exactly the target bytes
-// that are on disk right now. A target edited after the reviewed round can
-// never close as if the reviewed revision were current — the driver either
-// advances the objective (and reviews again) or opens a follow-up.
+// some valid, non-stale round must have reviewed exactly the complete subject
+// set that is on disk right now. Checkpoint comparisons detect changes before,
+// under the canonical lock, and after dispatch; they do not claim an atomic
+// filesystem snapshot across every member read.
 func closableAgainstDisk(st *State) error {
-	diskNow, _, err := TargetSnapshot(st.TargetLocation)
+	diskNow, err := subject.Resolve(st.SubjectSpec)
 	if err != nil {
-		return fmt.Errorf("closure target snapshot: %w", err)
+		return fmt.Errorf("closure subject snapshot: %w", err)
 	}
-	if diskNow != st.TargetRevision {
-		return fmt.Errorf("target %s changed after the reviewed round (stale): advance the objective or open a follow-up", st.TargetLocation)
+	if diskNow.Aggregate != st.TargetRevision {
+		return fmt.Errorf("subject changed after the reviewed round (stale): advance the objective or open a follow-up")
 	}
 	for _, r := range st.Rounds {
-		if r.Outcome == string(review.OutcomeResultValid) && !r.Stale && r.Revision == diskNow {
+		if r.Outcome == string(review.OutcomeResultValid) && !r.Stale && r.Revision == diskNow.Aggregate {
 			return nil
 		}
 	}
@@ -1412,8 +1507,8 @@ func Close(canonical, actor, role, authority string) (*State, error) {
 	return out, err
 }
 
-// Advance authorizes the objective's expected target revision to move to
-// the bytes currently on disk — the explicit continuation of the
+// Advance authorizes the objective's expected subject revision to move to
+// the complete set currently on disk — the explicit continuation of the
 // review→revise→re-review loop inside one objective (Gate A-1). It is never
 // silent: it refuses when the target is unchanged, when any blocking finding
 // is undispositioned, or when the LATEST round is not a result-valid,
@@ -1449,25 +1544,25 @@ func Advance(canonical, note string) (*State, error) {
 		if err := review.ClosureCheck(st.Findings); err != nil {
 			return fmt.Errorf("advance refused: blocking findings are not fully dispositioned: %w", err)
 		}
-		diskNow, resolved, err := TargetSnapshot(st.TargetLocation)
+		diskNow, err := subject.Resolve(st.SubjectSpec)
 		if err != nil {
 			return err
 		}
-		if diskNow == st.TargetRevision {
-			return fmt.Errorf("advance refused: target unchanged — nothing to advance")
+		if diskNow.Aggregate == st.TargetRevision {
+			return fmt.Errorf("advance refused: subject unchanged — nothing to advance")
 		}
 		from := st.TargetRevision
 		afterRound := st.Rounds[len(st.Rounds)-1].Index
 		st.Advances = append(st.Advances, AdvanceState{
-			FromRevision: from, ToRevision: diskNow, AfterRound: afterRound, Note: note,
+			FromRevision: from, ToRevision: diskNow.Aggregate, AfterRound: afterRound, Note: note,
 		})
-		st.TargetRevision, st.TargetResolved = diskNow, resolved
+		st.TargetRevision, st.Subject = diskNow.Aggregate, diskNow
 		if st.Governance == string(kernel.GovClosable) {
 			st.Governance = string(kernel.GovDecisionRequired) // kernel-legal: CLOSABLE → DECISION_REQUIRED
 		}
 		out = st
 		return appendState(canonical, st, fmt.Sprintf(
-			"\n## advance after R%d\n- from: %s\n- to: %s\n- note: %s\n", afterRound, from, diskNow, note), rev)
+			"\n## advance after R%d\n- from: %s\n- to: %s\n- note: %s\n", afterRound, from, diskNow.Aggregate, note), rev)
 	})
 	return out, err
 }
@@ -1554,7 +1649,7 @@ func Status(canonical string) (string, error) {
 	} else {
 		fmt.Fprintf(&b, "rounds: %d/%d\n", len(st.Rounds), st.FormalRoundBound)
 	}
-	fmt.Fprintf(&b, "target: %s sha256=%s\n", st.TargetLocation, st.TargetRevision[:12])
+	fmt.Fprintf(&b, "subject: %s aggregate=%s\n", subject.Summary(st.SubjectSpec, st.Subject), st.TargetRevision[:12])
 	var open []string
 	for _, f := range st.Findings {
 		if f.Blocking && f.Disposition == "" {

@@ -17,6 +17,7 @@ import (
 	"github.com/kyungseo/acrelay/internal/kernel"
 	"github.com/kyungseo/acrelay/internal/review"
 	"github.com/kyungseo/acrelay/internal/store"
+	"github.com/kyungseo/acrelay/internal/subject"
 )
 
 func newSession(t *testing.T, script []adapter.FakeResult) (*Session, *adapter.FakeAdapter, string) {
@@ -39,6 +40,30 @@ func newSession(t *testing.T, script []adapter.FakeResult) (*Session, *adapter.F
 }
 
 func targetPath(dir string) string { return filepath.Join(dir, "target.go") }
+
+func validSubject(t *testing.T) (subject.Spec, subject.Snapshot) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "subject.txt")
+	if err := os.WriteFile(path, []byte("subject"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	spec, err := subject.SingleFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := subject.Resolve(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return spec, snapshot
+}
+
+func bindValidSubject(t *testing.T, st *State) *State {
+	t.Helper()
+	st.SubjectSpec, st.Subject = validSubject(t)
+	st.TargetRevision = st.Subject.Aggregate
+	return st
+}
 
 func approve() adapter.FakeResult {
 	return adapter.FakeResult{Structured: map[string]any{"verdict": "approve", "findings": []any{}}}
@@ -200,6 +225,204 @@ func TestE2EStaleFirstTargetSnapshotDoesNotBind(t *testing.T) {
 	if st.FormalRoundBound != 0 || len(st.Rounds) != 0 || fake.Prepared != 1 || fake.Dispatched != 0 {
 		t.Fatalf("stale first snapshot must remain unbound and undispatched: state=%+v prepared=%d dispatched=%d",
 			st, fake.Prepared, fake.Dispatched)
+	}
+}
+
+func newMultiSubjectSession(t *testing.T, script []adapter.FakeResult) (*Session, *adapter.FakeAdapter, string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	first := filepath.Join(dir, "first.txt")
+	second := filepath.Join(dir, "second.txt")
+	if err := os.WriteFile(first, []byte("first-v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("second-v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	spec, err := subject.Normalize(subject.Spec{
+		Kind: subject.KindFiles, Root: dir, Members: []string{"second.txt", "first.txt"},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "multi", Script: script}
+	s := &Session{Adapter: fake, Handles: &adapter.HandleStore{Path: filepath.Join(dir, "handles.json")}, Canonical: filepath.Join(dir, "canonical.md")}
+	if _, err := InitSubject(s.Canonical, "review exact set", spec, "", "", false); err != nil {
+		t.Fatal(err)
+	}
+	return s, fake, first, second
+}
+
+func TestInitSubjectRejectsCanonicalRuntimeSelfConflict(t *testing.T) {
+	t.Run("default subtree", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, "target.txt"), []byte("target"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		canonical := filepath.Join(root, "review.md")
+		_, err := InitSubject(canonical, "q", subject.Spec{Kind: subject.KindSubtree, Root: root}, "", "", false)
+		if err == nil || !strings.Contains(err.Error(), "canonical self-conflict") {
+			t.Fatalf("self-conflicting subtree init error = %v", err)
+		}
+		for _, artifact := range []string{canonical, canonical + ".lock"} {
+			if _, statErr := os.Lstat(artifact); !os.IsNotExist(statErr) {
+				t.Fatalf("guard must run before creating %s: %v", artifact, statErr)
+			}
+		}
+	})
+
+	t.Run("filename excludes do not cover dynamic journal", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, "target.txt"), []byte("target"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		canonical := filepath.Join(root, "review.md")
+		spec := subject.Spec{
+			Kind: subject.KindSubtree, Root: root,
+			Exclude: []string{"review.md", "review.md.lock"},
+		}
+		_, err := InitSubject(canonical, "q", spec, "", "", false)
+		if err == nil || !strings.Contains(err.Error(), ".dispatch-") {
+			t.Fatalf("dynamic journal namespace init error = %v", err)
+		}
+	})
+
+	t.Run("explicit canonical member", func(t *testing.T) {
+		root := t.TempDir()
+		canonical := filepath.Join(root, "review.md")
+		if err := os.WriteFile(canonical, []byte("preexisting target"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		spec := subject.Spec{Kind: subject.KindFiles, Root: root, Members: []string{"review.md"}}
+		_, err := InitSubject(canonical, "q", spec, "", "", false)
+		if err == nil || !strings.Contains(err.Error(), "canonical self-conflict") {
+			t.Fatalf("explicit canonical member init error = %v", err)
+		}
+		if _, statErr := os.Lstat(canonical + ".lock"); !os.IsNotExist(statErr) {
+			t.Fatalf("guard created a lock before rejecting: %v", statErr)
+		}
+	})
+
+	t.Run("narrow include is safe", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "src", "target.txt"), []byte("target"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		canonical := filepath.Join(root, "review.md")
+		spec := subject.Spec{Kind: subject.KindSubtree, Root: root, Include: []string{"src"}}
+		st, err := InitSubject(canonical, "q", spec, "", "", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(st.Subject.Members) != 1 || st.Subject.Members[0].LogicalPath != "src/target.txt" {
+			t.Fatalf("narrow include manifest = %+v", st.Subject.Members)
+		}
+	})
+
+	t.Run("directory exclude is safe", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(root, ".acrelay"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "src", "target.txt"), []byte("target"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		canonical := filepath.Join(root, ".acrelay", "review.md")
+		spec := subject.Spec{Kind: subject.KindSubtree, Root: root, Exclude: []string{".acrelay"}}
+		st, err := InitSubject(canonical, "q", spec, "", "", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(st.Subject.Members) != 1 || st.Subject.Members[0].LogicalPath != "src/target.txt" {
+			t.Fatalf("directory-excluded manifest = %+v", st.Subject.Members)
+		}
+	})
+}
+
+func TestMultiSubjectMemberChangeFailsPreDispatchAndMarksMidDispatchStale(t *testing.T) {
+	s, fake, _, second := newMultiSubjectSession(t, []adapter.FakeResult{approve()})
+	if err := os.WriteFile(second, []byte("changed-before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Review(context.Background(), "x", adapter.Request{}); err == nil || !strings.Contains(err.Error(), "stale") {
+		t.Fatalf("non-primary member change must fail pre-dispatch: %v", err)
+	}
+	if fake.Dispatched != 0 {
+		t.Fatal("stale set must not dispatch")
+	}
+	st, err := Advance(s.Canonical, "")
+	if err == nil || st != nil {
+		t.Fatal("unreviewed subject cannot advance")
+	}
+
+	// Start a fresh objective, then change the second member inside dispatch.
+	s, fake, _, second = newMultiSubjectSession(t, []adapter.FakeResult{approve()})
+	s.Adapter = &mutatingAdapter{FakeAdapter: fake, path: second}
+	st, outcome, err := s.Review(context.Background(), "x", adapter.Request{})
+	if err != nil || outcome != review.OutcomeResultValid {
+		t.Fatalf("review result = %s, %v", outcome, err)
+	}
+	if !st.Rounds[0].Stale || st.Governance != string(kernel.GovDecisionRequired) {
+		t.Fatalf("member change did not stale exact set: %+v", st.Rounds[0])
+	}
+}
+
+func TestConfirmationRejectsResultWhenAnySubjectMemberChanges(t *testing.T) {
+	confirm := adapter.FakeResult{Structured: map[string]any{"results": []any{
+		map[string]any{"id": "R0-F1", "status": "confirmed"},
+	}}}
+	s, fake, _, second := newMultiSubjectSession(t, []adapter.FakeResult{changesRequested("f1"), confirm})
+	st, _, err := s.Review(context.Background(), "r0", adapter.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenConfirmation(s.Canonical, 0, []string{"R0-F1"}); err != nil {
+		t.Fatal(err)
+	}
+	s.Adapter = &mutatingAdapter{FakeAdapter: fake, path: second}
+	st, done, err := s.ConfirmWithReviewer(context.Background(), 0, st.TargetRevision,
+		[]string{"R0-F1"}, "fixed", adapter.Request{})
+	if err != nil || done {
+		t.Fatalf("stale confirmation = done %v, err %v", done, err)
+	}
+	cycle := st.Confirmations[0]
+	if cycle.ValidAttempts != 0 || cycle.PreconditionFailures != 1 {
+		t.Fatalf("stale confirmation consumed a valid attempt: %+v", cycle)
+	}
+}
+
+func TestMultiSubjectAdvancePersistsNewManifestAndCloseRechecksIt(t *testing.T) {
+	s, _, _, second := newMultiSubjectSession(t, []adapter.FakeResult{approve(), approve()})
+	st, _, err := s.Review(context.Background(), "r0", adapter.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldRevision := st.TargetRevision
+	oldDigest := st.Subject.Members[1].Digest
+	if err := os.WriteFile(second, []byte("second-v2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err = Advance(s.Canonical, "second member changed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.TargetRevision == oldRevision || st.Subject.Aggregate != st.TargetRevision || st.Subject.Members[1].Digest == oldDigest {
+		t.Fatalf("advance did not persist the new manifest: %+v", st.Subject)
+	}
+	if _, _, err := s.Review(context.Background(), "r1", adapter.Request{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Close(s.Canonical, "owner", "owner", ""); err != nil {
+		t.Fatalf("close rejected the re-reviewed aggregate: %v", err)
 	}
 }
 
@@ -882,14 +1105,14 @@ func TestR1StartFailureAndModelMismatch(t *testing.T) {
 func TestCP2StateConfirmationInvariants(t *testing.T) {
 	base := func() *State {
 		txID := "tx-" + strings.Repeat("1", 32)
-		return &State{
+		return bindValidSubject(t, &State{
 			Seq: 1, KernelVersion: KernelVersion, ProfileVersion: ProfileVersion, StoreVersion: StoreVersion,
 			FormalRoundBound: kernel.DefaultFormalRoundBound,
-			CollaborationID:  "c", ObjectiveID: "o", TargetRevision: strings.Repeat("a", 64),
+			CollaborationID:  "c", ObjectiveID: "o",
 			Governance:   "OPEN",
 			Rounds:       []RoundState{{Index: 0, TransactionID: txID}},
 			Transactions: []TransactionState{{ID: txID, Kind: "review", RoundIndex: 0, Result: "captured"}},
-		}
+		})
 	}
 	cases := []struct {
 		name string
@@ -933,11 +1156,11 @@ func TestCP2StateConfirmationInvariants(t *testing.T) {
 
 func TestFormalRoundBoundStateInvariants(t *testing.T) {
 	base := func() *State {
-		return &State{
+		return bindValidSubject(t, &State{
 			Seq: 1, KernelVersion: KernelVersion, ProfileVersion: ProfileVersion, StoreVersion: StoreVersion,
-			CollaborationID: "c", ObjectiveID: "o", TargetRevision: strings.Repeat("a", 64),
+			CollaborationID: "c", ObjectiveID: "o",
 			Governance: string(kernel.GovOpen), SessionRef: "carried-session", Vendor: "fake",
-		}
+		})
 	}
 	if err := validateState(base(), 1); err != nil {
 		t.Fatalf("clean pre-review objective may remain unbound: %v", err)
@@ -1485,12 +1708,12 @@ func TestOwnerCloseNeedsNoDelegation(t *testing.T) {
 // GB-CP-F1: validateState enforces CLOSED accountability invariants.
 func TestValidateStateClosedAccountability(t *testing.T) {
 	base := func() *State {
-		return &State{
+		return bindValidSubject(t, &State{
 			Seq: 1, KernelVersion: KernelVersion, ProfileVersion: ProfileVersion, StoreVersion: StoreVersion,
-			TargetRevision: strings.Repeat("a", 64), Governance: string(kernel.GovClosed),
+			Governance: string(kernel.GovClosed),
 			CloseActor: "owner", CloseRole: "owner",
 			Rounds: []RoundState{}, Findings: []review.Finding{},
-		}
+		})
 	}
 	if err := validateState(base(), 1); err != nil {
 		t.Fatalf("valid owner close rejected: %v", err)
@@ -1523,13 +1746,12 @@ func TestValidateStateClosedAccountability(t *testing.T) {
 func TestLoadRejectsClosedWithoutAccountability(t *testing.T) {
 	dir := t.TempDir()
 	canonical := filepath.Join(dir, "c.md")
-	st := &State{
+	st := bindValidSubject(t, &State{
 		Seq: 0, KernelVersion: KernelVersion, ProfileVersion: ProfileVersion, StoreVersion: StoreVersion,
 		CollaborationID: "collab-x", ObjectiveID: "obj-x", Question: "q",
-		TargetLocation: "t", TargetRevision: strings.Repeat("a", 64),
 		Governance: string(kernel.GovClosed), // CLOSED but no accountability
 		Rounds:     []RoundState{}, Findings: []review.Finding{},
-	}
+	})
 	block, err := stateSection(st) // valid digest over the forged state
 	if err != nil {
 		t.Fatal(err)
@@ -1539,6 +1761,38 @@ func TestLoadRejectsClosedWithoutAccountability(t *testing.T) {
 	}
 	if _, err := LoadState(canonical); err == nil {
 		t.Fatal("a digest-valid CLOSED state without accountability must be rejected on load")
+	}
+}
+
+func TestLoadRejectsTamperedSubjectManifest(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+	canonical := filepath.Join(dir, "canonical.md")
+	if err := os.WriteFile(target, []byte("target"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Init(canonical, "q", target, "", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Subject.Members[0].Bytes++
+	forged, err := stateSection(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(canonical, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(forged); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadState(canonical); err == nil || !strings.Contains(err.Error(), "subject manifest invalid") {
+		t.Fatalf("tampered subject manifest must fail closed: %v", err)
 	}
 }
 

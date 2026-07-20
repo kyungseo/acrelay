@@ -17,6 +17,7 @@ import (
 	"github.com/kyungseo/acrelay/internal/kernel"
 	"github.com/kyungseo/acrelay/internal/relay"
 	"github.com/kyungseo/acrelay/internal/review"
+	"github.com/kyungseo/acrelay/internal/subject"
 )
 
 func defaultHandles() string {
@@ -59,6 +60,16 @@ func parseOptionalFormalRoundBound(raw string) (int, error) {
 	return bound, nil
 }
 
+func parseSubjectInput(target, targetSpec string) (subject.Spec, error) {
+	if (target == "") == (targetSpec == "") {
+		return subject.Spec{}, fmt.Errorf("init requires exactly one of -target or -target-spec")
+	}
+	if target != "" {
+		return subject.SingleFile(target)
+	}
+	return subject.LoadSpec(targetSpec)
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, `usage: acrelay <init|review|confirm|disposition|advance|close|terminate|reconcile|abandon-transaction|status> [flags]
@@ -72,15 +83,20 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 		fs := flag.NewFlagSet("init", flag.ExitOnError)
 		canonical := fs.String("canonical", "", "canonical record path (private storage)")
 		question := fs.String("question", "", "review objective question")
-		target := fs.String("target", "", "target file (evidence pointer: location + raw digest)")
+		target := fs.String("target", "", "single-file subject shorthand")
+		targetSpec := fs.String("target-spec", "", "JSON subject spec (file|files|subtree; mutually exclusive with -target)")
 		prior := fs.String("prior", "", "prior objective ID (same-target follow-up)")
 		diff := fs.String("material-diff", "", "material difference vs prior objective")
 		seen := fs.Bool("seen-before", false, "target manifest was reviewed before")
 		fs.Parse(args)
-		if *canonical == "" || *question == "" || *target == "" {
-			fail(fmt.Errorf("init requires -canonical, -question, -target"))
+		if *canonical == "" || *question == "" {
+			fail(fmt.Errorf("init requires -canonical and -question"))
 		}
-		st, err := relay.Init(*canonical, *question, *target, *prior, *diff, *seen)
+		spec, err := parseSubjectInput(*target, *targetSpec)
+		if err != nil {
+			fail(err)
+		}
+		st, err := relay.InitSubject(*canonical, *question, spec, *prior, *diff, *seen)
 		if err != nil {
 			fail(err)
 		}

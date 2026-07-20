@@ -326,11 +326,11 @@ func TestDR813ConfirmationHardCapPersistsUnknownTransaction(t *testing.T) {
 	}
 }
 
-func TestStoreV03FailsExactVersionGate(t *testing.T) {
+func TestStoreV04FailsExactVersionGate(t *testing.T) {
 	dir := t.TempDir()
 	canonical := filepath.Join(dir, "legacy.md")
 	st := &State{
-		KernelVersion: KernelVersion, ProfileVersion: ProfileVersion, StoreVersion: "store-md v0.3",
+		KernelVersion: KernelVersion, ProfileVersion: ProfileVersion, StoreVersion: "store-md v0.4",
 		CollaborationID: "c", ObjectiveID: "o", TargetRevision: strings.Repeat("a", 64),
 		Governance: string(kernel.GovOpen),
 	}
@@ -341,19 +341,19 @@ func TestStoreV03FailsExactVersionGate(t *testing.T) {
 	if err := os.WriteFile(canonical, []byte(block), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadState(canonical); err == nil || !strings.Contains(err.Error(), "store-md v0.4") {
-		t.Fatalf("v0.3 canonical must fail the exact-version gate: %v", err)
+	if _, err := LoadState(canonical); err == nil || !strings.Contains(err.Error(), "store-md v0.5") {
+		t.Fatalf("v0.4 canonical must fail the exact-version gate: %v", err)
 	}
 }
 
-func TestDR813LegacyRecoverySidecarDoesNotGuardV04Canonical(t *testing.T) {
+func TestDR813LegacyRecoverySidecarDoesNotGuardV05Canonical(t *testing.T) {
 	s, _, _ := newSession(t, []adapter.FakeResult{approve()})
 	legacy := s.Canonical + ".recovery-stale"
 	if err := os.WriteFile(legacy, []byte("legacy-v0.2-sidecar"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.Review(context.Background(), "v0.4 review", adapter.Request{}); err != nil {
-		t.Fatalf("legacy sidecar must not guard a v0.4 canonical: %v", err)
+	if _, _, err := s.Review(context.Background(), "v0.5 review", adapter.Request{}); err != nil {
+		t.Fatalf("legacy sidecar must not guard a v0.5 canonical: %v", err)
 	}
 	if _, err := Reconcile(s.Canonical, legacy); err == nil || !strings.Contains(err.Error(), "not bound") {
 		t.Fatalf("legacy sidecar must not be loaded as a v0.4 journal: %v", err)

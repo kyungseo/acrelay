@@ -15,10 +15,12 @@ Toolstead `DR-811` (Agent Collab v1 Feasibility Contract And Session Continuity)
   dispatch outcome classification, fail-closed closure check
 - `internal/store` — canonical Markdown artifact: pre-dispatch revision
   snapshot, content-derived fence / base64 raw blocks, owner-only atomic replace
+- `internal/subject` — normalized local `file` / explicit `files` / declared
+  `subtree` selectors, resolved member manifests, domain-separated aggregate
 - `internal/relay` — prepared one-shot review flow (`Prepare` → snapshots →
   objective-bound append → private dispatch journal → in-memory attempt
   admission → child start/capture → transaction-tagged canonical append), state
-  as sequence-numbered blocks inside the canonical document; `store-md v0.4` /
+  as sequence-numbered blocks inside the canonical document; `store-md v0.5` /
   `dispatch-journal v0.1`
 - `cmd/acrelay` — CLI: `init` / `review` / `confirm` / `disposition` /
   `advance` / `close` / `terminate` / `reconcile` / `abandon-transaction` /
@@ -43,8 +45,78 @@ available. A crash with ambiguous execution reconciles to `UNKNOWN` and never
 retries automatically. Corrupt journals are recorded in the canonical before
 being moved to owner-only quarantine.
 
-`store-md v0.4` is an exact-version cutover. Existing v0.3 canonicals are not
+`store-md v0.5` is an exact-version cutover. Existing v0.4 canonicals are not
 silently migrated; re-init or a linked follow-up objective is required.
+
+## Review Subject
+
+The existing single-file form remains the shortest path:
+
+```
+acrelay init -canonical review.md -question "Is this ready?" -target ./artifact.md
+```
+
+For `-target`, the declared root is the target file's parent directory. A
+symlink that resolves outside that parent fails closed.
+
+For an explicit file set or a local subtree, pass a JSON descriptor with
+`-target-spec` (mutually exclusive with `-target`). Relative roots are resolved
+against the descriptor directory:
+
+```json
+{
+  "version": "subject-spec v0.1",
+  "kind": "files",
+  "root": ".",
+  "members": ["README.md", "internal/relay/relay.go"]
+}
+```
+
+```json
+{
+  "version": "subject-spec v0.1",
+  "kind": "subtree",
+  "root": ".",
+  "include": ["cmd", "internal"],
+  "exclude": ["internal/testdata/generated"]
+}
+```
+
+`file` requires one `members` entry; `files` requires one or more explicit
+entries; `subtree` derives membership at every authoritative checkpoint.
+Logical paths are normalized root-relative UTF-8 paths and duplicates fail
+closed. `include` and `exclude` use path-prefix semantics, with `exclude`
+taking precedence. There are no hidden default exclusions: `.git`, generated
+files, and other names are included unless the descriptor excludes them
+explicitly.
+
+The canonical record and its `.lock` must not be selected as subject members.
+A subtree selector must also not admit acrelay's dynamically created
+`.dispatch-*` and `.quarantine-*` namespaces. `init` rejects such a
+self-conflicting selector before creating the canonical. Keep `-canonical`
+outside the subject, use a narrow subtree `include`, or exclude the canonical's
+containing directory. Excluding only the canonical filename is insufficient
+for a broad subtree because dispatch and quarantine filenames are generated
+dynamically.
+
+Every member must resolve to a regular file inside the declared resolved root.
+Broken links, root escapes, unsupported member types, unreadable members, and
+zero-member selections fail closed. Symlink identity and resolution facts are
+part of the aggregate, so retargeting a link to equal bytes is still a change.
+
+The revision is SHA-256 over a canonical byte stream beginning with
+`acrelay-subject-v1\0`, followed by length-prefixed selector metadata,
+resolved-root identity, member count, and sorted typed member records. A
+single-file subject uses this same aggregate; it intentionally does not equal
+the file's raw content digest.
+
+Review, confirmation, advance, and close re-resolve the full selector and
+re-hash every member at their authoritative checkpoints. This detects changes
+across those checkpoints but is not an atomic filesystem snapshot claim. A
+mutation that is fully restored between checkpoints may not be detected. Each
+checkpoint performs an O(N) full enumeration and re-hash; v1 has no subject
+cache, index, or filesystem watcher. Git staged patches, commits, ranges,
+branches, and other change-set selectors are not supported in this version.
 
 ## Formal Round Bound
 
