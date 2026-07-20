@@ -11,8 +11,9 @@ Toolstead `DR-811` (Agent Collab v1 Feasibility Contract And Session Continuity)
 - `internal/kernel` — collaboration/objective types, execution·governance dual
   state machines, objective-level formal round bound, attempt bound,
   confirmation cycle
-- `internal/review` — review profile: canonical ReviewResult validation,
-  dispatch outcome classification, fail-closed closure check
+- `internal/review` — `review-profile v0.2`: examined evidence, structured
+  findings, driver dispositions, review-time approval requests, and the
+  fail-closed closure check
 - `internal/store` — canonical Markdown artifact: pre-dispatch revision
   snapshot, content-derived fence / base64 raw blocks, owner-only atomic replace
 - `internal/subject` — normalized local `file` / explicit `files` / declared
@@ -20,11 +21,11 @@ Toolstead `DR-811` (Agent Collab v1 Feasibility Contract And Session Continuity)
 - `internal/relay` — prepared one-shot review flow (`Prepare` → snapshots →
   objective-bound append → private dispatch journal → in-memory attempt
   admission → child start/capture → transaction-tagged canonical append), state
-  as sequence-numbered blocks inside the canonical document; `store-md v0.6` /
+  as sequence-numbered blocks inside the canonical document; `store-md v0.7` /
   `dispatch-journal v0.1`
 - `cmd/acrelay` — CLI: `init` / `review` / `confirm` / `disposition` /
-  `advance` / `close` / `terminate` / `reconcile` / `abandon-transaction` /
-  `status`
+  `request-approval` / `respond-approval` / `withdraw-approval` / `advance` /
+  `close` / `terminate` / `reconcile` / `abandon-transaction` / `status`
 
 ## Canonical Record Is Private
 
@@ -49,9 +50,9 @@ available. A crash with ambiguous execution reconciles to `UNKNOWN` and never
 retries automatically. Corrupt journals are recorded in the canonical before
 being moved to owner-only quarantine.
 
-`store-md v0.6` and handle store v2 are exact-version cutovers. Existing v0.5
+`store-md v0.7` and handle store v2 are exact-version cutovers. Existing v0.6
 canonicals and handle store v1 files are not silently migrated. Finish an old
-objective with its prior binary or initialize a new v0.6 canonical and new
+objective with its prior binary or initialize a new v0.7 canonical and new
 reviewer session.
 
 ## Review Subject
@@ -135,9 +136,9 @@ Every objective stores an immutable trust policy before any vendor dispatch.
 `-ack-vendor-egress` and a declared `-approval-actor` are mandatory because
 the selected vendor/model may process subject content, absolute and resolved
 member paths, and metadata. The acknowledgment is a dispatch gate, not data
-isolation. Additional owner approvals are typed records, so later approval
-gates can use the same durable flow without being conflated with Close
-authority.
+isolation. Immutable trust approvals remain separate from mutable review-time
+approval requests. Both preserve declared accountability, but neither is
+authentication, RBAC, or Close authority.
 
 The default reviewer cwd is a fresh owner-only temporary directory outside the
 subject. Acrelay removes it after the prepared invocation closes. Claude runs
@@ -172,6 +173,94 @@ content into the trusted request. This is a documented convention, not runtime
 enforcement. Working directory, read-only, safe-mode, and tool names must not
 be interpreted as network isolation, target-only reads, DLP, or protection
 from a fully privileged host administrator.
+
+## Review Evidence Contract
+
+Every result-valid review, including `approve` with no findings, must return at
+least one `examined` anchor. A text anchor contains a logical member, a bounded
+1-based inclusive line range (maximum 40 lines), a quoted excerpt (maximum
+4096 bytes), and a non-empty claim. Acrelay compares the excerpt with captured
+pre-dispatch member bytes and binds the normalized anchor to that member digest
+and the objective aggregate. Digest or aggregate echo alone is not evidence.
+Non-UTF-8 or NUL-bearing members use an explicit `opaque` anchor and remain
+`reviewer-declared`; a text member cannot be downgraded to opaque. A zero-byte
+member uses an explicit `empty-member` anchor and also remains
+`reviewer-declared`, because there are no content bytes to match.
+
+Exact byte comparison runs first. When the captured member contains CRLF and
+exact comparison fails, acrelay may compare the same bounded excerpt after
+canonical CRLF-to-LF normalization. A normalized match records both the
+distinct `content-match-normalized` assurance and the `crlf-to-lf`
+normalization fact; it never becomes exact `content-match`.
+
+These assurance labels describe different facts:
+
+| State | Boundary |
+| --- | --- |
+| `dispatch-valid` | The child/session/envelope and structured result were valid. |
+| `content-match` | A bounded returned excerpt exactly matched authoritative captured bytes. It does not prove understanding. |
+| `content-match-normalized` | The exact match failed, but the bounded excerpt matched after declared CRLF-to-LF normalization. It does not prove understanding. |
+| `reviewer-declared` | The reviewer self-reported a claim, severity, opaque examination, or empty-member examination. |
+| `synthetic-sampled` | A fresh-session synthetic fixture sample observed behavior. It is not a user-target correctness guarantee. |
+
+Reviewer findings contain `summary`, `reviewer_severity`, evidence anchor IDs,
+and `recommendation`. The relay mints finding IDs and owns blocking policy:
+`critical`/`high` are blocking; `medium`/`low` are advisory. An `approve` result
+with a runtime-blocking finding is preserved as a contradiction and keeps
+governance `DECISION_REQUIRED`; it is not a transport failure. This is a
+visibility and disposition gate, not a permanent terminal block: valid driver
+dispositions and any required owner response can still satisfy the later
+Close check.
+
+Every driver disposition requires `-rationale`. `accept` and `revise` also
+require `-follow-up` (use the explicit value `no-action` when appropriate):
+
+```sh
+acrelay disposition \
+  -canonical review.md \
+  -finding R0-F1 \
+  -decision revise \
+  -rationale "The evidence is valid." \
+  -follow-up "Apply the fix and advance the target."
+```
+
+Review-time approval request types are open-ended namespaced strings rather
+than a fixed category enum. A request JSON file contains `type`, exact `scope`,
+`reason`, and one or more `{id, description}` options:
+
+```sh
+acrelay request-approval \
+  -canonical review.md \
+  -request-file approval-request.json \
+  -role driver \
+  -requester codex
+
+acrelay respond-approval \
+  -canonical review.md \
+  -request AR-1 \
+  -actor owner \
+  -verbatim-file owner-response.txt \
+  -responded-at 2026-07-20 \
+  -decision accept-current \
+  -scope "R0-F1 on the current target only" \
+  -durable-anchor "canonical#owner-response-AR-1" \
+  -unambiguous
+```
+
+The verbatim response is appended even when incomplete or ambiguous. A request
+resolves only when actor, original text, date, durable anchor, explicit
+unambiguous declaration, option ID, and exact decision scope are present and
+match. Otherwise it stays open. Open requests block clean `Close` only:
+`terminate`, `advance`, and confirmation remain available. `advance` carries
+them forward and marks open requests stale; stale requests do not auto-resolve.
+`status` displays open/stale requests and evidence assurance counts.
+
+Confirmation output also requires non-empty examined evidence for every
+confirmed/not-confirmed finding judgment. Quoted excerpts increase reviewer
+output, vendor egress, and private canonical size; they remain within the
+existing approved content-egress scope. Synthetic defect seeds exist only in
+test fixtures, and every synthetic sample uses a fresh session. Acrelay never
+inserts seeds into a user target.
 
 ## Formal Round Bound
 

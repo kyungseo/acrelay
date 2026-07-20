@@ -5,9 +5,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -70,9 +73,25 @@ func parseSubjectInput(target, targetSpec string) (subject.Spec, error) {
 	return subject.LoadSpec(targetSpec)
 }
 
+func decodeJSONFile(path string, dst any) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(b))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("trailing JSON value in %s", path)
+	}
+	return nil
+}
+
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, `usage: acrelay <init|review|confirm|disposition|advance|close|terminate|reconcile|abandon-transaction|status> [flags]
+		fmt.Fprintln(os.Stderr, `usage: acrelay <init|review|confirm|disposition|request-approval|respond-approval|withdraw-approval|advance|close|terminate|reconcile|abandon-transaction|status> [flags]
 The canonical record is private local storage: keep it outside shared/synced/
 published paths. Sharing requires a redacted export (not provided in v1).`)
 		os.Exit(2)
@@ -176,18 +195,87 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 		canonical := fs.String("canonical", "", "canonical record path")
 		finding := fs.String("finding", "", "finding ID")
 		decision := fs.String("decision", "", "accept|revise|defend|needs-user")
-		arbiter := fs.String("arbiter", "", "arbiter identity (needs-user)")
-		reason := fs.String("reason", "", "arbiter reason (needs-user)")
+		rationale := fs.String("rationale", "", "driver rationale (required for every disposition)")
+		followUp := fs.String("follow-up", "", "follow-up action; accept/revise require a value or no-action")
+		requestID := fs.String("request-id", "", "approval request ID (needs-user only)")
 		fs.Parse(args)
-		var ad *review.ArbiterDecision
-		if *arbiter != "" || *reason != "" {
-			ad = &review.ArbiterDecision{Arbiter: *arbiter, Reason: *reason}
-		}
-		st, err := relay.Disposition(*canonical, *finding, review.Disposition(*decision), ad)
+		st, err := relay.Disposition(*canonical, *finding, review.DispositionInput{
+			Decision: review.Disposition(*decision), Rationale: *rationale,
+			FollowUp: *followUp, ApprovalRequestID: *requestID,
+		})
 		if err != nil {
 			fail(err)
 		}
 		fmt.Printf("finding %s -> %s (governance=%s)\n", *finding, *decision, st.Governance)
+
+	case "request-approval":
+		fs := flag.NewFlagSet("request-approval", flag.ExitOnError)
+		canonical := fs.String("canonical", "", "canonical record path")
+		requestFile := fs.String("request-file", "", "JSON typed request with type/scope/reason/options")
+		role := fs.String("role", "driver", "requester role: driver|reviewer")
+		requester := fs.String("requester", "", "declared requester identity")
+		fs.Parse(args)
+		if *canonical == "" || *requestFile == "" || *requester == "" {
+			fail(fmt.Errorf("request-approval requires -canonical, -request-file, and -requester"))
+		}
+		var input review.ApprovalRequestInput
+		if err := decodeJSONFile(*requestFile, &input); err != nil {
+			fail(err)
+		}
+		st, request, err := relay.RequestApproval(*canonical, input, *role, *requester)
+		if err != nil {
+			fail(err)
+		}
+		fmt.Printf("approval request %s OPEN (governance=%s)\n", request.ID, st.Governance)
+
+	case "respond-approval":
+		fs := flag.NewFlagSet("respond-approval", flag.ExitOnError)
+		canonical := fs.String("canonical", "", "canonical record path")
+		requestID := fs.String("request", "", "stable approval request ID")
+		actor := fs.String("actor", "", "declared owner/arbiter identity")
+		verbatim := fs.String("verbatim", "", "exact owner response text")
+		verbatimFile := fs.String("verbatim-file", "", "read exact owner response text from file")
+		respondedAt := fs.String("responded-at", "", "owner response date/time")
+		decision := fs.String("decision", "", "exact request option ID")
+		scope := fs.String("scope", "", "exact decision scope")
+		anchor := fs.String("durable-anchor", "", "durable source/relay anchor for the owner response")
+		unambiguous := fs.Bool("unambiguous", false, "declare that verbatim, option, and scope are explicit and unconditional")
+		fs.Parse(args)
+		raw := *verbatim
+		if *verbatimFile != "" {
+			if raw != "" {
+				fail(fmt.Errorf("use exactly one of -verbatim or -verbatim-file"))
+			}
+			b, err := os.ReadFile(*verbatimFile)
+			if err != nil {
+				fail(err)
+			}
+			raw = string(b)
+		}
+		if *canonical == "" || *requestID == "" {
+			fail(fmt.Errorf("respond-approval requires -canonical and -request"))
+		}
+		st, resolved, err := relay.RespondApproval(*canonical, *requestID, review.OwnerResponse{
+			Actor: *actor, Verbatim: raw, RespondedAt: *respondedAt, Decision: *decision,
+			DecisionScope: *scope, DurableAnchor: *anchor, Unambiguous: *unambiguous,
+		})
+		if err != nil {
+			fail(err)
+		}
+		fmt.Printf("approval request %s resolved=%v (governance=%s)\n", *requestID, resolved, st.Governance)
+
+	case "withdraw-approval":
+		fs := flag.NewFlagSet("withdraw-approval", flag.ExitOnError)
+		canonical := fs.String("canonical", "", "canonical record path")
+		requestID := fs.String("request", "", "stable approval request ID")
+		actor := fs.String("actor", "", "declared owner/arbiter identity")
+		reason := fs.String("reason", "", "why this request is obsolete")
+		fs.Parse(args)
+		st, err := relay.WithdrawApproval(*canonical, *requestID, *actor, *reason)
+		if err != nil {
+			fail(err)
+		}
+		fmt.Printf("approval request %s WITHDRAWN (governance=%s)\n", *requestID, st.Governance)
 
 	case "close":
 		fs := flag.NewFlagSet("close", flag.ExitOnError)

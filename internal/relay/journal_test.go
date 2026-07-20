@@ -22,8 +22,10 @@ func TestDR813CrashHelper(t *testing.T) {
 	}
 	canonical := os.Getenv("ACRELAY_CRASH_CANONICAL")
 	target := os.Getenv("ACRELAY_CRASH_TARGET")
+	script := []adapter.FakeResult{approve()}
+	retargetScriptEvidence(script, filepath.Base(target), "target")
 	s := &Session{
-		Adapter:   &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "native", Script: []adapter.FakeResult{approve()}},
+		Adapter:   &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "native", Script: script},
 		Handles:   &adapter.HandleStore{Path: filepath.Join(filepath.Dir(canonical), "handles-"+mode+".json")},
 		Canonical: canonical,
 	}
@@ -243,7 +245,7 @@ func TestDR813PendingJournalGuardsEveryMutator(t *testing.T) {
 	assertBlocked("confirmation-open", err)
 	_, _, err = s.ConfirmWithReviewer(context.Background(), 0, strings.Repeat("a", 64), []string{"R0-F1"}, "delta", adapter.Request{})
 	assertBlocked("confirmation-submit", err)
-	_, err = Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil)
+	_, err = Disposition(s.Canonical, "R0-F1", acceptDisposition())
 	assertBlocked("disposition", err)
 	_, err = Advance(s.Canonical, "delta")
 	assertBlocked("advance", err)
@@ -306,7 +308,7 @@ func TestDR813ConfirmationHardCapPersistsUnknownTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
+	if _, err := Disposition(s.Canonical, "R0-F1", acceptDisposition()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := OpenConfirmation(s.Canonical, 0, []string{"R0-F1"}); err != nil {
@@ -326,11 +328,11 @@ func TestDR813ConfirmationHardCapPersistsUnknownTransaction(t *testing.T) {
 	}
 }
 
-func TestStoreV05FailsExactVersionGate(t *testing.T) {
+func TestStoreV06FailsExactVersionGate(t *testing.T) {
 	dir := t.TempDir()
 	canonical := filepath.Join(dir, "legacy.md")
 	st := &State{
-		KernelVersion: KernelVersion, ProfileVersion: ProfileVersion, StoreVersion: "store-md v0.5",
+		KernelVersion: KernelVersion, ProfileVersion: ProfileVersion, StoreVersion: "store-md v0.6",
 		CollaborationID: "c", ObjectiveID: "o", TargetRevision: strings.Repeat("a", 64),
 		Governance: string(kernel.GovOpen),
 	}
@@ -341,12 +343,12 @@ func TestStoreV05FailsExactVersionGate(t *testing.T) {
 	if err := os.WriteFile(canonical, []byte(block), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadState(canonical); err == nil || !strings.Contains(err.Error(), "store-md v0.6") {
-		t.Fatalf("v0.5 canonical must fail the exact-version gate: %v", err)
+	if _, err := LoadState(canonical); err == nil || !strings.Contains(err.Error(), StoreVersion) {
+		t.Fatalf("v0.6 canonical must fail the exact-version gate: %v", err)
 	}
 }
 
-func TestDR813LegacyRecoverySidecarDoesNotGuardV06Canonical(t *testing.T) {
+func TestDR813LegacyRecoverySidecarDoesNotGuardV07Canonical(t *testing.T) {
 	s, _, _ := newSession(t, []adapter.FakeResult{approve()})
 	legacy := s.Canonical + ".recovery-stale"
 	if err := os.WriteFile(legacy, []byte("legacy-v0.2-sidecar"), 0o600); err != nil {
