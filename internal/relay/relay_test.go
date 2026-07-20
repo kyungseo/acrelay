@@ -36,6 +36,7 @@ func newSession(t *testing.T, script []adapter.FakeResult) (*Session, *adapter.F
 	if err := os.WriteFile(target, []byte("func greet() string { return \"hello\" }"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	retargetConfirmationEvidence(script, "target.go", `func greet() string { return "hello" }`)
 	fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "native-1", Script: script}
 	s := &Session{
 		Adapter:   fake,
@@ -75,12 +76,350 @@ func bindValidSubject(t *testing.T, st *State) *State {
 	return st
 }
 
+func evidence(member, excerpt string) map[string]any {
+	return map[string]any{
+		"id": "E1", "member": member,
+		"location": map[string]any{"kind": "text-lines", "start": 1, "end": 1},
+		"excerpt":  excerpt, "claim": "examined exact subject bytes",
+	}
+}
+
 func approve() adapter.FakeResult {
-	return adapter.FakeResult{Structured: map[string]any{"verdict": "approve", "findings": []any{}}}
+	return adapter.FakeResult{Structured: map[string]any{
+		"verdict": "approve", "examined": []any{evidence("target.go", `func greet() string { return "hello" }`)},
+		"findings": []any{}, "approval_requests": []any{},
+	}}
 }
 
 func changesRequested(findings ...any) adapter.FakeResult {
-	return adapter.FakeResult{Structured: map[string]any{"verdict": "changes-requested", "findings": findings}}
+	structured := make([]any, 0, len(findings))
+	for _, finding := range findings {
+		structured = append(structured, map[string]any{
+			"summary": fmt.Sprint(finding), "reviewer_severity": "high",
+			"evidence": []any{"E1"}, "recommendation": "address the finding",
+		})
+	}
+	return adapter.FakeResult{Structured: map[string]any{
+		"verdict": "changes-requested", "examined": []any{evidence("target.go", `func greet() string { return "hello" }`)},
+		"findings": structured, "approval_requests": []any{},
+	}}
+}
+
+func acceptDisposition() review.DispositionInput {
+	return review.DispositionInput{
+		Decision: review.DispositionAccept, Rationale: "accepted by test driver", FollowUp: "no-action",
+	}
+}
+
+func retargetScriptEvidence(script []adapter.FakeResult, member, excerpt string) {
+	for i := range script {
+		if script[i].Structured == nil {
+			continue
+		}
+		if examined, ok := script[i].Structured["examined"].([]any); ok {
+			for _, raw := range examined {
+				if anchor, ok := raw.(map[string]any); ok {
+					anchor["member"], anchor["excerpt"] = member, excerpt
+				}
+			}
+		}
+		if results, ok := script[i].Structured["results"].([]any); ok {
+			for _, raw := range results {
+				if result, ok := raw.(map[string]any); ok {
+					result["examined"] = []any{evidence(member, excerpt)}
+				}
+			}
+		}
+	}
+}
+
+func retargetConfirmationEvidence(script []adapter.FakeResult, member, excerpt string) {
+	for i := range script {
+		if script[i].Structured == nil {
+			continue
+		}
+		if results, ok := script[i].Structured["results"].([]any); ok {
+			for _, raw := range results {
+				if result, ok := raw.(map[string]any); ok {
+					result["examined"] = []any{evidence(member, excerpt)}
+				}
+			}
+		}
+	}
+}
+
+func TestReviewProfileSchemasAreValidJSON(t *testing.T) {
+	for name, schema := range map[string]string{"review": ReviewSchema, "confirmation": ConfirmSchema} {
+		if !json.Valid([]byte(schema)) {
+			t.Fatalf("%s schema is not valid JSON", name)
+		}
+	}
+	if ProfileVersion != "review-profile v0.2" || StoreVersion != "store-md v0.7" {
+		t.Fatalf("unexpected format contract: %s / %s", ProfileVersion, StoreVersion)
+	}
+}
+
+func TestReviewEvidenceMismatchNeedsInput(t *testing.T) {
+	result := approve()
+	result.Structured["examined"].([]any)[0].(map[string]any)["excerpt"] = "digest echo without byte match"
+	s, _, _ := newSession(t, []adapter.FakeResult{result})
+	st, outcome, err := s.Review(context.Background(), "review", adapter.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome != review.OutcomeNeedsInput || len(st.Evidence) != 0 || st.Governance != string(kernel.GovDecisionRequired) {
+		t.Fatalf("mismatched excerpt must fail evidence validation: outcome=%s evidence=%+v governance=%s",
+			outcome, st.Evidence, st.Governance)
+	}
+}
+
+func TestOpaqueEvidenceDowngradeIsExplicit(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "opaque.bin")
+	if err := os.WriteFile(target, []byte{0xff, 0x00, 0x01}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := adapter.FakeResult{Structured: map[string]any{
+		"verdict": "approve",
+		"examined": []any{map[string]any{
+			"id": "E1", "member": "opaque.bin", "location": map[string]any{"kind": "opaque"},
+			"claim": "examined opaque member",
+		}},
+		"findings": []any{}, "approval_requests": []any{},
+	}}
+	fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "opaque", Script: []adapter.FakeResult{result}}
+	s := &Session{
+		Adapter: fake, Handles: &adapter.HandleStore{Path: filepath.Join(dir, "handles.json")},
+		Canonical: filepath.Join(dir, "canonical.md"),
+	}
+	spec, err := subject.SingleFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InitSubject(s.Canonical, "opaque review", spec, "", "", false, approvedPolicy(t)); err != nil {
+		t.Fatal(err)
+	}
+	st, outcome, err := s.Review(context.Background(), "review", adapter.Request{})
+	if err != nil || outcome != review.OutcomeResultValid || len(st.Evidence) != 1 ||
+		st.Evidence[0].Assurance != review.AssuranceReviewerDeclared {
+		t.Fatalf("opaque evidence must remain reviewer-declared: outcome=%s evidence=%+v err=%v", outcome, st.Evidence, err)
+	}
+}
+
+func TestTextEvidenceCannotDowngradeToOpaque(t *testing.T) {
+	result := approve()
+	anchor := result.Structured["examined"].([]any)[0].(map[string]any)
+	anchor["location"] = map[string]any{"kind": "opaque"}
+	delete(anchor, "excerpt")
+	s, _, _ := newSession(t, []adapter.FakeResult{result})
+	st, outcome, err := s.Review(context.Background(), "review", adapter.Request{})
+	if err != nil || outcome != review.OutcomeNeedsInput ||
+		!strings.Contains(strings.Join(st.Rounds[0].ValidationErrors, ";"), "text-member-cannot-downgrade") {
+		t.Fatalf("text opaque downgrade must fail evidence validation: outcome=%s round=%+v err=%v", outcome, st.Rounds[0], err)
+	}
+}
+
+func TestEmptyMemberEvidenceIsExplicitReviewerDeclaration(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "empty.txt")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := adapter.FakeResult{Structured: map[string]any{
+		"verdict": "approve",
+		"examined": []any{map[string]any{
+			"id": "E1", "member": "empty.txt", "location": map[string]any{"kind": "empty-member"},
+			"claim": "examined the empty member",
+		}},
+		"findings": []any{}, "approval_requests": []any{},
+	}}
+	fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "empty", Script: []adapter.FakeResult{result}}
+	s := &Session{
+		Adapter: fake, Handles: &adapter.HandleStore{Path: filepath.Join(dir, "handles.json")},
+		Canonical: filepath.Join(dir, "canonical.md"),
+	}
+	spec, err := subject.SingleFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InitSubject(s.Canonical, "empty review", spec, "", "", false, approvedPolicy(t)); err != nil {
+		t.Fatal(err)
+	}
+	st, outcome, err := s.Review(context.Background(), "review", adapter.Request{})
+	if err != nil || outcome != review.OutcomeResultValid || len(st.Evidence) != 1 ||
+		st.Evidence[0].Assurance != review.AssuranceReviewerDeclared || st.Evidence[0].LocationKind != "empty-member" {
+		t.Fatalf("empty-member attestation must stay reviewer-declared: outcome=%s evidence=%+v err=%v", outcome, st.Evidence, err)
+	}
+}
+
+func TestNonemptyMemberCannotUseEmptyMemberAnchor(t *testing.T) {
+	result := approve()
+	anchor := result.Structured["examined"].([]any)[0].(map[string]any)
+	anchor["location"] = map[string]any{"kind": "empty-member"}
+	delete(anchor, "excerpt")
+	s, _, _ := newSession(t, []adapter.FakeResult{result})
+	st, outcome, err := s.Review(context.Background(), "review", adapter.Request{})
+	if err != nil || outcome != review.OutcomeNeedsInput ||
+		!strings.Contains(strings.Join(st.Rounds[0].ValidationErrors, ";"), "nonempty-member-cannot-empty") {
+		t.Fatalf("nonempty empty-member downgrade must fail: outcome=%s round=%+v err=%v", outcome, st.Rounds[0], err)
+	}
+}
+
+func TestCRLFEvidenceAssuranceRecordsNormalization(t *testing.T) {
+	run := func(t *testing.T, start, end int, excerpt, wantAssurance, wantNormalization string) {
+		t.Helper()
+		dir := t.TempDir()
+		target := filepath.Join(dir, "windows.txt")
+		if err := os.WriteFile(target, []byte("alpha\r\nbravo\r\ncharlie\r\ndelta\r\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		result := adapter.FakeResult{Structured: map[string]any{
+			"verdict": "approve",
+			"examined": []any{map[string]any{
+				"id": "E1", "member": "windows.txt",
+				"location": map[string]any{"kind": "text-lines", "start": start, "end": end},
+				"excerpt":  excerpt, "claim": "examined an interior CRLF range",
+			}},
+			"findings": []any{}, "approval_requests": []any{},
+		}}
+		fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "crlf", Script: []adapter.FakeResult{result}}
+		s := &Session{
+			Adapter: fake, Handles: &adapter.HandleStore{Path: filepath.Join(dir, "handles.json")},
+			Canonical: filepath.Join(dir, "canonical.md"),
+		}
+		spec, err := subject.SingleFile(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := InitSubject(s.Canonical, "CRLF review", spec, "", "", false, approvedPolicy(t)); err != nil {
+			t.Fatal(err)
+		}
+		st, outcome, err := s.Review(context.Background(), "review", adapter.Request{})
+		if err != nil || outcome != review.OutcomeResultValid || len(st.Evidence) != 1 ||
+			st.Evidence[0].Assurance != wantAssurance || st.Evidence[0].Normalization != wantNormalization {
+			t.Fatalf("unexpected CRLF assurance: outcome=%s evidence=%+v err=%v", outcome, st.Evidence, err)
+		}
+	}
+
+	t.Run("normalized-interior-range", func(t *testing.T) {
+		run(t, 2, 3, "bravo\ncharlie", review.AssuranceContentMatchNormalized, review.NormalizationCRLFToLF)
+	})
+	t.Run("normalized-single-interior-line", func(t *testing.T) {
+		run(t, 2, 2, "bravo", review.AssuranceContentMatchNormalized, review.NormalizationCRLFToLF)
+	})
+	t.Run("exact-interior-range", func(t *testing.T) {
+		run(t, 2, 3, "bravo\r\ncharlie\r", review.AssuranceContentMatch, "")
+	})
+}
+
+func TestCRLFNormalizationDoesNotHideContentMismatch(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "windows.txt")
+	if err := os.WriteFile(target, []byte("alpha\r\nbravo\r\ncharlie\r\ndelta\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := adapter.FakeResult{Structured: map[string]any{
+		"verdict": "approve",
+		"examined": []any{map[string]any{
+			"id": "E1", "member": "windows.txt",
+			"location": map[string]any{"kind": "text-lines", "start": 2, "end": 3},
+			"excerpt":  "bravo\nchanged", "claim": "examined an interior CRLF range",
+		}},
+		"findings": []any{}, "approval_requests": []any{},
+	}}
+	fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "crlf-mismatch", Script: []adapter.FakeResult{result}}
+	s := &Session{
+		Adapter: fake, Handles: &adapter.HandleStore{Path: filepath.Join(dir, "handles.json")},
+		Canonical: filepath.Join(dir, "canonical.md"),
+	}
+	spec, err := subject.SingleFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InitSubject(s.Canonical, "CRLF mismatch", spec, "", "", false, approvedPolicy(t)); err != nil {
+		t.Fatal(err)
+	}
+	st, outcome, err := s.Review(context.Background(), "review", adapter.Request{})
+	if err != nil || outcome != review.OutcomeNeedsInput ||
+		!strings.Contains(strings.Join(st.Rounds[0].ValidationErrors, ";"), "excerpt-mismatch") {
+		t.Fatalf("CRLF normalization must not hide a content mismatch: outcome=%s round=%+v err=%v", outcome, st.Rounds[0], err)
+	}
+}
+
+func TestApproveWithRuntimeBlockingFindingIsContradiction(t *testing.T) {
+	result := changesRequested("critical defect")
+	result.Structured["verdict"] = "approve"
+	s, _, _ := newSession(t, []adapter.FakeResult{result})
+	st, outcome, err := s.Review(context.Background(), "review", adapter.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome != review.OutcomeResultValid || !st.Rounds[0].Contradiction ||
+		st.Governance != string(kernel.GovDecisionRequired) || !st.Findings[0].Blocking {
+		t.Fatalf("approve+blocking must be a canonical governance contradiction: %+v %+v", st.Rounds[0], st.Findings)
+	}
+}
+
+func TestApprovalAmbiguityRemainsOpenAndAdvanceMarksStale(t *testing.T) {
+	s, _, dir := newSession(t, []adapter.FakeResult{approve()})
+	if _, _, err := s.Review(context.Background(), "review", adapter.Request{}); err != nil {
+		t.Fatal(err)
+	}
+	_, request, err := RequestApproval(s.Canonical, review.ApprovalRequestInput{
+		Type: "review.release-scope", Scope: "current target only", Reason: "owner must select scope",
+		Options: []review.ApprovalOption{{ID: "current", Description: "approve current target"}},
+	}, "driver", "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, resolved, err := RespondApproval(s.Canonical, request.ID, review.OwnerResponse{
+		Actor: "owner", Verbatim: "승인", RespondedAt: "2026-07-20", Decision: "current",
+		DecisionScope: "ambiguous broader scope", DurableAnchor: "canonical#owner-response",
+	})
+	if err != nil || resolved || st.ApprovalRequests[0].Status != review.ApprovalOpen ||
+		!strings.Contains(st.ApprovalRequests[0].Response.ResolutionNote, "scope") {
+		t.Fatalf("ambiguous response must remain durably open: resolved=%v state=%+v err=%v", resolved, st.ApprovalRequests, err)
+	}
+	if _, err := Close(s.Canonical, "owner", "owner", ""); err == nil {
+		t.Fatal("open approval request must block Close")
+	}
+	if err := os.WriteFile(targetPath(dir), []byte("new revision"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err = Advance(s.Canonical, "new target revision")
+	if err != nil || !st.ApprovalRequests[0].Stale || st.ApprovalRequests[0].Status != review.ApprovalOpen {
+		t.Fatalf("Advance must carry the request and mark it stale: %+v %v", st.ApprovalRequests, err)
+	}
+	if _, err := Terminate(s.Canonical, kernel.GovAbandoned, "owner", "stop despite open request"); err != nil {
+		t.Fatalf("open approval request must not block Terminate: %v", err)
+	}
+}
+
+func TestNeedsUserOpenRequestDoesNotBlockAdvance(t *testing.T) {
+	s, _, dir := newSession(t, []adapter.FakeResult{changesRequested("owner-scoped finding")})
+	if _, _, err := s.Review(context.Background(), "review", adapter.Request{}); err != nil {
+		t.Fatal(err)
+	}
+	_, request, err := RequestApproval(s.Canonical, review.ApprovalRequestInput{
+		Type: "review.owner-scope", Scope: "R0-F1", Reason: "owner input needed after revision",
+		Options: []review.ApprovalOption{{ID: "accept", Description: "accept after revision"}},
+	}, "driver", "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionInput{
+		Decision: review.DispositionNeedsUser, Rationale: "owner input follows revised evidence",
+		ApprovalRequestID: request.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetPath(dir), []byte("revision for owner decision"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Advance(s.Canonical, "prepare revised evidence")
+	if err != nil || !st.ApprovalRequests[0].Stale {
+		t.Fatalf("open needs-user request must carry through Advance as stale: %+v %v", st, err)
+	}
 }
 
 func TestInitRequiresDurableEgressApprovalBeforeArtifacts(t *testing.T) {
@@ -182,21 +521,33 @@ func TestE2EChangesRequestedClosureGate(t *testing.T) {
 	if _, err := Close(s.Canonical, "owner", "owner", ""); err == nil {
 		t.Fatal("close with undispositioned blocking findings must fail")
 	}
-	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
+	if _, err := Disposition(s.Canonical, "R0-F1", acceptDisposition()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Close(s.Canonical, "owner", "owner", ""); err == nil {
 		t.Fatal("close with one remaining blocking finding must fail")
 	}
-	// needs-user without decision is rejected by closure, with decision passes
-	if _, err := Disposition(s.Canonical, "R0-F2", review.DispositionNeedsUser, nil); err != nil {
+	// needs-user points to a separately durable request; an open request blocks
+	// Close until an exact owner option+scope response is preserved.
+	_, request, err := RequestApproval(s.Canonical, review.ApprovalRequestInput{
+		Type: "review.risk-acceptance", Scope: "R0-F2 only", Reason: "owner decision required",
+		Options: []review.ApprovalOption{{ID: "accept", Description: "accept for alpha"}},
+	}, "driver", "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Disposition(s.Canonical, "R0-F2", review.DispositionInput{
+		Decision: review.DispositionNeedsUser, Rationale: "owner decision required", ApprovalRequestID: request.ID,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Close(s.Canonical, "owner", "owner", ""); err == nil {
-		t.Fatal("needs-user without arbiter decision must block closure")
+		t.Fatal("needs-user with an open request must block closure")
 	}
-	if _, err := Disposition(s.Canonical, "R0-F2", review.DispositionNeedsUser,
-		&review.ArbiterDecision{Arbiter: "owner", Reason: "accepted for alpha"}); err != nil {
+	if _, resolved, err := RespondApproval(s.Canonical, request.ID, review.OwnerResponse{
+		Actor: "owner", Verbatim: "accept", RespondedAt: "2026-07-20", Decision: "accept",
+		DecisionScope: "R0-F2 only", DurableAnchor: "canonical#owner-response", Unambiguous: true,
+	}); err != nil || !resolved {
 		t.Fatal(err)
 	}
 	if st3, err := Close(s.Canonical, "owner", "owner", ""); err != nil || st3.Governance != string(kernel.GovClosed) {
@@ -313,6 +664,7 @@ func newMultiSubjectSession(t *testing.T, script []adapter.FakeResult) (*Session
 	if err := os.WriteFile(second, []byte("second-v1"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	retargetScriptEvidence(script, "first.txt", "first-v1")
 	spec, err := subject.Normalize(subject.Spec{
 		Kind: subject.KindFiles, Root: dir, Members: []string{"second.txt", "first.txt"},
 	}, "")
@@ -456,7 +808,7 @@ func TestConfirmationRejectsResultWhenAnySubjectMemberChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
+	if _, err := Disposition(s.Canonical, "R0-F1", acceptDisposition()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := OpenConfirmation(s.Canonical, 0, []string{"R0-F1"}); err != nil {
@@ -509,7 +861,7 @@ func TestE2ESessionContinuityAcrossRoundsAndObjectives(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
+	if _, err := Disposition(s.Canonical, "R0-F1", acceptDisposition()); err != nil {
 		t.Fatal(err)
 	}
 	st2, _, err := s.Review(context.Background(), "r1", adapter.Request{})
@@ -741,6 +1093,7 @@ func TestR1TargetEditMarksStale(t *testing.T) {
 	// fake dispatch mutates the target mid-flight via script hook: simulate
 	// by editing between snapshot and append using a wrapper adapter.
 	fake.Script = []adapter.FakeResult{approve()}
+	retargetScriptEvidence(fake.Script, "target.go", "v1")
 	mutating := &mutatingAdapter{FakeAdapter: fake, path: target}
 	s.Adapter = mutating
 	st, outcome, err := s.Review(context.Background(), "x", adapter.Request{})
@@ -931,10 +1284,10 @@ func TestR1ConfirmationLifecycle(t *testing.T) {
 	if _, err := OpenConfirmation(s.Canonical, 0, []string{"R0-F1", "R0-F2"}); err == nil {
 		t.Fatal("undispositioned findings must not open a confirmation cycle")
 	}
-	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
+	if _, err := Disposition(s.Canonical, "R0-F1", acceptDisposition()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Disposition(s.Canonical, "R0-F2", review.DispositionAccept, nil); err != nil {
+	if _, err := Disposition(s.Canonical, "R0-F2", acceptDisposition()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := OpenConfirmation(s.Canonical, 0, []string{"R0-F1", "R0-F2"}); err != nil {
@@ -996,7 +1349,7 @@ func TestConfirmationMissingStructuredOutputIsTransactionVisibleFailed(t *testin
 	if _, _, err := s.Review(context.Background(), "x", adapter.Request{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
+	if _, err := Disposition(s.Canonical, "R0-F1", acceptDisposition()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := OpenConfirmation(s.Canonical, 0, []string{"R0-F1"}); err != nil {
@@ -1330,7 +1683,7 @@ func TestPostResultTargetEditBlocksClose(t *testing.T) {
 	if err := os.WriteFile(targetPath(dir), []byte("edited after result"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	st, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil)
+	st, err := Disposition(s.Canonical, "R0-F1", acceptDisposition())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1373,7 +1726,7 @@ func TestAdvanceEnablesSameObjectiveChain(t *testing.T) {
 	if _, err := Advance(s.Canonical, "premature"); err == nil {
 		t.Fatal("advance with undispositioned blocking findings must be refused")
 	}
-	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
+	if _, err := Disposition(s.Canonical, "R0-F1", acceptDisposition()); err != nil {
 		t.Fatal(err)
 	}
 	// unchanged target: advance is never silent busywork
@@ -1390,6 +1743,7 @@ func TestAdvanceEnablesSameObjectiveChain(t *testing.T) {
 	if len(st.Advances) != 1 || st.Advances[0].AfterRound != 0 {
 		t.Fatalf("advance record missing/incorrect: %+v", st.Advances)
 	}
+	retargetScriptEvidence(fake.Script, "target.go", "revised per R0-F1")
 	// advanced revision is un-reviewed: not closable yet
 	if _, err := Close(s.Canonical, "owner", "owner", ""); err == nil {
 		t.Fatal("close after advance without a new round must be refused")
@@ -1417,7 +1771,7 @@ func TestAdvanceEnablesSameObjectiveChain(t *testing.T) {
 // DECISION_REQUIRED (kernel-legal transition) — an approved-but-revised
 // target must be re-reviewed before closing.
 func TestAdvanceFromClosableRequiresReReview(t *testing.T) {
-	s, _, dir := newSession(t, []adapter.FakeResult{approve(), approve()})
+	s, fake, dir := newSession(t, []adapter.FakeResult{approve(), approve()})
 	if _, _, err := s.Review(context.Background(), "review", adapter.Request{}); err != nil {
 		t.Fatal(err)
 	}
@@ -1431,6 +1785,7 @@ func TestAdvanceFromClosableRequiresReReview(t *testing.T) {
 	if st.Governance != string(kernel.GovDecisionRequired) {
 		t.Fatalf("advance from CLOSABLE must drop to DECISION_REQUIRED: %s", st.Governance)
 	}
+	retargetScriptEvidence(fake.Script, "target.go", "revised after approve")
 	if _, _, err := s.Review(context.Background(), "re-review", adapter.Request{}); err != nil {
 		t.Fatal(err)
 	}
@@ -1446,7 +1801,7 @@ func TestAdvanceRefusesDoubleAdvance(t *testing.T) {
 	if _, _, err := s.Review(context.Background(), "review", adapter.Request{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
+	if _, err := Disposition(s.Canonical, "R0-F1", acceptDisposition()); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(targetPath(dir), []byte("rev A"), 0o600); err != nil {
@@ -1471,7 +1826,7 @@ func TestAdvanceRefusesFailedLatestRound(t *testing.T) {
 	if _, _, err := s.Review(context.Background(), "review", adapter.Request{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
+	if _, err := Disposition(s.Canonical, "R0-F1", acceptDisposition()); err != nil {
 		t.Fatal(err)
 	}
 	// a second round fails (timeout FAILED) — latest round is not result-valid
@@ -1530,7 +1885,7 @@ func TestDispositionHelperProcess(t *testing.T) {
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	if _, err := Disposition(canonical, os.Getenv("ACRELAY_DISP_FINDING"), review.DispositionAccept, nil); err != nil {
+	if _, err := Disposition(canonical, os.Getenv("ACRELAY_DISP_FINDING"), acceptDisposition()); err != nil {
 		t.Fatalf("helper disposition: %v", err)
 	}
 }
@@ -1634,7 +1989,7 @@ func TestPendingJournalBlocksConcurrentMutator(t *testing.T) {
 	}()
 
 	<-entered // Review has snapshotted and is now parked inside Dispatch
-	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err == nil ||
+	if _, err := Disposition(s.Canonical, "R0-F1", acceptDisposition()); err == nil ||
 		!strings.Contains(err.Error(), "pending transactions") {
 		t.Fatalf("pending journal must block concurrent disposition: %v", err)
 	}
@@ -1651,7 +2006,7 @@ func TestPendingJournalBlocksConcurrentMutator(t *testing.T) {
 	if len(st.Rounds) != 2 {
 		t.Fatalf("the protected Review round must persist once: got %d rounds", len(st.Rounds))
 	}
-	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
+	if _, err := Disposition(s.Canonical, "R0-F1", acceptDisposition()); err != nil {
 		t.Fatalf("mutation must resume after journal cleanup: %v", err)
 	}
 	if pending, _ := pendingTransactions(s.Canonical); len(pending) != 0 {
@@ -1671,7 +2026,7 @@ func TestConfirmationBlockedByUnknownRound(t *testing.T) {
 	if _, _, err := s.Review(context.Background(), "r0", adapter.Request{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err != nil {
+	if _, err := Disposition(s.Canonical, "R0-F1", acceptDisposition()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := OpenConfirmation(s.Canonical, 0, []string{"R0-F1"}); err != nil {
@@ -1892,7 +2247,7 @@ func TestProgressUnknownSurvivesAppendConflict(t *testing.T) {
 		close(done)
 	}()
 	<-entered // r1 has snapshotted and is parked inside Dispatch
-	if _, err := Disposition(s.Canonical, "R0-F1", review.DispositionAccept, nil); err == nil ||
+	if _, err := Disposition(s.Canonical, "R0-F1", acceptDisposition()); err == nil ||
 		!strings.Contains(err.Error(), "pending transactions") {
 		t.Fatalf("pending UNKNOWN dispatch must block mutation: %v", err)
 	}

@@ -8,6 +8,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"unicode/utf8"
 
 	"github.com/kyungseo/acrelay/internal/adapter"
 	"github.com/kyungseo/acrelay/internal/kernel"
@@ -26,19 +28,19 @@ import (
 	"github.com/kyungseo/acrelay/internal/subject"
 )
 
-// ReviewSchema is the canonical ReviewResult JSON schema sent to every
-// reviewer (DR-811 §5).
-const ReviewSchema = `{"type":"object","properties":{"verdict":{"type":"string","enum":["approve","changes-requested"]},"findings":{"type":"array","items":{"type":"string"}}},"required":["verdict","findings"],"additionalProperties":false}`
+// ReviewSchema is review-profile v0.2. Reviewer fields are evidence inputs;
+// stable IDs, content-match assurance, and blocking are minted by the relay.
+const ReviewSchema = `{"type":"object","properties":{"verdict":{"type":"string","enum":["approve","changes-requested"]},"examined":{"type":"array","minItems":1,"items":{"type":"object","properties":{"id":{"type":"string"},"member":{"type":"string"},"location":{"type":"object","properties":{"kind":{"type":"string","enum":["text-lines","opaque","empty-member"]},"start":{"type":"integer","minimum":1},"end":{"type":"integer","minimum":1}},"required":["kind"],"additionalProperties":false},"excerpt":{"type":"string"},"claim":{"type":"string"}},"required":["id","member","location","claim"],"additionalProperties":false}},"findings":{"type":"array","items":{"type":"object","properties":{"summary":{"type":"string"},"reviewer_severity":{"type":"string","enum":["critical","high","medium","low"]},"evidence":{"type":"array","minItems":1,"items":{"type":"string"}},"recommendation":{"type":"string"}},"required":["summary","reviewer_severity","evidence","recommendation"],"additionalProperties":false}},"approval_requests":{"type":"array","items":{"type":"object","properties":{"type":{"type":"string"},"scope":{"type":"string"},"reason":{"type":"string"},"options":{"type":"array","minItems":1,"items":{"type":"object","properties":{"id":{"type":"string"},"description":{"type":"string"}},"required":["id","description"],"additionalProperties":false}}},"required":["type","scope","reason","options"],"additionalProperties":false}}},"required":["verdict","examined","findings","approval_requests"],"additionalProperties":false}`
 
 // Format versions (DR-811 §8). Unknown persisted versions fail closed.
 const (
 	KernelVersion  = "kernel v0.2"
-	ProfileVersion = "review-profile v0.1"
-	// store-md v0.6 adds an immutable review-input trust policy and owner
-	// approval records. The exact-version gate rejects v0.5 canonicals;
-	// private-alpha callers re-init instead of mixing unrestricted sessions
-	// with the new profile.
-	StoreVersion = "store-md v0.6"
+	ProfileVersion = "review-profile v0.2"
+	// store-md v0.7 persists examined anchors, structured findings,
+	// disposition rationale, and mutable review-time approval requests.
+	// Private alpha uses an exact cutover; v0.6 canonicals require the prior
+	// binary or a fresh objective/session.
+	StoreVersion = "store-md v0.7"
 )
 
 // State is the machine-readable snapshot appended after every mutation.
@@ -64,30 +66,34 @@ type State struct {
 	// Closure accountability (GB-CX-F2): who closed the objective, in what
 	// role, and the declared authority basis. v1 is declared metadata only —
 	// no authentication or RBAC is claimed.
-	CloseActor     string             `json:"close_actor,omitempty"`
-	CloseRole      string             `json:"close_role,omitempty"`
-	CloseAuthority string             `json:"close_authority,omitempty"`
-	SessionRef     string             `json:"session_ref,omitempty"`
-	Vendor         string             `json:"vendor,omitempty"`
-	SessionChanges []SessionChange    `json:"session_changes,omitempty"`
-	Rounds         []RoundState       `json:"rounds"`
-	Confirmations  []ConfState        `json:"confirmations,omitempty"`
-	Transactions   []TransactionState `json:"transactions,omitempty"`
-	Findings       []review.Finding   `json:"findings"`
-	PriorObjective string             `json:"prior_objective,omitempty"`
-	MaterialDiff   string             `json:"material_difference,omitempty"`
-	Advances       []AdvanceState     `json:"advances,omitempty"`
+	CloseActor       string                   `json:"close_actor,omitempty"`
+	CloseRole        string                   `json:"close_role,omitempty"`
+	CloseAuthority   string                   `json:"close_authority,omitempty"`
+	SessionRef       string                   `json:"session_ref,omitempty"`
+	Vendor           string                   `json:"vendor,omitempty"`
+	SessionChanges   []SessionChange          `json:"session_changes,omitempty"`
+	Rounds           []RoundState             `json:"rounds"`
+	Confirmations    []ConfState              `json:"confirmations,omitempty"`
+	Transactions     []TransactionState       `json:"transactions,omitempty"`
+	Evidence         []review.EvidenceAnchor  `json:"evidence,omitempty"`
+	Findings         []review.Finding         `json:"findings"`
+	ApprovalRequests []review.ApprovalRequest `json:"approval_requests,omitempty"`
+	PriorObjective   string                   `json:"prior_objective,omitempty"`
+	MaterialDiff     string                   `json:"material_difference,omitempty"`
+	Advances         []AdvanceState           `json:"advances,omitempty"`
 }
 
 // RoundState mirrors one committed round.
 type RoundState struct {
-	Index         int      `json:"index"`
-	Attempts      []string `json:"attempts"`
-	Verdict       string   `json:"verdict,omitempty"`
-	Outcome       string   `json:"outcome,omitempty"`
-	Stale         bool     `json:"stale,omitempty"`    // target changed mid-dispatch
-	Revision      string   `json:"revision,omitempty"` // target revision this round reviewed (Gate A-3)
-	TransactionID string   `json:"transaction_id"`
+	Index            int      `json:"index"`
+	Attempts         []string `json:"attempts"`
+	Verdict          string   `json:"verdict,omitempty"`
+	Outcome          string   `json:"outcome,omitempty"`
+	Stale            bool     `json:"stale,omitempty"`             // target changed mid-dispatch
+	Contradiction    bool     `json:"contradiction,omitempty"`     // approve plus runtime-blocking evidence
+	ValidationErrors []string `json:"validation_errors,omitempty"` // structure/evidence diagnostics for needs-input
+	Revision         string   `json:"revision,omitempty"`          // target revision this round reviewed (Gate A-3)
+	TransactionID    string   `json:"transaction_id"`
 }
 
 // TransactionState is the canonical execution identity for review and
@@ -246,7 +252,8 @@ func validateState(st *State, labelSeq int) error {
 	}
 	if st.FormalRoundBound == 0 {
 		if len(st.Rounds) != 0 || len(st.Confirmations) != 0 || len(st.Transactions) != 0 ||
-			len(st.Findings) != 0 || len(st.Advances) != 0 || len(st.SessionChanges) != 0 {
+			len(st.Evidence) != 0 || len(st.Findings) != 0 || len(st.ApprovalRequests) != 0 ||
+			len(st.Advances) != 0 || len(st.SessionChanges) != 0 {
 			return fmt.Errorf("unbound objective carries review-derived state: fail-closed")
 		}
 	} else {
@@ -280,6 +287,9 @@ func validateState(st *State, labelSeq int) error {
 	}
 	if st.SessionRef != "" && strings.TrimSpace(st.Vendor) == "" {
 		return fmt.Errorf("persisted session_ref lacks vendor identity: fail-closed")
+	}
+	if err := review.ValidateCanonical(st.Evidence, st.Findings, st.ApprovalRequests); err != nil {
+		return fmt.Errorf("persisted review evidence invalid: %w", err)
 	}
 	seenConf := map[int]bool{}
 	for _, c := range st.Confirmations {
@@ -416,7 +426,7 @@ func rehydrate(st *State) (*kernel.Objective, error) {
 		if err := o.MarkClosable(); err != nil {
 			return nil, err
 		}
-		if err := o.Close(func() error { return review.ClosureCheck(st.Findings) }); err != nil {
+		if err := o.Close(func() error { return review.ClosureCheckForClose(st.Findings, st.ApprovalRequests) }); err != nil {
 			return nil, err
 		}
 	case kernel.GovSuperseded, kernel.GovAbandoned:
@@ -619,6 +629,179 @@ func subjectPrompt(st *State, prompt string) string {
 	return b.String()
 }
 
+func subjectMember(snapshot subject.Snapshot, logical string) (subject.Member, bool) {
+	for _, member := range snapshot.Members {
+		if member.LogicalPath == logical {
+			return member, true
+		}
+	}
+	return subject.Member{}, false
+}
+
+func captureSubjectBytes(snapshot subject.Snapshot) (map[string][]byte, error) {
+	captured := make(map[string][]byte, len(snapshot.Members))
+	for _, member := range snapshot.Members {
+		path := filepath.Join(snapshot.ResolvedRoot, filepath.FromSlash(member.ResolvedPath))
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("capture subject member %s: %w", member.LogicalPath, err)
+		}
+		if store.Digest(raw) != member.Digest {
+			return nil, fmt.Errorf("capture subject member %s: digest changed before dispatch", member.LogicalPath)
+		}
+		captured[member.LogicalPath] = raw
+	}
+	return captured, nil
+}
+
+func nextApprovalNumber(existing []review.ApprovalRequest) int {
+	max := 0
+	for _, request := range existing {
+		var n int
+		if _, err := fmt.Sscanf(request.ID, "AR-%d", &n); err == nil && n > max {
+			max = n
+		}
+	}
+	return max + 1
+}
+
+// normalizeEvidenceInputs binds reviewer-declared evidence to authoritative
+// subject bytes. Digest and aggregate values are binding metadata, never
+// proof. IDs are minted by the runtime under the caller's stable prefix.
+func normalizeEvidenceInputs(inputs []review.EvidenceInput, st *State, roundIndex int, prefix string, captured map[string][]byte) (
+	[]review.EvidenceAnchor, map[string]string, []string,
+) {
+	var errs []string
+	anchors := make([]review.EvidenceAnchor, 0, len(inputs))
+	anchorIDs := map[string]string{}
+	for i, input := range inputs {
+		member, ok := subjectMember(st.Subject, input.Member)
+		if !ok {
+			errs = append(errs, "unknown-member:"+input.Member)
+			continue
+		}
+		raw, ok := captured[member.LogicalPath]
+		if captured != nil && !ok {
+			errs = append(errs, "missing-captured-member:"+input.Member)
+			continue
+		}
+		if captured == nil {
+			path := filepath.Join(st.Subject.ResolvedRoot, filepath.FromSlash(member.ResolvedPath))
+			var err error
+			raw, err = os.ReadFile(path)
+			if err != nil {
+				errs = append(errs, "read-member:"+input.Member)
+				continue
+			}
+		}
+		if store.Digest(raw) != member.Digest {
+			errs = append(errs, "stale-member:"+input.Member)
+			continue
+		}
+		canonicalID := fmt.Sprintf("%s-E%d", prefix, i+1)
+		anchor := review.EvidenceAnchor{
+			ID: canonicalID, Round: roundIndex, Member: member.LogicalPath,
+			MemberDigest: member.Digest, AggregateRevision: st.TargetRevision,
+			LocationKind: input.Location.Kind, StartLine: input.Location.Start, EndLine: input.Location.End,
+			Excerpt: input.Excerpt, Claim: input.Claim,
+		}
+		textMatchable := utf8.Valid(raw) && !bytes.Contains(raw, []byte{0})
+		switch input.Location.Kind {
+		case "text-lines":
+			if !textMatchable {
+				errs = append(errs, "opaque-member-needs-downgrade:"+input.Member)
+				continue
+			}
+			if input.Location.End-input.Location.Start+1 > review.MaxEvidenceLines || len(input.Excerpt) > review.MaxEvidenceBytes {
+				errs = append(errs, "excerpt-bound-exceeded:"+input.ID)
+				continue
+			}
+			lines := strings.Split(string(raw), "\n")
+			if input.Location.Start < 1 || input.Location.End > len(lines) {
+				errs = append(errs, "excerpt-range-out-of-bounds:"+input.ID)
+				continue
+			}
+			expected := strings.Join(lines[input.Location.Start-1:input.Location.End], "\n")
+			if input.Excerpt == expected {
+				anchor.Assurance = review.AssuranceContentMatch
+			} else {
+				normalizedMatch := false
+				if bytes.Contains(raw, []byte("\r\n")) {
+					normalizedLines := strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n")
+					normalizedExpected := strings.Join(normalizedLines[input.Location.Start-1:input.Location.End], "\n")
+					normalizedExcerpt := strings.ReplaceAll(input.Excerpt, "\r\n", "\n")
+					normalizedMatch = normalizedExcerpt == normalizedExpected
+				}
+				if !normalizedMatch {
+					errs = append(errs, "excerpt-mismatch:"+input.ID)
+					continue
+				}
+				anchor.Assurance = review.AssuranceContentMatchNormalized
+				anchor.Normalization = review.NormalizationCRLFToLF
+			}
+		case "opaque":
+			if textMatchable {
+				errs = append(errs, "text-member-cannot-downgrade:"+input.Member)
+				continue
+			}
+			anchor.Assurance = review.AssuranceReviewerDeclared
+		case "empty-member":
+			if len(raw) != 0 {
+				errs = append(errs, "nonempty-member-cannot-empty:"+input.Member)
+				continue
+			}
+			anchor.Assurance = review.AssuranceReviewerDeclared
+		default:
+			errs = append(errs, "location-kind:"+input.Location.Kind)
+			continue
+		}
+		anchorIDs[input.ID] = canonicalID
+		anchors = append(anchors, anchor)
+	}
+	return anchors, anchorIDs, errs
+}
+
+// normalizeReviewResult binds reviewer-declared evidence to the authoritative
+// subject and maps structured findings and requests into canonical records.
+func normalizeReviewResult(result review.ReviewResult, st *State, roundIndex int, reviewer string, captured map[string][]byte) (
+	[]review.EvidenceAnchor, []review.Finding, []review.ApprovalRequest, bool, []string,
+) {
+	anchors, anchorIDs, errs := normalizeEvidenceInputs(result.Examined, st, roundIndex, fmt.Sprintf("R%d", roundIndex), captured)
+
+	findings := make([]review.Finding, 0, len(result.Findings))
+	contradiction := false
+	for i, input := range result.Findings {
+		refs := make([]string, 0, len(input.Evidence))
+		for _, localID := range input.Evidence {
+			canonicalID, ok := anchorIDs[localID]
+			if !ok {
+				errs = append(errs, "dangling-evidence:"+localID)
+				continue
+			}
+			refs = append(refs, canonicalID)
+		}
+		blocking := review.BlockingForSeverity(input.ReviewerSeverity)
+		if result.Verdict == review.VerdictApprove && blocking {
+			contradiction = true
+		}
+		findings = append(findings, review.Finding{
+			ID: fmt.Sprintf("R%d-F%d", roundIndex, i+1), ReviewerSeverity: input.ReviewerSeverity,
+			Blocking: blocking, Summary: input.Summary, Evidence: refs, Recommendation: input.Recommendation,
+		})
+	}
+
+	requests := make([]review.ApprovalRequest, 0, len(result.ApprovalRequests))
+	nextRequest := nextApprovalNumber(st.ApprovalRequests)
+	for i, input := range result.ApprovalRequests {
+		requests = append(requests, review.ApprovalRequest{
+			ID: fmt.Sprintf("AR-%d", nextRequest+i), Type: input.Type,
+			RequesterRole: "reviewer", Requester: reviewer, Scope: input.Scope, Reason: input.Reason,
+			Options: input.Options, Status: review.ApprovalOpen, TargetRevision: st.TargetRevision,
+		})
+	}
+	return anchors, findings, requests, contradiction, errs
+}
+
 // Review runs one formal round: snapshots → commit → dispatch → validate →
 // append. It returns the updated state and the dispatch outcome. Observable
 // progress states (started / running / completed / failed / unknown) are
@@ -741,6 +924,10 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	}
 	if targetNow.Aggregate != st.TargetRevision {
 		return nil, "", fmt.Errorf("subject changed since objective init (stale): advance the objective or open a follow-up objective with a prior pointer")
+	}
+	capturedSubject, err := captureSubjectBytes(st.Subject)
+	if err != nil {
+		return nil, "", err
 	}
 	// 3. Under the canonical flock, re-check the snapshot/lineage, bind an
 	// unbound objective to its immutable policy, then create the owner-only
@@ -879,24 +1066,27 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	reviewerExec = attempt.State
 
 	verdict := ""
+	var newEvidence []review.EvidenceAnchor
 	var newFindings []review.Finding
+	var newRequests []review.ApprovalRequest
+	contradiction := false
+	var validationErrs []string
 	if attempt.State == kernel.ExecSucceeded {
-		vErrs := review.ValidateResult(res.Structured)
+		decoded, vErrs := review.DecodeResult(res.Structured)
 		vErrs = append(vErrs, res.Invalid...)
 		if res.Provenance.ModelMismatch {
 			vErrs = append(vErrs, "model-mismatch") // observable mismatch never reaches result-valid (R1-CX-F7)
 		}
+		if len(vErrs) == 0 {
+			newEvidence, newFindings, newRequests, contradiction, vErrs = normalizeReviewResult(decoded, st, round.Index, vendor, capturedSubject)
+		}
 		outcome = review.ClassifyOutcome(kernel.ExecSucceeded, vErrs)
+		validationErrs = append(validationErrs, vErrs...)
 		if outcome == review.OutcomeResultValid {
-			verdict = res.Structured["verdict"].(string)
-			blocking := verdict == string(review.VerdictChangesRequested)
-			for i, f := range res.Structured["findings"].([]any) {
-				newFindings = append(newFindings, review.Finding{
-					ID:       fmt.Sprintf("R%d-F%d", round.Index, i+1),
-					Severity: "reviewer-reported", Blocking: blocking,
-					Summary: f.(string),
-				})
-			}
+			verdict = string(decoded.Verdict)
+		} else {
+			newEvidence, newFindings, newRequests = nil, nil, nil
+			contradiction = false
 		}
 	}
 	// post-dispatch complete-subject re-check: change marks the result stale.
@@ -917,14 +1107,18 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 		ID: journal.TransactionID, Kind: "review", RoundIndex: round.Index,
 		AttemptIndex: attempt.Index, Reviewer: vendor, Result: txResult,
 	})
+	st.Evidence = append(st.Evidence, newEvidence...)
 	st.Findings = append(st.Findings, newFindings...)
+	st.ApprovalRequests = append(st.ApprovalRequests, newRequests...)
 	st.Rounds = append(st.Rounds, RoundState{
 		Index: round.Index, Attempts: []string{string(attempt.State)},
-		Verdict: verdict, Outcome: string(outcome), Stale: stale,
-		Revision:      st.TargetRevision, // pre-dispatch check guaranteed disk == this
-		TransactionID: journal.TransactionID,
+		Verdict: verdict, Outcome: string(outcome), Stale: stale, Contradiction: contradiction,
+		ValidationErrors: validationErrs,
+		Revision:         st.TargetRevision, // pre-dispatch check guaranteed disk == this
+		TransactionID:    journal.TransactionID,
 	})
-	if !stale && outcome == review.OutcomeResultValid && verdict == string(review.VerdictApprove) && review.ClosureCheck(st.Findings) == nil {
+	if !stale && outcome == review.OutcomeResultValid && verdict == string(review.VerdictApprove) && !contradiction &&
+		review.ClosureCheckForClose(st.Findings, st.ApprovalRequests) == nil {
 		st.Governance = string(kernel.GovClosable)
 	} else {
 		st.Governance = string(kernel.GovDecisionRequired)
@@ -935,6 +1129,9 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 		round.Index, attempt.Index, journal.TransactionID, outcome, verdict, stale)
 	if sessionChanged {
 		section += fmt.Sprintf("- session_change: mode=%s reason=%q\n", s.Reset.Mode, s.Reset.Reason)
+	}
+	if len(validationErrs) > 0 {
+		section += fmt.Sprintf("- validation_errors: %q\n", strings.Join(validationErrs, "; "))
 	}
 	if res != nil {
 		prov, _ := json.Marshal(res.Provenance)
@@ -982,7 +1179,7 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	return st, outcome, nil
 }
 
-// Reconcile applies or cleans up a DR-813 dispatch journal. store-md v0.6 is a
+// Reconcile applies or cleans up a DR-813 dispatch journal. store-md v0.7 is a
 // hard cutover: legacy .recovery-* sidecars are neither guarded nor loaded.
 func Reconcile(canonical, transactionPath string) (*State, error) {
 	return reconcileDispatchJournal(canonical, transactionPath)
@@ -1042,13 +1239,15 @@ func OpenConfirmation(canonical string, roundIndex int, ids []string) (*State, e
 	return out, err
 }
 
-// ConfirmSchema restricts confirmation output to per-ID statuses — no
-// verdicts, no new findings (CP contract, R1-CX-F4).
-const ConfirmSchema = `{"type":"object","properties":{"results":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"status":{"type":"string","enum":["confirmed","not-confirmed"]}},"required":["id","status"],"additionalProperties":false}}},"required":["results"],"additionalProperties":false}`
+// ConfirmSchema keeps confirmation verdict-free and finding-free while still
+// requiring non-empty examined evidence for every per-ID judgment.
+const ConfirmSchema = `{"type":"object","properties":{"results":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"status":{"type":"string","enum":["confirmed","not-confirmed"]},"examined":{"type":"array","minItems":1,"items":{"type":"object","properties":{"id":{"type":"string"},"member":{"type":"string"},"location":{"type":"object","properties":{"kind":{"type":"string","enum":["text-lines","opaque","empty-member"]},"start":{"type":"integer","minimum":1},"end":{"type":"integer","minimum":1}},"required":["kind"],"additionalProperties":false},"excerpt":{"type":"string"},"claim":{"type":"string"}},"required":["id","member","location","claim"],"additionalProperties":false}}},"required":["id","status","examined"],"additionalProperties":false}}},"required":["results"],"additionalProperties":false}`
 
 // parseConfirmResults validates reviewer confirmation output: every
 // submitted ID exactly once, statuses from the enum, nothing else.
-func parseConfirmResults(structured map[string]any, submitted []string) (confirmed []string, errs []string) {
+func parseConfirmResults(structured map[string]any, submitted []string, st *State, roundIndex, attemptIndex int, captured map[string][]byte) (
+	confirmed []string, anchors []review.EvidenceAnchor, errs []string,
+) {
 	want := map[string]bool{}
 	for _, id := range submitted {
 		want[id] = true
@@ -1060,7 +1259,7 @@ func parseConfirmResults(structured map[string]any, submitted []string) (confirm
 	}
 	arr, ok := structured["results"].([]any)
 	if !ok {
-		return nil, append(errs, "results-not-array")
+		return nil, nil, append(errs, "results-not-array")
 	}
 	seen := map[string]bool{}
 	for i, e := range arr {
@@ -1071,6 +1270,11 @@ func parseConfirmResults(structured map[string]any, submitted []string) (confirm
 		}
 		id, _ := m["id"].(string)
 		status, _ := m["status"].(string)
+		for key := range m {
+			if key != "id" && key != "status" && key != "examined" {
+				errs = append(errs, fmt.Sprintf("result-%d-unknown-property:%s", i, key))
+			}
+		}
 		if !want[id] {
 			errs = append(errs, "unsubmitted-id:"+id)
 			continue
@@ -1087,13 +1291,30 @@ func parseConfirmResults(structured map[string]any, submitted []string) (confirm
 		default:
 			errs = append(errs, "status-enum:"+status)
 		}
+		fake := map[string]any{
+			"verdict": string(review.VerdictApprove), "examined": m["examined"],
+			"findings": []any{}, "approval_requests": []any{},
+		}
+		decoded, evidenceErrs := review.DecodeResult(fake)
+		if len(evidenceErrs) == 0 {
+			var normalized []review.EvidenceAnchor
+			normalized, _, evidenceErrs = normalizeEvidenceInputs(
+				decoded.Examined, st, roundIndex, fmt.Sprintf("R%d-C%d-I%d", roundIndex, attemptIndex, i+1), captured)
+			anchors = append(anchors, normalized...)
+		}
+		for _, evidenceErr := range evidenceErrs {
+			errs = append(errs, fmt.Sprintf("result-%d-evidence:%s", i, evidenceErr))
+		}
 	}
 	for id := range want {
 		if !seen[id] {
 			errs = append(errs, "missing-id:"+id)
 		}
 	}
-	return confirmed, errs
+	if len(errs) > 0 {
+		return nil, nil, errs
+	}
+	return confirmed, anchors, nil
 }
 
 // ConfirmWithReviewer runs one confirmation attempt by dispatching the
@@ -1222,13 +1443,17 @@ func (s *Session) ConfirmWithReviewer(ctx context.Context, roundIndex int, expec
 	} else if st.SessionRef != "" && st.Vendor != s.Adapter.Vendor() {
 		return nil, false, fmt.Errorf("confirmation must use the stored reviewer session (%s): vendor switch is not allowed inside a confirmation cycle", st.Vendor)
 	}
+	capturedSubject, err := captureSubjectBytes(st.Subject)
+	if err != nil {
+		return nil, false, err
+	}
 	req.SubjectRoot = st.Subject.ResolvedRoot
 	req.TrustPolicy = st.TrustPolicy
 	req.SchemaJSON = ConfirmSchema
 	req.Prompt = subjectPrompt(st, fmt.Sprintf(`Confirmation pass (bounded). You previously reviewed this subject and requested changes.
 Claimed delta: %s
 For EACH of these finding IDs, judge only whether the claimed fix is actually reflected: %s
-Output per the schema: results[] with id and status confirmed|not-confirmed. Do not issue a verdict, do not report new findings.`,
+Output per the schema: results[] with id, status confirmed|not-confirmed, and non-empty examined evidence. Do not issue a verdict, do not report new findings.`,
 		claimedDelta, strings.Join(ids, ", ")))
 
 	prepared, err := s.Adapter.Prepare(ctx, req, s.Handles)
@@ -1315,7 +1540,8 @@ Output per the schema: results[] with id and status confirmed|not-confirmed. Do 
 		if dispatchErr != nil {
 			section += fmt.Sprintf("- dispatch_error: %q\n", dispatchErr.Error())
 		}
-	} else if confirmed, perrs := parseConfirmResults(res.Structured, ids); len(perrs) > 0 {
+	} else if confirmed, anchors, perrs := parseConfirmResults(
+		res.Structured, ids, st, roundIndex, cyc.ValidAttempts+cyc.PreconditionFailures+1, capturedSubject); len(perrs) > 0 {
 		cyc.RecordPreconditionFailure()
 		section += fmt.Sprintf("- result: invalid (%s) — no valid attempt consumed\n", strings.Join(perrs, "; "))
 	} else {
@@ -1323,6 +1549,7 @@ Output per the schema: results[] with id and status confirmed|not-confirmed. Do 
 			return nil, false, err
 		}
 		done = cyc.Done()
+		st.Evidence = append(st.Evidence, anchors...)
 		section += fmt.Sprintf("- confirmed: %s\n- outstanding: %s\n- escalated: %v\n",
 			strings.Join(confirmed, ", "), strings.Join(cyc.Outstanding(), ", "), cyc.Escalated)
 	}
@@ -1366,10 +1593,148 @@ Output per the schema: results[] with id and status confirmed|not-confirmed. Do 
 	return st, done, nil
 }
 
-// Disposition records the driver's response to a finding and persists it.
-func Disposition(canonical, findingID string, d review.Disposition, decision *review.ArbiterDecision) (*State, error) {
-	if !review.ValidDisposition(d) {
-		return nil, fmt.Errorf("invalid disposition %q", d)
+// RequestApproval creates a stable, open-ended review-time approval record.
+// This mutable declared metadata is separate from immutable adapter trust
+// approvals; it grants no execution authority by itself.
+func RequestApproval(canonical string, input review.ApprovalRequestInput, requesterRole, requester string) (*State, *review.ApprovalRequest, error) {
+	if err := review.ValidateApprovalRequestInput(input); err != nil {
+		return nil, nil, err
+	}
+	if requesterRole != "driver" && requesterRole != "reviewer" {
+		return nil, nil, fmt.Errorf("approval requester role must be driver or reviewer")
+	}
+	if strings.TrimSpace(requester) == "" {
+		return nil, nil, fmt.Errorf("approval requester is required")
+	}
+	var out *State
+	var created review.ApprovalRequest
+	err := withCanonicalLock(canonical, func() error {
+		if err := ensureNoPendingLocked(canonical); err != nil {
+			return err
+		}
+		rev, err := store.Revision(canonical)
+		if err != nil {
+			return err
+		}
+		st, err := LoadState(canonical)
+		if err != nil {
+			return err
+		}
+		if st == nil {
+			return fmt.Errorf("no objective in canonical")
+		}
+		if kernel.IsGovTerminal(kernel.GovernanceState(st.Governance)) {
+			return fmt.Errorf("approval request refused: objective is terminal (%s)", st.Governance)
+		}
+		created = review.ApprovalRequest{
+			ID: fmt.Sprintf("AR-%d", nextApprovalNumber(st.ApprovalRequests)), Type: input.Type,
+			RequesterRole: requesterRole, Requester: requester, Scope: input.Scope, Reason: input.Reason,
+			Options: input.Options, Status: review.ApprovalOpen, TargetRevision: st.TargetRevision,
+		}
+		st.ApprovalRequests = append(st.ApprovalRequests, created)
+		st.Governance = string(kernel.GovDecisionRequired)
+		out = st
+		return appendState(canonical, st, fmt.Sprintf(
+			"\n## approval request %s\n- type: %s\n- requester: %s/%s\n- scope: %s\n- reason: %s\n",
+			created.ID, created.Type, requesterRole, requester, created.Scope, created.Reason), rev)
+	})
+	return out, &created, err
+}
+
+// RespondApproval preserves the owner relay verbatim even when it is
+// ambiguous. Only an exact option and exact request scope resolve the request;
+// every other response remains open and therefore blocks clean Close.
+func RespondApproval(canonical, requestID string, response review.OwnerResponse) (*State, bool, error) {
+	var out *State
+	resolved := false
+	err := withCanonicalLock(canonical, func() error {
+		if err := ensureNoPendingLocked(canonical); err != nil {
+			return err
+		}
+		rev, err := store.Revision(canonical)
+		if err != nil {
+			return err
+		}
+		st, err := LoadState(canonical)
+		if err != nil {
+			return err
+		}
+		if st == nil {
+			return fmt.Errorf("no objective in canonical")
+		}
+		if kernel.IsGovTerminal(kernel.GovernanceState(st.Governance)) {
+			return fmt.Errorf("approval response refused: objective is terminal (%s)", st.Governance)
+		}
+		found := false
+		for i := range st.ApprovalRequests {
+			r := &st.ApprovalRequests[i]
+			if r.ID != requestID {
+				continue
+			}
+			found = true
+			if r.Status != review.ApprovalOpen {
+				return fmt.Errorf("approval request %s is %s, not open", requestID, r.Status)
+			}
+			var reasons []string
+			if strings.TrimSpace(response.Actor) == "" || strings.TrimSpace(response.Verbatim) == "" ||
+				strings.TrimSpace(response.DurableAnchor) == "" {
+				reasons = append(reasons, "actor/verbatim/date/durable-anchor incomplete")
+			}
+			if !review.ValidResponseDate(response.RespondedAt) {
+				reasons = append(reasons, "response date is not YYYY-MM-DD or RFC3339")
+			}
+			if response.Actor == r.Requester {
+				reasons = append(reasons, "requester self-approval is not owner arbitration")
+			}
+			if !approvalOptionExists(r.Options, response.Decision) {
+				reasons = append(reasons, "decision does not exactly match an option")
+			}
+			if response.DecisionScope != r.Scope {
+				reasons = append(reasons, "decision scope does not exactly match request scope")
+			}
+			if r.Stale {
+				reasons = append(reasons, "request target revision is stale")
+			}
+			if !response.Unambiguous {
+				reasons = append(reasons, "response was not explicitly declared unambiguous")
+			}
+			if len(reasons) == 0 {
+				r.Status = review.ApprovalResolved
+				resolved = true
+				response.ResolutionNote = "exact option and scope match; owner-declared metadata only"
+			} else {
+				response.ResolutionNote = strings.Join(reasons, "; ")
+			}
+			r.Response = &response
+		}
+		if !found {
+			return fmt.Errorf("approval request %s not found", requestID)
+		}
+		if resolved && review.ClosureCheckForClose(st.Findings, st.ApprovalRequests) == nil && closableAgainstDisk(st) == nil {
+			st.Governance = string(kernel.GovClosable)
+		}
+		out = st
+		encoded, _ := json.Marshal(response)
+		return appendState(canonical, st, fmt.Sprintf(
+			"\n## approval response %s\n- resolved: %v\n- owner_response: %s\n", requestID, resolved, encoded), rev)
+	})
+	return out, resolved, err
+}
+
+func approvalOptionExists(options []review.ApprovalOption, id string) bool {
+	for _, option := range options {
+		if option.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// WithdrawApproval is the explicit owner escape for an obsolete/stale
+// request. Withdrawal is durable and never inferred from target advancement.
+func WithdrawApproval(canonical, requestID, actor, reason string) (*State, error) {
+	if strings.TrimSpace(actor) == "" || strings.TrimSpace(reason) == "" {
+		return nil, fmt.Errorf("approval withdrawal requires actor and reason")
 	}
 	var out *State
 	err := withCanonicalLock(canonical, func() error {
@@ -1387,11 +1752,85 @@ func Disposition(canonical, findingID string, d review.Disposition, decision *re
 		if st == nil {
 			return fmt.Errorf("no objective in canonical")
 		}
+		if kernel.IsGovTerminal(kernel.GovernanceState(st.Governance)) {
+			return fmt.Errorf("approval withdrawal refused: objective is terminal (%s)", st.Governance)
+		}
+		found := false
+		for i := range st.ApprovalRequests {
+			r := &st.ApprovalRequests[i]
+			if r.ID == requestID {
+				if r.Status != review.ApprovalOpen {
+					return fmt.Errorf("approval request %s is %s, not open", requestID, r.Status)
+				}
+				r.Status = review.ApprovalWithdrawn
+				r.Response = &review.OwnerResponse{Actor: actor, Verbatim: reason, ResolutionNote: "explicitly withdrawn"}
+				found = true
+			}
+		}
+		if !found {
+			return fmt.Errorf("approval request %s not found", requestID)
+		}
+		if review.ClosureCheckForClose(st.Findings, st.ApprovalRequests) == nil && closableAgainstDisk(st) == nil {
+			st.Governance = string(kernel.GovClosable)
+		}
+		out = st
+		return appendState(canonical, st, fmt.Sprintf(
+			"\n## approval withdrawal %s\n- actor: %s\n- reason: %s\n", requestID, actor, reason), rev)
+	})
+	return out, err
+}
+
+// Disposition records the driver's complete response to a finding.
+func Disposition(canonical, findingID string, input review.DispositionInput) (*State, error) {
+	if !review.ValidDisposition(input.Decision) {
+		return nil, fmt.Errorf("invalid disposition %q", input.Decision)
+	}
+	if strings.TrimSpace(input.Rationale) == "" {
+		return nil, fmt.Errorf("disposition rationale is required")
+	}
+	if (input.Decision == review.DispositionAccept || input.Decision == review.DispositionRevise) && strings.TrimSpace(input.FollowUp) == "" {
+		return nil, fmt.Errorf("%s disposition requires follow-up or explicit no-action", input.Decision)
+	}
+	if input.Decision == review.DispositionNeedsUser && strings.TrimSpace(input.ApprovalRequestID) == "" {
+		return nil, fmt.Errorf("needs-user disposition requires an approval request ID")
+	}
+	if input.Decision != review.DispositionNeedsUser && input.ApprovalRequestID != "" {
+		return nil, fmt.Errorf("only needs-user disposition may reference an approval request")
+	}
+	var out *State
+	err := withCanonicalLock(canonical, func() error {
+		if err := ensureNoPendingLocked(canonical); err != nil {
+			return err
+		}
+		rev, err := store.Revision(canonical)
+		if err != nil {
+			return err
+		}
+		st, err := LoadState(canonical)
+		if err != nil {
+			return err
+		}
+		if st == nil {
+			return fmt.Errorf("no objective in canonical")
+		}
+		if input.Decision == review.DispositionNeedsUser {
+			requestFound := false
+			for _, request := range st.ApprovalRequests {
+				if request.ID == input.ApprovalRequestID {
+					requestFound = true
+				}
+			}
+			if !requestFound {
+				return fmt.Errorf("approval request %s not found", input.ApprovalRequestID)
+			}
+		}
 		found := false
 		for i := range st.Findings {
 			if st.Findings[i].ID == findingID {
-				st.Findings[i].Disposition = d
-				st.Findings[i].Decision = decision
+				st.Findings[i].Disposition = input.Decision
+				st.Findings[i].Rationale = input.Rationale
+				st.Findings[i].FollowUp = input.FollowUp
+				st.Findings[i].ApprovalRequestID = input.ApprovalRequestID
 				found = true
 			}
 		}
@@ -1401,12 +1840,14 @@ func Disposition(canonical, findingID string, d review.Disposition, decision *re
 		// Promotion to CLOSABLE happens here and only here (R1-CX-F1) — and
 		// only when a valid, non-stale round reviewed the subject set on disk
 		// right now (Gate A-3: a post-result target edit blocks promotion).
-		if st.Governance == string(kernel.GovDecisionRequired) && review.ClosureCheck(st.Findings) == nil &&
+		if st.Governance == string(kernel.GovDecisionRequired) && review.ClosureCheckForClose(st.Findings, st.ApprovalRequests) == nil &&
 			closableAgainstDisk(st) == nil {
 			st.Governance = string(kernel.GovClosable)
 		}
 		out = st
-		return appendState(canonical, st, fmt.Sprintf("\n## disposition %s\n- decision: %s\n", findingID, d), rev)
+		return appendState(canonical, st, fmt.Sprintf(
+			"\n## disposition %s\n- decision: %s\n- rationale: %s\n- follow_up: %s\n- approval_request: %s\n",
+			findingID, input.Decision, input.Rationale, input.FollowUp, input.ApprovalRequestID), rev)
 	})
 	return out, err
 }
@@ -1518,7 +1959,7 @@ func Close(canonical, actor, role, authority string) (*State, error) {
 		if err != nil {
 			return err
 		}
-		if err := o.Close(func() error { return review.ClosureCheck(st.Findings) }); err != nil {
+		if err := o.Close(func() error { return review.ClosureCheckForClose(st.Findings, st.ApprovalRequests) }); err != nil {
 			return err
 		}
 		st.Governance = string(kernel.GovClosed)
@@ -1564,7 +2005,7 @@ func Advance(canonical, note string) (*State, error) {
 		if !latestReviewedCurrent(st) {
 			return fmt.Errorf("advance refused: the latest round must be a result-valid, non-stale review of the current revision (advance continues the loop from a completed re-review, not an older or failed round)")
 		}
-		if err := review.ClosureCheck(st.Findings); err != nil {
+		if err := review.ClosureCheckForAdvance(st.Findings, st.ApprovalRequests); err != nil {
 			return fmt.Errorf("advance refused: blocking findings are not fully dispositioned: %w", err)
 		}
 		diskNow, err := subject.Resolve(st.SubjectSpec)
@@ -1580,6 +2021,11 @@ func Advance(canonical, note string) (*State, error) {
 			FromRevision: from, ToRevision: diskNow.Aggregate, AfterRound: afterRound, Note: note,
 		})
 		st.TargetRevision, st.Subject = diskNow.Aggregate, diskNow
+		for i := range st.ApprovalRequests {
+			if st.ApprovalRequests[i].Status == review.ApprovalOpen {
+				st.ApprovalRequests[i].Stale = true
+			}
+		}
 		if st.Governance == string(kernel.GovClosable) {
 			st.Governance = string(kernel.GovDecisionRequired) // kernel-legal: CLOSABLE → DECISION_REQUIRED
 		}
@@ -1682,6 +2128,35 @@ func Status(canonical string) (string, error) {
 	sort.Strings(open)
 	if len(open) > 0 {
 		fmt.Fprintf(&b, "undispositioned blocking findings: %s\n", strings.Join(open, ", "))
+	}
+	var openRequests []string
+	for _, request := range st.ApprovalRequests {
+		if request.Status == review.ApprovalOpen {
+			label := request.ID
+			if request.Stale {
+				label += "(stale)"
+			}
+			openRequests = append(openRequests, label)
+		}
+	}
+	sort.Strings(openRequests)
+	if len(openRequests) > 0 {
+		fmt.Fprintf(&b, "open approval requests: %s\n", strings.Join(openRequests, ", "))
+	}
+	contentMatch, contentMatchNormalized, reviewerDeclared := 0, 0, 0
+	for _, anchor := range st.Evidence {
+		switch anchor.Assurance {
+		case review.AssuranceContentMatch:
+			contentMatch++
+		case review.AssuranceContentMatchNormalized:
+			contentMatchNormalized++
+		case review.AssuranceReviewerDeclared:
+			reviewerDeclared++
+		}
+	}
+	if len(st.Evidence) > 0 {
+		fmt.Fprintf(&b, "evidence anchors: %d (content-match=%d content-match-normalized=%d reviewer-declared=%d)\n",
+			len(st.Evidence), contentMatch, contentMatchNormalized, reviewerDeclared)
 	}
 	if recs, _ := pendingTransactions(canonical); len(recs) > 0 {
 		fmt.Fprintf(&b, "PENDING TRANSACTION: %s (reconcile or declared abandon required before mutation)\n", strings.Join(recs, ", "))
