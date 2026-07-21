@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -189,26 +190,59 @@ func (p *preparedClaude) Dispatch(ctx context.Context) (*Result, error) {
 	if !res.Started {
 		return res, fmt.Errorf("claude process never started (pre-dispatch failure, no attempt consumed): %v", runErr)
 	}
-	if tctx.Err() == context.DeadlineExceeded {
-		res.TimedOut, res.TimeoutKind = true, TimeoutHardCap
-		return res, fmt.Errorf("hard-cap timeout: execution UNKNOWN, re-dispatch forbidden")
-	}
+	// FEAT-20260721-002 R1-CX-F1: a conclusive terminal marker takes
+	// precedence over every timeout/cancellation/signal classification — a
+	// completed vendor result is never discarded because the invocation was
+	// cut afterwards. Only when no terminal envelope exists do the
+	// ambiguity/transport rows apply.
 	env, diag, perr := parseClaudeEnvelope(stdout.Bytes())
-	if perr != nil {
-		return res, fmt.Errorf("dispatch capture failed (runErr=%v): FAILED, no automatic retry: %w", runErr, perr)
+	if perr != nil || env.Type != "result" {
+		switch {
+		case errors.Is(context.Cause(tctx), ErrParentSignal):
+			res.Termination = Termination{Ambiguous: true, Cause: observedCause(CauseCanceledParentSignal)}
+			return res, fmt.Errorf("parent signal canceled the dispatch before terminal output: execution UNKNOWN, no automatic retry")
+		case tctx.Err() == context.DeadlineExceeded:
+			res.TimedOut, res.TimeoutKind = true, TimeoutHardCap
+			res.Termination = Termination{Ambiguous: true, Cause: observedCause(CauseTimeoutHardCap)}
+			return res, fmt.Errorf("hard-cap timeout: execution UNKNOWN, re-dispatch forbidden")
+		case terminatedBySignal(cmd):
+			res.Termination = Termination{Ambiguous: true, Cause: observedCause(CauseTerminatedSignal)}
+			return res, fmt.Errorf("claude process terminated by signal before terminal output: execution UNKNOWN, no automatic retry")
+		case perr != nil && len(bytes.TrimSpace(stdout.Bytes())) == 0:
+			res.Termination.Cause = observedCause(CauseMissingTerminal)
+			return res, fmt.Errorf("dispatch capture failed (runErr=%v): FAILED, no automatic retry: %w", runErr, perr)
+		case perr != nil:
+			res.Termination.Cause = observedCause(CauseMalformedTerminal)
+			return res, fmt.Errorf("dispatch capture failed (runErr=%v): FAILED, no automatic retry: %w", runErr, perr)
+		default: // parsed JSON without the terminal result type
+			res.Termination.Cause = observedCause(CauseMalformedTerminal)
+			return res, fmt.Errorf("claude output is not a terminal result envelope (type=%s): fail-closed", env.Type)
+		}
 	}
 	res.Diagnostic = joinDiagnostics(p.provenance.CapabilityProbeDiagnostic, diag)
-	if env.Type != "result" || env.Subtype != "success" {
+	if env.Subtype != "success" {
+		res.Termination.Cause = &FailureCause{Code: CauseVendorErrorEnvelope, Source: CauseSourceVendorDeclared}
 		return res, fmt.Errorf("claude envelope is not a terminal success (type=%s subtype=%s): fail-closed", env.Type, env.Subtype)
 	}
 	if env.IsError {
+		// Cause inference from vendor text is never a verified fact. The
+		// resume-not-found signature was observed on Claude 2.1.215
+		// (FEAT-20260720-002); on drift this falls back to the declared
+		// error-envelope cause.
+		cause := &FailureCause{Code: CauseVendorErrorEnvelope, Source: CauseSourceVendorDeclared}
+		if req.ResumeRef != "" && strings.Contains(env.Result, "No conversation found") {
+			cause = &FailureCause{Code: CauseResumeHandleInvalid, Source: CauseSourceInferred}
+		}
+		res.Termination.Cause = cause
 		return res, fmt.Errorf("claude reported error in envelope (exit=%d): FAILED", res.ExitCode)
 	}
 	if strings.TrimSpace(env.SessionID) == "" {
+		res.Termination.Cause = observedCause(CauseMalformedTerminal)
 		return res, fmt.Errorf("claude envelope has no session_id: fail-closed (empty handles are never stored)")
 	}
 	res.Structured = env.Structured
 	if env.Structured == nil {
+		res.Termination.Cause = observedCause(CauseNoStructuredOutput)
 		return res, fmt.Errorf("claude terminal envelope has no structured_output: FAILED, no automatic retry")
 	}
 

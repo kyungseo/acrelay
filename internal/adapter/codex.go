@@ -312,35 +312,59 @@ func (p *preparedCodex) Dispatch(ctx context.Context) (*Result, error) {
 	if !res.Started {
 		return res, fmt.Errorf("codex process never started (pre-dispatch failure, no attempt consumed): %v", runErr)
 	}
-	switch cause := context.Cause(tctx); {
-	case errors.Is(cause, ErrStartupTimeout):
-		res.TimedOut, res.TimeoutKind = true, TimeoutStartup
-		return res, fmt.Errorf("startup timeout after %v: FAILED(timeout:startup), no automatic retry", p.timeouts.Startup)
-	case errors.Is(cause, ErrIdleTimeout):
-		res.TimedOut, res.TimeoutKind = true, TimeoutIdle
-		return res, fmt.Errorf("idle timeout after %v of stream silence: FAILED(timeout:idle), no automatic retry", p.timeouts.Idle)
-	case hctx.Err() == context.DeadlineExceeded:
-		res.TimedOut, res.TimeoutKind = true, TimeoutHardCap
-		return res, fmt.Errorf("hard-cap timeout: execution UNKNOWN, re-dispatch forbidden")
-	}
+	// FEAT-20260721-002 R1-CX-F1: a conclusive terminal turn event
+	// (turn.completed or turn.failed) takes precedence over every
+	// timeout/cancellation/signal classification. Only when no terminal
+	// marker exists do the ambiguity/transport rows apply — so a partially
+	// malformed stream from a signal-killed child stays UNKNOWN, never a
+	// FAILED assertion.
 	capd, perr := parseCodexJSONL(stdout.Bytes())
-	if perr != nil {
-		return res, fmt.Errorf("dispatch capture failed (runErr=%v): FAILED, no automatic retry: %w", runErr, perr)
+	if perr != nil || (!capd.TurnCompleted && !capd.TurnFailed) {
+		switch cause := context.Cause(tctx); {
+		case errors.Is(cause, ErrStartupTimeout):
+			res.TimedOut, res.TimeoutKind = true, TimeoutStartup
+			res.Termination.Cause = observedCause(CauseTimeoutStartup)
+			return res, fmt.Errorf("startup timeout after %v: FAILED(timeout:startup), no automatic retry", p.timeouts.Startup)
+		case errors.Is(cause, ErrIdleTimeout):
+			res.TimedOut, res.TimeoutKind = true, TimeoutIdle
+			res.Termination.Cause = observedCause(CauseTimeoutIdle)
+			return res, fmt.Errorf("idle timeout after %v of stream silence: FAILED(timeout:idle), no automatic retry", p.timeouts.Idle)
+		case errors.Is(cause, ErrParentSignal):
+			res.Termination = Termination{Ambiguous: true, Cause: observedCause(CauseCanceledParentSignal)}
+			return res, fmt.Errorf("parent signal canceled the dispatch before a terminal turn event: execution UNKNOWN, no automatic retry")
+		case hctx.Err() == context.DeadlineExceeded:
+			res.TimedOut, res.TimeoutKind = true, TimeoutHardCap
+			res.Termination = Termination{Ambiguous: true, Cause: observedCause(CauseTimeoutHardCap)}
+			return res, fmt.Errorf("hard-cap timeout: execution UNKNOWN, re-dispatch forbidden")
+		case terminatedBySignal(cmd):
+			res.Termination = Termination{Ambiguous: true, Cause: observedCause(CauseTerminatedSignal)}
+			return res, fmt.Errorf("codex process terminated by signal before a terminal turn event: execution UNKNOWN, no automatic retry")
+		case perr != nil:
+			res.Termination.Cause = observedCause(CauseMalformedTerminal)
+			return res, fmt.Errorf("dispatch capture failed (runErr=%v): FAILED, no automatic retry: %w", runErr, perr)
+		default:
+			res.Termination.Cause = observedCause(CauseMissingTerminal)
+			return res, fmt.Errorf("codex stream ended without a terminal turn event: fail-closed")
+		}
 	}
-	if capd.TurnFailed || (runErr != nil && res.ExitCode != 0) {
+	if capd.TurnFailed {
+		res.Termination.Cause = &FailureCause{Code: CauseVendorTurnFailed, Source: CauseSourceVendorDeclared}
 		return res, fmt.Errorf("codex turn failed (exit=%d, reason=%.120s): FAILED", res.ExitCode, capd.FailReason)
 	}
-	if !capd.TurnCompleted {
-		return res, fmt.Errorf("codex stream ended without a terminal turn event: fail-closed")
-	}
+	// A conclusive turn.completed is authoritative (R1-CX-F1): a nonzero exit
+	// or signal after the completed turn is provenance, not a reclassification
+	// of a captured result.
 	if strings.TrimSpace(capd.ThreadID) == "" {
+		res.Termination.Cause = observedCause(CauseMalformedTerminal)
 		return res, fmt.Errorf("codex stream has no thread_id: fail-closed (empty handles are never stored)")
 	}
 	if capd.AgentMessage == "" {
+		res.Termination.Cause = observedCause(CauseNoStructuredOutput)
 		return res, fmt.Errorf("codex stream has no structured agent message: FAILED, no automatic retry")
 	} else {
 		var m map[string]any
 		if err := json.Unmarshal([]byte(capd.AgentMessage), &m); err != nil {
+			res.Termination.Cause = observedCause(CauseMalformedTerminal)
 			return res, fmt.Errorf("codex structured agent message is malformed JSON: FAILED, no automatic retry: %w", err)
 		} else {
 			res.Structured = m

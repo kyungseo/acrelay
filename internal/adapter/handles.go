@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 
@@ -120,9 +121,49 @@ func newRef(existing map[string]handleEntry) (string, error) {
 	return "", fmt.Errorf("session_ref collision retry exhausted: fail-closed")
 }
 
+// Native handle format contract (FEAT-20260721-002, R0-CX-F1): a persisted
+// handle reaches the vendor CLI argv verbatim, so a malformed entry is
+// rejected fail-closed before any child start — never dropped, truncated, or
+// silently replaced by a new session. The Claude session_id shape is the
+// observed UUID form (Claude Code 2.1.215); format drift fails closed like
+// every other version-bound observation. Codex thread IDs use a conservative
+// argv-safe charset with the same no-leading-option rule.
+var claudeHandlePattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+var codexHandlePattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]{7,127}$`)
+
+// ValidateNativeHandle enforces the vendor-safe handle format. Unknown
+// vendors get the conservative argv-safe rule.
+func ValidateNativeHandle(vendor, handle string) error {
+	if len(handle) < 8 || len(handle) > 128 {
+		return fmt.Errorf("%s native handle length %d outside the 8..128 contract: fail-closed (no child start)", vendor, len(handle))
+	}
+	for _, r := range handle {
+		if r < 0x21 || r > 0x7e {
+			return fmt.Errorf("%s native handle contains whitespace, control, or non-ASCII bytes: fail-closed (no child start)", vendor)
+		}
+	}
+	if strings.HasPrefix(handle, "-") {
+		return fmt.Errorf("%s native handle starts with an option prefix: fail-closed (no child start)", vendor)
+	}
+	switch vendor {
+	case "claude":
+		if !claudeHandlePattern.MatchString(handle) {
+			return fmt.Errorf("claude native handle does not match the observed session_id format: fail-closed (no child start)")
+		}
+	default:
+		if !codexHandlePattern.MatchString(handle) {
+			return fmt.Errorf("%s native handle contains argv-unsafe characters: fail-closed (no child start)", vendor)
+		}
+	}
+	return nil
+}
+
 func validateEntry(vendor, nativeHandle, profileID, workingDir string) error {
 	if strings.TrimSpace(vendor) == "" || strings.TrimSpace(nativeHandle) == "" || strings.TrimSpace(profileID) == "" || strings.TrimSpace(workingDir) == "" {
 		return fmt.Errorf("vendor, native handle, trust profile, and working directory must be nonempty: fail-closed")
+	}
+	if err := ValidateNativeHandle(vendor, nativeHandle); err != nil {
+		return err
 	}
 	if !filepath.IsAbs(workingDir) {
 		return fmt.Errorf("handle working directory must be absolute: fail-closed")

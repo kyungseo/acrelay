@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kyungseo/acrelay/internal/adapter"
 	"github.com/kyungseo/acrelay/internal/kernel"
 	"github.com/kyungseo/acrelay/internal/review"
 	"github.com/kyungseo/acrelay/internal/store"
@@ -297,6 +298,8 @@ func unknownJournalPayload(st *State, j *dispatchJournal) (string, error) {
 	st.Transactions = append(st.Transactions, TransactionState{
 		ID: j.TransactionID, Kind: j.Kind, RoundIndex: j.RoundIndex,
 		AttemptIndex: j.AttemptIndex, Reviewer: j.Reviewer, Result: "unknown",
+		Execution: string(kernel.ExecUnknown),
+		CauseCode: adapter.CauseJournalReconciledUnknown, CauseSource: adapter.CauseSourceObserved,
 	})
 	var header string
 	switch j.Kind {
