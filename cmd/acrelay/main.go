@@ -89,9 +89,47 @@ func decodeJSONFile(path string, dst any) error {
 	return nil
 }
 
+func runBriefing(args []string, stdout io.Writer) (int, error) {
+	fs := flag.NewFlagSet("briefing", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	canonical := fs.String("canonical", "", "canonical record path")
+	format := fs.String("format", "human", "human|json")
+	check := fs.Bool("check", false, "return the stable readiness exit classification")
+	if err := fs.Parse(args); err != nil {
+		return 0, err
+	}
+	if *canonical == "" {
+		return 0, fmt.Errorf("briefing requires -canonical")
+	}
+	briefing, err := relay.BuildBriefing(*canonical)
+	if err != nil {
+		return 0, err
+	}
+	switch *format {
+	case "human":
+		if _, err := io.WriteString(stdout, relay.RenderBriefingHuman(briefing)); err != nil {
+			return 0, err
+		}
+	case "json":
+		encoded, err := relay.MarshalBriefingJSON(briefing)
+		if err != nil {
+			return 0, err
+		}
+		if _, err := fmt.Fprintln(stdout, string(encoded)); err != nil {
+			return 0, err
+		}
+	default:
+		return 0, fmt.Errorf("briefing format must be human or json")
+	}
+	if *check {
+		return relay.BriefingCheckExitCode(briefing.Readiness), nil
+	}
+	return 0, nil
+}
+
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, `usage: acrelay <init|review|confirm|disposition|request-approval|respond-approval|withdraw-approval|advance|close|terminate|reconcile|abandon-transaction|status> [flags]
+		fmt.Fprintln(os.Stderr, `usage: acrelay <init|review|confirm|disposition|request-approval|respond-approval|withdraw-approval|advance|close|terminate|reconcile|abandon-transaction|status|briefing> [flags]
 The canonical record is private local storage: keep it outside shared/synced/
 published paths. Sharing requires a redacted export (not provided in v1).`)
 		os.Exit(2)
@@ -416,6 +454,15 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 			fail(err)
 		}
 		fmt.Print(out)
+
+	case "briefing":
+		code, err := runBriefing(args, os.Stdout)
+		if err != nil {
+			fail(err)
+		}
+		if code != 0 {
+			os.Exit(code)
+		}
 
 	default:
 		fail(fmt.Errorf("unknown command %q", cmd))

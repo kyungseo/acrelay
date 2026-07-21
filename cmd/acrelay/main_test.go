@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/kyungseo/acrelay/internal/adapter"
+	"github.com/kyungseo/acrelay/internal/relay"
 	"github.com/kyungseo/acrelay/internal/subject"
 )
 
@@ -62,5 +67,43 @@ func TestParseSubjectInput(t *testing.T) {
 	}
 	if _, err := parseSubjectInput(target, specPath); err == nil {
 		t.Fatal("ambiguous selector accepted")
+	}
+}
+
+func TestRunBriefingHumanJSONAndCheckExit(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+	canonical := filepath.Join(dir, "canonical.md")
+	if err := os.WriteFile(target, []byte("target"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := adapter.NewTrustPolicy("owner", true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := relay.Init(canonical, "is this ready?", target, "", "", false, policy); err != nil {
+		t.Fatal(err)
+	}
+
+	var human bytes.Buffer
+	code, err := runBriefing([]string{"-canonical", canonical}, &human)
+	if err != nil || code != 0 || !strings.Contains(human.String(), "readiness: blocked") {
+		t.Fatalf("default human briefing failed: code=%d err=%v output=%q", code, err, human.String())
+	}
+
+	var machine bytes.Buffer
+	code, err = runBriefing([]string{"-canonical", canonical, "-format", "json", "-check"}, &machine)
+	if err != nil || code != relay.BriefingCheckBlocked {
+		t.Fatalf("checked JSON briefing failed: code=%d err=%v", code, err)
+	}
+	var parsed relay.Briefing
+	if err := json.Unmarshal(machine.Bytes(), &parsed); err != nil {
+		t.Fatalf("machine briefing is not JSON: %v\n%s", err, machine.String())
+	}
+	if parsed.Version != relay.BriefingOutputVersion || parsed.Readiness != relay.BriefingBlocked {
+		t.Fatalf("machine briefing contract mismatch: %+v", parsed)
+	}
+	if _, err := runBriefing([]string{"-canonical", canonical, "-format", "yaml"}, &bytes.Buffer{}); err == nil {
+		t.Fatal("unsupported briefing format must fail")
 	}
 }
