@@ -25,7 +25,8 @@ Toolstead `DR-811` (Agent Collab v1 Feasibility Contract And Session Continuity)
   `dispatch-journal v0.1`
 - `cmd/acrelay` — CLI: `init` / `review` / `confirm` / `disposition` /
   `request-approval` / `respond-approval` / `withdraw-approval` / `advance` /
-  `close` / `terminate` / `reconcile` / `abandon-transaction` / `status`
+  `close` / `terminate` / `reconcile` / `abandon-transaction` / `status` /
+  `briefing`
 
 ## Canonical Record Is Private
 
@@ -261,6 +262,63 @@ output, vendor egress, and private canonical size; they remain within the
 existing approved content-egress scope. Synthetic defect seeds exist only in
 test fixtures, and every synthetic sample uses a fresh session. Acrelay never
 inserts seeds into a user target.
+
+## Closeout Briefing
+
+`briefing` is a pure, read-only owner decision input. It does not acknowledge,
+approve, close, dispatch, retry, consume a round/attempt, or mutate the
+canonical record:
+
+```sh
+acrelay briefing -canonical review.md
+acrelay briefing -canonical review.md -format json
+acrelay briefing -canonical review.md -format json -check
+```
+
+The existing `status` command remains a short operational snapshot.
+`briefing` owns the decision-oriented human render and the versioned
+`briefing-output v0.1` machine schema. Both formats are rendered from the same
+allowlisted typed projection; wrappers must consume JSON instead of reparsing
+the canonical Markdown or human prose.
+
+Readiness has four states:
+
+| State | Meaning |
+| --- | --- |
+| `ready` | The current Close preconditions pass and there are no cautions. |
+| `ready-with-cautions` | Close preconditions pass, but the owner must review advisory facts such as not-confirmed/escalated confirmation or contradiction history. |
+| `blocked` | The shared Close-readiness gate currently fails. |
+| `terminal` | The objective is already `CLOSED`, `SUPERSEDED`, or `ABANDONED`; it is neither ready nor blocked. |
+
+Briefing and `close` share the same typed Close-readiness evaluation. `close`
+re-runs it under the canonical lock, so a briefing is never an authorization
+or a promise that a later Close will succeed. Confirmation status remains
+advisory under the current contract: not-confirmed or escalated confirmation
+does not silently become a new Close prerequisite. Making it one would be a
+separate governance and persisted-contract decision.
+
+Without `-check`, every successfully rendered business state exits 0. With
+`-check`, the stable exit classification is `0=ready`,
+`3=ready-with-cautions`, `4=blocked`, and `5=terminal`; parse, I/O, or canonical
+integrity failures continue to use exit 1. This keeps render success distinct
+from owner-facing business readiness.
+
+The output includes the canonical snapshot revision, subject aggregate,
+logical target members, final reviewed round, examined claims and assurance,
+structured findings/dispositions, confirmation state, approval completeness,
+typed blocking/caution reasons, material follow-up/advance facts, and next
+actions. Confirmation `claimed_delta` prose is intentionally excluded because
+it is an unverified driver claim; the renderer never reparses prose to recover
+it. Evidence excerpts are also omitted by default. `content-match` still means
+only that the reviewer returned matching bytes, not understanding or
+completeness.
+
+Briefing output is private local material, not a redacted export. The DTO does
+not contain raw reviewer blocks, session/native handles, subject or resolved
+root paths, resolved member paths, evidence excerpts, owner response verbatim,
+durable-anchor values, or raw error strings. It may include structured review,
+driver, owner-decision, vendor, and trust-policy facts needed for the owner's
+decision. Public/redacted export remains outside v1.
 
 ## Formal Round Bound
 

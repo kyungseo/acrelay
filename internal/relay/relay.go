@@ -201,6 +201,13 @@ func LoadState(canonical string) (*State, error) {
 	if err != nil {
 		return nil, err
 	}
+	return loadStateDocument(doc)
+}
+
+// loadStateDocument parses one already-read canonical snapshot. Read-only
+// projections use it so the reported canonical revision and state come from
+// the same bytes without creating or taking the mutator lock.
+func loadStateDocument(doc string) (*State, error) {
 	if doc == "" {
 		return nil, nil
 	}
@@ -1933,9 +1940,6 @@ func Close(canonical, actor, role, authority string) (*State, error) {
 	}
 	var out *State
 	err := withCanonicalLock(canonical, func() error {
-		if err := ensureNoPendingLocked(canonical); err != nil {
-			return err
-		}
 		rev, err := store.Revision(canonical)
 		if err != nil {
 			return err
@@ -1947,13 +1951,9 @@ func Close(canonical, actor, role, authority string) (*State, error) {
 		if st == nil {
 			return fmt.Errorf("no objective in canonical")
 		}
-		if st.Governance != string(kernel.GovClosable) {
-			return fmt.Errorf("close refused: governance is %s, not CLOSABLE (a valid review result and complete dispositions are required)", st.Governance)
-		}
-		// Close-time re-verification (Gate A-3): a persisted CLOSABLE is not
-		// enough — the target on disk must still be the reviewed revision.
-		if err := closableAgainstDisk(st); err != nil {
-			return fmt.Errorf("close refused: %w", err)
+		readiness := evaluateCloseReadiness(canonical, st)
+		if len(readiness.Blockers) > 0 {
+			return fmt.Errorf("close refused: %w", readiness.closeError(st))
 		}
 		o, err := rehydrate(st)
 		if err != nil {
