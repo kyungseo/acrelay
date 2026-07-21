@@ -16,6 +16,10 @@ type FakeResult struct {
 	TimeoutKind   string // TimeoutStartup | TimeoutIdle | TimeoutHardCap ("" defaults to hard-cap)
 	StartFailure  bool   // child never started (no attempt consumed)
 	ModelMismatch bool
+	// FEAT-20260721-002 typed termination injection.
+	Ambiguous   bool
+	CauseCode   string
+	CauseSource string
 }
 
 // FakeAdapter is the deterministic test double: it honors the real
@@ -121,6 +125,13 @@ func (p *preparedFake) Dispatch(ctx context.Context) (*Result, error) {
 	}
 	if req.Progress != nil {
 		req.Progress("running", "reviewer process started")
+	}
+	if fr.CauseCode != "" {
+		res.Termination.Cause = &FailureCause{Code: fr.CauseCode, Source: fr.CauseSource}
+	}
+	if fr.Ambiguous {
+		res.Termination.Ambiguous = true
+		return res, fmt.Errorf("fake ambiguous termination: execution UNKNOWN, no automatic retry")
 	}
 	if fr.TimedOut {
 		res.TimeoutKind = fr.TimeoutKind

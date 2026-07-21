@@ -37,7 +37,7 @@ func newSession(t *testing.T, script []adapter.FakeResult) (*Session, *adapter.F
 		t.Fatal(err)
 	}
 	retargetConfirmationEvidence(script, "target.go", `func greet() string { return "hello" }`)
-	fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "native-1", Script: script}
+	fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "native-fixture-1", Script: script}
 	s := &Session{
 		Adapter:   fake,
 		Handles:   &adapter.HandleStore{Path: filepath.Join(dir, "handles.json")},
@@ -154,7 +154,7 @@ func TestReviewProfileSchemasAreValidJSON(t *testing.T) {
 			t.Fatalf("%s schema is not valid JSON", name)
 		}
 	}
-	if ProfileVersion != "review-profile v0.2" || StoreVersion != "store-md v0.7" {
+	if ProfileVersion != "review-profile v0.2" || StoreVersion != "store-md v0.8" {
 		t.Fatalf("unexpected format contract: %s / %s", ProfileVersion, StoreVersion)
 	}
 }
@@ -187,7 +187,7 @@ func TestOpaqueEvidenceDowngradeIsExplicit(t *testing.T) {
 		}},
 		"findings": []any{}, "approval_requests": []any{},
 	}}
-	fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "opaque", Script: []adapter.FakeResult{result}}
+	fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "opaque-fixture", Script: []adapter.FakeResult{result}}
 	s := &Session{
 		Adapter: fake, Handles: &adapter.HandleStore{Path: filepath.Join(dir, "handles.json")},
 		Canonical: filepath.Join(dir, "canonical.md"),
@@ -233,7 +233,7 @@ func TestEmptyMemberEvidenceIsExplicitReviewerDeclaration(t *testing.T) {
 		}},
 		"findings": []any{}, "approval_requests": []any{},
 	}}
-	fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "empty", Script: []adapter.FakeResult{result}}
+	fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "empty-fixture", Script: []adapter.FakeResult{result}}
 	s := &Session{
 		Adapter: fake, Handles: &adapter.HandleStore{Path: filepath.Join(dir, "handles.json")},
 		Canonical: filepath.Join(dir, "canonical.md"),
@@ -282,7 +282,7 @@ func TestCRLFEvidenceAssuranceRecordsNormalization(t *testing.T) {
 			}},
 			"findings": []any{}, "approval_requests": []any{},
 		}}
-		fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "crlf", Script: []adapter.FakeResult{result}}
+		fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "crlf-fixture", Script: []adapter.FakeResult{result}}
 		s := &Session{
 			Adapter: fake, Handles: &adapter.HandleStore{Path: filepath.Join(dir, "handles.json")},
 			Canonical: filepath.Join(dir, "canonical.md"),
@@ -671,7 +671,7 @@ func newMultiSubjectSession(t *testing.T, script []adapter.FakeResult) (*Session
 	if err != nil {
 		t.Fatal(err)
 	}
-	fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "multi", Script: script}
+	fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "multi-fixture", Script: script}
 	s := &Session{Adapter: fake, Handles: &adapter.HandleStore{Path: filepath.Join(dir, "handles.json")}, Canonical: filepath.Join(dir, "canonical.md")}
 	if _, err := InitSubject(s.Canonical, "review exact set", spec, "", "", false, approvedPolicy(t)); err != nil {
 		t.Fatal(err)
@@ -1084,7 +1084,7 @@ func TestR1TargetEditMarksStale(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target.go")
 	os.WriteFile(target, []byte("v1"), 0o600)
-	fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "n1"}
+	fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "native-fixture-n1"}
 	s := &Session{Adapter: fake, Handles: &adapter.HandleStore{Path: filepath.Join(dir, "h.json")},
 		Canonical: filepath.Join(dir, "c.md")}
 	if _, err := Init(s.Canonical, "q", target, "", "", false, approvedPolicy(t)); err != nil {
@@ -1468,7 +1468,7 @@ func TestR1VendorSwitchRequiresReset(t *testing.T) {
 	if _, _, err := s.Review(context.Background(), "x", adapter.Request{}); err != nil {
 		t.Fatal(err)
 	}
-	other := &adapter.FakeAdapter{VendorName: "other", NativeHandle: "n2", Script: []adapter.FakeResult{approve()}}
+	other := &adapter.FakeAdapter{VendorName: "other", NativeHandle: "native-fixture-n2", Script: []adapter.FakeResult{approve()}}
 	s2 := &Session{Adapter: other, Handles: s.Handles, Canonical: s.Canonical}
 	if _, _, err := s2.Review(context.Background(), "x", adapter.Request{}); err == nil ||
 		!strings.Contains(err.Error(), "session reset") {
@@ -1538,7 +1538,7 @@ func TestCP2StateConfirmationInvariants(t *testing.T) {
 			CollaborationID:  "c", ObjectiveID: "o",
 			Governance:   "OPEN",
 			Rounds:       []RoundState{{Index: 0, TransactionID: txID}},
-			Transactions: []TransactionState{{ID: txID, Kind: "review", RoundIndex: 0, Result: "captured"}},
+			Transactions: []TransactionState{{ID: txID, Kind: "review", RoundIndex: 0, Result: "captured", Execution: "SUCCEEDED"}},
 		})
 	}
 	cases := []struct {
@@ -1608,7 +1608,7 @@ func TestFormalRoundBoundStateInvariants(t *testing.T) {
 		txID := fmt.Sprintf("tx-%032x", i+1)
 		over.Rounds = append(over.Rounds, RoundState{Index: i, TransactionID: txID})
 		over.Transactions = append(over.Transactions, TransactionState{
-			ID: txID, Kind: "review", RoundIndex: i, Result: "captured",
+			ID: txID, Kind: "review", RoundIndex: i, Result: "captured", Execution: "SUCCEEDED",
 		})
 	}
 	if err := validateState(over, 1); err == nil || !strings.Contains(err.Error(), "beyond") {

@@ -36,11 +36,10 @@ const ReviewSchema = `{"type":"object","properties":{"verdict":{"type":"string",
 const (
 	KernelVersion  = "kernel v0.2"
 	ProfileVersion = "review-profile v0.2"
-	// store-md v0.7 persists examined anchors, structured findings,
-	// disposition rationale, and mutable review-time approval requests.
-	// Private alpha uses an exact cutover; v0.6 canonicals require the prior
-	// binary or a fresh objective/session.
-	StoreVersion = "store-md v0.7"
+	// store-md v0.8 adds the typed transaction execution/cause ledger
+	// (FEAT-20260721-002). Private alpha uses an exact cutover; v0.7
+	// canonicals require the prior binary or a fresh objective/session.
+	StoreVersion = "store-md v0.8"
 )
 
 // State is the machine-readable snapshot appended after every mutation.
@@ -100,13 +99,35 @@ type RoundState struct {
 // confirmation dispatches. UNKNOWN is terminal and blocks re-dispatch;
 // abandoned records the owner-declared escape from an un-reconcilable journal.
 type TransactionState struct {
-	ID            string `json:"id"`
-	Kind          string `json:"kind"`
-	RoundIndex    int    `json:"round_index"`
-	AttemptIndex  int    `json:"attempt_index"`
-	Reviewer      string `json:"reviewer"`
-	Result        string `json:"result"` // captured | unknown | abandoned
+	ID           string `json:"id"`
+	Kind         string `json:"kind"`
+	RoundIndex   int    `json:"round_index"`
+	AttemptIndex int    `json:"attempt_index"`
+	Reviewer     string `json:"reviewer"`
+	Result       string `json:"result"` // captured | unknown | abandoned
+	// Execution mirrors the kernel attempt state for this dispatch; Cause is
+	// the failure-cause v0.1 owner remediation diagnostic (FEAT-20260721-002).
+	// Both are orthogonal to Result and never authorize a retry. Review,
+	// confirmation, and journal reconcile all record through this one ledger.
+	Execution     string `json:"execution,omitempty"` // SUCCEEDED | FAILED | UNKNOWN
+	CauseCode     string `json:"cause_code,omitempty"`
+	CauseSource   string `json:"cause_source,omitempty"`
 	JournalDigest string `json:"journal_digest,omitempty"`
+}
+
+// causeFields extracts the persisted cause pair from an adapter result,
+// normalizing a missing post-start cause on a non-succeeded execution to the
+// bounded `unknown` fallback (R1-CX-F2): every FAILED/UNKNOWN transaction
+// carries a typed cause, and a missing adapter cause is never silently
+// persisted as an empty pair.
+func causeFields(res *adapter.Result, execution kernel.ExecutionState) (string, string) {
+	if res != nil && res.Termination.Cause != nil {
+		return res.Termination.Cause.Code, res.Termination.Cause.Source
+	}
+	if execution == kernel.ExecFailed || execution == kernel.ExecUnknown {
+		return adapter.CauseUnknown, adapter.CauseSourceObserved
+	}
+	return "", ""
 }
 
 // AdvanceState records one authorized target-revision advancement inside the
@@ -339,6 +360,38 @@ func validateState(st *State, labelSeq int) error {
 		}
 		if tx.Result == "abandoned" && !hex64.MatchString(tx.JournalDigest) {
 			return fmt.Errorf("abandoned transaction %s lacks a journal digest: fail-closed", tx.ID)
+		}
+		switch tx.Execution {
+		case string(kernel.ExecSucceeded), string(kernel.ExecFailed), string(kernel.ExecUnknown):
+		case "":
+			if tx.Result != "abandoned" {
+				return fmt.Errorf("transaction %s lacks a typed execution: fail-closed", tx.ID)
+			}
+		default:
+			return fmt.Errorf("transaction %s execution %q invalid: fail-closed", tx.ID, tx.Execution)
+		}
+		// Result and Execution are one fact in two vocabularies (R1-CX-F2):
+		// an unknown transaction is exactly an UNKNOWN execution.
+		if tx.Result != "abandoned" && (tx.Result == "unknown") != (tx.Execution == string(kernel.ExecUnknown)) {
+			return fmt.Errorf("transaction %s result %q contradicts execution %q: fail-closed", tx.ID, tx.Result, tx.Execution)
+		}
+		if (tx.CauseCode == "") != (tx.CauseSource == "") {
+			return fmt.Errorf("transaction %s cause code/source must be recorded together: fail-closed", tx.ID)
+		}
+		switch tx.Execution {
+		case string(kernel.ExecFailed), string(kernel.ExecUnknown):
+			if tx.CauseCode == "" {
+				return fmt.Errorf("transaction %s (%s) lacks the mandatory typed cause: fail-closed", tx.ID, tx.Execution)
+			}
+		case string(kernel.ExecSucceeded):
+			if tx.CauseCode != "" {
+				return fmt.Errorf("transaction %s records a failure cause on a succeeded execution: fail-closed", tx.ID)
+			}
+		}
+		if tx.CauseCode != "" {
+			if err := adapter.ValidCause(adapter.FailureCause{Code: tx.CauseCode, Source: tx.CauseSource}); err != nil {
+				return fmt.Errorf("transaction %s: %w", tx.ID, err)
+			}
 		}
 	}
 	for _, r := range st.Rounds {
@@ -1060,6 +1113,13 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 			_ = attempt.Transition(kernel.ExecUnknown)
 		}
 		outcome = review.OutcomeFailed
+	case res != nil && res.Termination.Ambiguous:
+		// FEAT-20260721-002 precedence rows 3: signal-terminated or
+		// parent-canceled children are ambiguous — vendor-side execution may
+		// have completed — so the attempt is UNKNOWN with no automatic retry.
+		_ = attempt.Transition(kernel.ExecRunning)
+		_ = attempt.Transition(kernel.ExecUnknown)
+		outcome = review.OutcomeFailed
 	case dispatchErr != nil:
 		_ = attempt.Transition(kernel.ExecRunning)
 		_ = attempt.Transition(kernel.ExecFailed)
@@ -1110,9 +1170,11 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	if attempt.State == kernel.ExecUnknown {
 		txResult, journalPhase = "unknown", journalPhaseUnknown
 	}
+	causeCode, causeSource := causeFields(res, attempt.State)
 	st.Transactions = append(st.Transactions, TransactionState{
 		ID: journal.TransactionID, Kind: "review", RoundIndex: round.Index,
 		AttemptIndex: attempt.Index, Reviewer: vendor, Result: txResult,
+		Execution: string(attempt.State), CauseCode: causeCode, CauseSource: causeSource,
 	})
 	st.Evidence = append(st.Evidence, newEvidence...)
 	st.Findings = append(st.Findings, newFindings...)
@@ -1186,7 +1248,7 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	return st, outcome, nil
 }
 
-// Reconcile applies or cleans up a DR-813 dispatch journal. store-md v0.7 is a
+// Reconcile applies or cleans up a DR-813 dispatch journal. store-md v0.8 is a
 // hard cutover: legacy .recovery-* sidecars are neither guarded nor loaded.
 func Reconcile(canonical, transactionPath string) (*State, error) {
 	return reconcileDispatchJournal(canonical, transactionPath)
@@ -1532,7 +1594,7 @@ Output per the schema: results[] with id, status confirmed|not-confirmed, and no
 	}
 	done := false
 	txResult, journalPhase := "captured", journalPhaseCaptured
-	if res.TimedOut && res.TimeoutKind == adapter.TimeoutHardCap {
+	if (res.TimedOut && res.TimeoutKind == adapter.TimeoutHardCap) || res.Termination.Ambiguous {
 		txResult, journalPhase = "unknown", journalPhaseUnknown
 		section += "- result: UNKNOWN (hard-cap/external kill) — no automatic retry\n"
 	} else if subjectStale {
@@ -1563,9 +1625,17 @@ Output per the schema: results[] with id, status confirmed|not-confirmed, and no
 	if res != nil && res.Provenance.SessionRef != "" {
 		st.SessionRef, st.Vendor = res.Provenance.SessionRef, s.Adapter.Vendor()
 	}
+	confExecution := kernel.ExecSucceeded
+	if txResult == "unknown" {
+		confExecution = kernel.ExecUnknown
+	} else if dispatchErr != nil || res.Structured == nil {
+		confExecution = kernel.ExecFailed
+	}
+	confCauseCode, confCauseSource := causeFields(res, confExecution)
 	st.Transactions = append(st.Transactions, TransactionState{
 		ID: journal.TransactionID, Kind: "confirmation", RoundIndex: roundIndex,
 		AttemptIndex: journal.AttemptIndex, Reviewer: s.Adapter.Vendor(), Result: txResult,
+		Execution: string(confExecution), CauseCode: confCauseCode, CauseSource: confCauseSource,
 	})
 	cs.Outstanding = cyc.Outstanding()
 	cs.ValidAttempts = cyc.ValidAttempts
@@ -2119,6 +2189,18 @@ func Status(canonical string) (string, error) {
 		fmt.Fprintf(&b, "rounds: %d/%d\n", len(st.Rounds), st.FormalRoundBound)
 	}
 	fmt.Fprintf(&b, "subject: %s aggregate=%s\n", subject.Summary(st.SubjectSpec, st.Subject), st.TargetRevision[:12])
+	// AR-2 Option B (FEAT-20260721-002): the private status surface shows the
+	// allowlisted cause phrase for the latest non-succeeded dispatch. The raw
+	// vendor output stays in the canonical; briefing-output v0.1 is unchanged.
+	for i := len(st.Transactions) - 1; i >= 0; i-- {
+		tx := st.Transactions[i]
+		if tx.CauseCode == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "last failure cause: %s — %s (source=%s, execution=%s, %s tx=%s)\n",
+			tx.CauseCode, adapter.CausePhrase(tx.CauseCode), tx.CauseSource, tx.Execution, tx.Kind, tx.ID)
+		break
+	}
 	var open []string
 	for _, f := range st.Findings {
 		if f.Blocking && f.Disposition == "" {

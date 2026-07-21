@@ -21,7 +21,7 @@ Toolstead `DR-811` (Agent Collab v1 Feasibility Contract And Session Continuity)
 - `internal/relay` — prepared one-shot review flow (`Prepare` → snapshots →
   objective-bound append → private dispatch journal → in-memory attempt
   admission → child start/capture → transaction-tagged canonical append), state
-  as sequence-numbered blocks inside the canonical document; `store-md v0.7` /
+  as sequence-numbered blocks inside the canonical document; `store-md v0.8` /
   `dispatch-journal v0.1`
 - `cmd/acrelay` — CLI: `init` / `review` / `confirm` / `disposition` /
   `request-approval` / `respond-approval` / `withdraw-approval` / `advance` /
@@ -51,10 +51,56 @@ available. A crash with ambiguous execution reconciles to `UNKNOWN` and never
 retries automatically. Corrupt journals are recorded in the canonical before
 being moved to owner-only quarantine.
 
-`store-md v0.7` and handle store v2 are exact-version cutovers. Existing v0.6
+`store-md v0.8` and handle store v2 are exact-version cutovers. Existing v0.7
 canonicals and handle store v1 files are not silently migrated. Finish an old
-objective with its prior binary or initialize a new v0.7 canonical and new
+objective with its prior binary or initialize a new v0.8 canonical and new
 reviewer session.
+
+## Dispatch Reliability And Failure Causes
+
+Dispatch termination follows a fixed precedence (FEAT-20260721-002). A valid
+terminal contract with structured output classifies through the normal
+result path. A typed vendor failure event is `FAILED` with a cause. A child
+that dies from a signal, a parent-signal cancellation, a hard-cap expiry, or
+a crash reconcile is `UNKNOWN`: the runtime cannot assert whether vendor-side
+execution completed, so re-dispatch stays forbidden. `UNKNOWN` is an
+ambiguity marker, never proof that the reviewer stopped safely. A clean exit
+without the terminal contract is `FAILED` with `transport.missing-terminal`;
+startup/idle expiry stays `FAILED(timeout)`; only `Prepare` and explicit
+child start failures are non-consuming.
+
+Every FAILED or UNKNOWN dispatch carries exactly one `failure-cause v0.1`
+record on the transaction ledger: a bounded registry code plus a source
+state. Each code permits only specific sources — `observed` (runtime-verified
+fact: signal, timeout, exit status), `vendor-declared` (a typed vendor event
+field), or `inferred` (classified from vendor text, never a verified fact) —
+and the load gate rejects a code/source pair the registry does not allow, so a
+persisted `inferred` cause cannot be forged into `observed`. Raw stdout/stderr
+stays in the canonical as before; the typed cause never stores vendor text,
+and `status` renders only the allowlisted phrase for the latest cause. Exit
+codes alone never decide a semantic cause; unclassifiable failures record
+`unknown`.
+
+Owner-remediation categories (`vendor.quota`, `vendor.auth`,
+`vendor.network`, `vendor.service-unavailable`, `vendor.tool-policy`) are
+registered but assigned only from `vendor-declared` or version-bound
+`inferred` evidence. Neither vendor CLI currently exposes a typed
+error-category field, so in this version such failures record the mechanism
+cause or `unknown` rather than a guessed remediation category; populating
+these from live vendor evidence is a separately scoped follow-up.
+
+Persisted native resume handles are validated against vendor-safe formats
+before any child start; a malformed handle fails closed without consuming an
+attempt and is never silently replaced by a new session. A vendor-side
+resume rejection after child start remains a consuming `FAILED` with the
+`resume-handle-invalid` cause (AR-1). The first parent SIGINT/SIGTERM
+cancels the dispatch gracefully (group SIGTERM, then SIGKILL after the grace
+window) and classifies `canceled.parent-signal`; a second signal force-kills
+the tracked child groups and exits. A parent killed with SIGKILL cannot run
+cleanup: the child group may orphan and the durable journal remains the
+authoritative recovery path. The POSIX pid-reuse window around group kill
+and the deterministic suite's inability to observe real vendor error
+phrasing are documented residual risks.
 
 ## Review Subject
 

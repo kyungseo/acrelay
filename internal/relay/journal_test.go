@@ -25,7 +25,7 @@ func TestDR813CrashHelper(t *testing.T) {
 	script := []adapter.FakeResult{approve()}
 	retargetScriptEvidence(script, filepath.Base(target), "target")
 	s := &Session{
-		Adapter:   &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "native", Script: script},
+		Adapter:   &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "native-fixture", Script: script},
 		Handles:   &adapter.HandleStore{Path: filepath.Join(filepath.Dir(canonical), "handles-"+mode+".json")},
 		Canonical: canonical,
 	}
@@ -77,7 +77,7 @@ func TestFormalRoundBoundBindOnlyCrash(t *testing.T) {
 	if st.FormalRoundBound != kernel.DefaultFormalRoundBound || len(st.Rounds) != 0 || len(st.Transactions) != 0 {
 		t.Fatalf("bind-only crash must leave a valid immutable policy without execution: %+v", st)
 	}
-	fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "native", Script: []adapter.FakeResult{approve()}}
+	fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "native-fixture", Script: []adapter.FakeResult{approve()}}
 	s := &Session{
 		Adapter: fake, Handles: &adapter.HandleStore{Path: filepath.Join(dir, "retry-handles.json")},
 		Canonical: canonical, FormalRoundBound: kernel.MaxFormalRoundBound,
@@ -328,11 +328,11 @@ func TestDR813ConfirmationHardCapPersistsUnknownTransaction(t *testing.T) {
 	}
 }
 
-func TestStoreV06FailsExactVersionGate(t *testing.T) {
+func TestStoreV07FailsExactVersionGate(t *testing.T) {
 	dir := t.TempDir()
 	canonical := filepath.Join(dir, "legacy.md")
 	st := &State{
-		KernelVersion: KernelVersion, ProfileVersion: ProfileVersion, StoreVersion: "store-md v0.6",
+		KernelVersion: KernelVersion, ProfileVersion: ProfileVersion, StoreVersion: "store-md v0.7",
 		CollaborationID: "c", ObjectiveID: "o", TargetRevision: strings.Repeat("a", 64),
 		Governance: string(kernel.GovOpen),
 	}
@@ -344,7 +344,7 @@ func TestStoreV06FailsExactVersionGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := LoadState(canonical); err == nil || !strings.Contains(err.Error(), StoreVersion) {
-		t.Fatalf("v0.6 canonical must fail the exact-version gate: %v", err)
+		t.Fatalf("v0.7 canonical must fail the exact-version gate: %v", err)
 	}
 }
 

@@ -12,9 +12,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/kyungseo/acrelay/internal/adapter"
 	"github.com/kyungseo/acrelay/internal/kernel"
@@ -22,6 +25,41 @@ import (
 	"github.com/kyungseo/acrelay/internal/review"
 	"github.com/kyungseo/acrelay/internal/subject"
 )
+
+// dispatchSignalContext implements the FEAT-20260721-002 parent-signal
+// contract for dispatching commands: the first SIGINT/SIGTERM cancels the
+// dispatch context with adapter.ErrParentSignal (graceful group
+// SIGTERM->grace->SIGKILL, classified canceled.parent-signal, journal stays
+// authoritative); a second signal force-kills every tracked child group and
+// exits immediately. Signals are consumed from the injected channel so the
+// two-stage policy is unit-testable without real signals.
+func dispatchSignalContext(parent context.Context, signals <-chan os.Signal, forceExit func()) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancelCause(parent)
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-signals:
+			cancel(adapter.ErrParentSignal)
+		}
+		select {
+		case <-signals:
+			adapter.ForceKillActiveProcessGroups()
+			forceExit()
+		case <-time.After(10 * time.Minute): // dispatch teardown backstop; goroutine exits with process anyway
+		}
+	}()
+	return ctx, func() { cancel(nil) }
+}
+
+func newDispatchContext() (context.Context, context.CancelFunc) {
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	return dispatchSignalContext(context.Background(), signals, func() {
+		fmt.Fprintln(os.Stderr, "second signal: child groups force-killed; reconcile the pending journal before further mutation")
+		os.Exit(130)
+	})
+}
 
 func defaultHandles() string {
 	home, err := os.UserHomeDir()
@@ -214,7 +252,9 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 		s.Reporter = func(state, detail string) {
 			fmt.Fprintf(os.Stderr, "progress: %s %s\n", state, detail)
 		}
-		st, outcome, err := s.Review(context.Background(), p,
+		dispatchCtx, cancelDispatch := newDispatchContext()
+		defer cancelDispatch()
+		st, outcome, err := s.Review(dispatchCtx, p,
 			adapter.Request{Model: *model, Effort: *effort, WorkingDir: *workdir})
 		if err != nil {
 			fail(err) // the "failed"/"unknown" progress line was already emitted
@@ -394,7 +434,9 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 				fail(err)
 			}
 			cSess := &relay.Session{Adapter: a, Handles: &adapter.HandleStore{Path: *handles}, Canonical: *canonical}
-			st, done, err := cSess.ConfirmWithReviewer(context.Background(), *round, *expected, split(*submit), *delta,
+			dispatchCtx, cancelDispatch := newDispatchContext()
+			defer cancelDispatch()
+			st, done, err := cSess.ConfirmWithReviewer(dispatchCtx, *round, *expected, split(*submit), *delta,
 				adapter.Request{Model: *model, Effort: *effort, WorkingDir: *workdir})
 			if err != nil {
 				fail(err)

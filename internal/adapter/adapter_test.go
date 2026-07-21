@@ -3,11 +3,15 @@ package adapter
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -198,11 +202,11 @@ func TestHandleStoreLifecycle(t *testing.T) {
 
 	profile := profileID(WorkingDirNeutral)
 	workdir1 := testHandleWorkingDir(t)
-	ref1, err := h.Register("claude", "native-uuid-1", profile, workdir1)
+	ref1, err := h.Register("claude", "11111111-2222-3333-4444-555555555555", profile, workdir1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(ref1, "native-uuid-1") {
+	if strings.Contains(ref1, "11111111-2222-3333-4444-555555555555") {
 		t.Fatal("session_ref must not embed the native handle")
 	}
 	// 0600 from creation
@@ -213,11 +217,11 @@ func TestHandleStoreLifecycle(t *testing.T) {
 	// merge preserved
 	workdir2 := testHandleWorkingDir(t)
 	ref2, _ := h.Register("codex", "thread-2", profile, workdir2)
-	if _, nh, storedProfile, storedWorkingDir, err := h.Lookup(ref1); err != nil || nh != "native-uuid-1" || storedProfile != profile || storedWorkingDir != workdir1 {
+	if _, nh, storedProfile, storedWorkingDir, err := h.Lookup(ref1); err != nil || nh != "11111111-2222-3333-4444-555555555555" || storedProfile != profile || storedWorkingDir != workdir1 {
 		t.Fatalf("first entry lost after second register: %v", err)
 	}
 	// randomness: two registrations of the same handle produce distinct refs
-	ref3, _ := h.Register("claude", "native-uuid-1", profile, testHandleWorkingDir(t))
+	ref3, _ := h.Register("claude", "11111111-2222-3333-4444-555555555555", profile, testHandleWorkingDir(t))
 	if ref1 == ref3 {
 		t.Fatal("references must be random, not derived from the handle")
 	}
@@ -424,7 +428,7 @@ exit 99
 				if strings.Contains(joined, "Write") || strings.Contains(joined, "Edit") || strings.Contains(joined, "Bash") {
 					t.Fatalf("Claude write-capable tool leaked into argv: %q", p.args)
 				}
-				if hasArgSequence(p.args, "--resume", "native-session") != resume {
+				if hasArgSequence(p.args, "--resume", "11111111-2222-3333-4444-555555555555") != resume {
 					t.Fatalf("Claude resume argv mismatch: resume=%v args=%q", resume, p.args)
 				}
 			},
@@ -447,7 +451,7 @@ exit 99
 				if hasArgSequence(p.args, "--dangerously-bypass-approvals-and-sandbox") {
 					t.Fatalf("Codex unrestricted fallback leaked into argv: %q", p.args)
 				}
-				if hasArgSequence(p.args, "resume", "native-session") != resume {
+				if hasArgSequence(p.args, "resume", "native-session-fixture") != resume {
 					t.Fatalf("Codex resume argv mismatch: resume=%v args=%q", resume, p.args)
 				}
 				if p.args[len(p.args)-1] != "-" {
@@ -480,7 +484,11 @@ exit 99
 				t.Fatalf("neutral cwd must be removed by Close: %s err=%v", initialCwd, err)
 			}
 			resumeWorkingDir := testHandleWorkingDir(t)
-			ref, err := handles.Register(tc.name, "native-session", base.TrustPolicy.ProfileID, resumeWorkingDir)
+			nativeFixture := "native-session-fixture"
+			if tc.name == "claude" {
+				nativeFixture = "11111111-2222-3333-4444-555555555555"
+			}
+			ref, err := handles.Register(tc.name, nativeFixture, base.TrustPolicy.ProfileID, resumeWorkingDir)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -761,7 +769,7 @@ printf '%s\n' '{"type":"turn.completed"}'
 			script: `#!/bin/sh
 echo "$@" >> "$ACRELAY_TEST_LOG"
 if [ "$1" = "--version" ]; then echo "2.1.215 (Claude Code)"; exit 0; fi
-printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"session-1","structured_output":{"verdict":"approve","findings":[]},"modelUsage":{"claude-test":{}}}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"11111111-2222-3333-4444-555555555555","structured_output":{"verdict":"approve","findings":[]},"modelUsage":{"claude-test":{}}}'
 `,
 			make: func() Adapter { return ClaudeAdapter{} },
 		},
@@ -845,13 +853,13 @@ func TestHandleStoreHardening(t *testing.T) {
 	if _, err := h.Register("claude", "  ", profile, workingDir); err == nil {
 		t.Fatal("blank handle must be refused")
 	}
-	if _, err := h.Register("claude", "native-1", "", workingDir); err == nil {
+	if _, err := h.Register("claude", "11111111-2222-3333-4444-555555555555", "", workingDir); err == nil {
 		t.Fatal("blank trust profile must be refused")
 	}
-	if _, err := h.Register("claude", "native-1", profile, "relative"); err == nil {
+	if _, err := h.Register("claude", "11111111-2222-3333-4444-555555555555", profile, "relative"); err == nil {
 		t.Fatal("relative handle working directory must be refused")
 	}
-	ref, err := h.Register("claude", "native-1", profile, workingDir)
+	ref, err := h.Register("claude", "11111111-2222-3333-4444-555555555555", profile, workingDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1148,4 +1156,399 @@ func TestHandleStoreConcurrentProcessesLoseNothing(t *testing.T) {
 	if len(got) != len(wantHandles) {
 		t.Fatalf("store has %d handles, want exactly %d", len(got), len(wantHandles))
 	}
+}
+
+// FEAT-20260721-002 R0-CX-F1: a malformed native handle is rejected before
+// any child start — never truncated, dropped, or replaced by a new session.
+func TestNativeHandleFormatNegativeTable(t *testing.T) {
+	validClaude := "11111111-2222-3333-4444-555555555555"
+	for _, tc := range []struct {
+		vendor, handle, why string
+	}{
+		{"claude", "short", "below minimum length"},
+		{"claude", strings.Repeat("a", 129), "above maximum length"},
+		{"claude", "-6f9619ff-8b86-d011-b42d-00cf4fc964ff", "leading option prefix"},
+		{"claude", "11111111-2222-3333-4444-55555555555\n", "control character"},
+		{"claude", "11111111-2222-3333-4444-5555555555 5", "embedded whitespace"},
+		{"claude", "native-session-fixture", "non-UUID claude session shape"},
+		{"codex", "-leading-dash-handle", "leading option prefix"},
+		{"codex", "bad handle with spaces", "embedded whitespace"},
+		{"codex", "handle;rm -rf", "argv-unsafe characters"},
+		{"codex", "h\x01andle-ctrl", "control character"},
+	} {
+		if err := ValidateNativeHandle(tc.vendor, tc.handle); err == nil {
+			t.Errorf("%s handle (%s) must fail closed", tc.vendor, tc.why)
+		}
+	}
+	if err := ValidateNativeHandle("claude", validClaude); err != nil {
+		t.Fatalf("valid claude UUID rejected: %v", err)
+	}
+	if err := ValidateNativeHandle("codex", "thread_0190b2c4-ok"); err != nil {
+		t.Fatalf("valid codex handle rejected: %v", err)
+	}
+
+	// The store rejects malformed handles at Register AND at Lookup, so a
+	// tampered file can never reach vendor argv.
+	dir := t.TempDir()
+	h := &HandleStore{Path: filepath.Join(dir, "handles.json")}
+	if _, err := h.Register("claude", "native-session-fixture", profileID(WorkingDirNeutral), testHandleWorkingDir(t)); err == nil {
+		t.Fatal("malformed claude handle must be refused at Register")
+	}
+}
+
+// FEAT-20260721-002 precedence table, exercised against a real child process:
+// a signal-killed child is UNKNOWN; a clean exit without the terminal
+// contract is FAILED + transport.missing-terminal; a vendor error envelope
+// carrying the observed resume-not-found signature classifies the cause as
+// resume-handle-invalid (inferred) while remaining a consuming FAILED.
+func TestTerminationClassificationAgainstRealChildren(t *testing.T) {
+	run := func(t *testing.T, name, script string, resume bool) (*Result, error) {
+		t.Helper()
+		dir, _ := installAdapterCLI(t, name, script)
+		handles := &HandleStore{Path: filepath.Join(dir, "handles.json")}
+		req := approvedTestRequest(t, Request{Prompt: "review", SchemaJSON: `{"type":"object"}`})
+		if resume {
+			ref, err := handles.Register(name, "11111111-2222-3333-4444-555555555555",
+				req.TrustPolicy.ProfileID, testHandleWorkingDir(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.ResumeRef = ref
+		}
+		var a Adapter = ClaudeAdapter{}
+		if name == "codex" {
+			a = CodexAdapter{}
+		}
+		prepared, err := a.Prepare(context.Background(), req, handles)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer prepared.Close()
+		return prepared.Dispatch(context.Background())
+	}
+
+	t.Run("claude signal kill is UNKNOWN", func(t *testing.T) {
+		res, err := run(t, "claude", `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "2.1.215 (Claude Code)"; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
+kill -KILL $$
+`, false)
+		if err == nil || !res.Termination.Ambiguous ||
+			res.Termination.Cause == nil || res.Termination.Cause.Code != CauseTerminatedSignal ||
+			res.Termination.Cause.Source != CauseSourceObserved {
+			t.Fatalf("signal kill must be ambiguous UNKNOWN: err=%v termination=%+v", err, res.Termination)
+		}
+		if !strings.Contains(err.Error(), "UNKNOWN") {
+			t.Fatalf("error must state UNKNOWN, no automatic retry: %v", err)
+		}
+	})
+
+	t.Run("claude clean exit without terminal contract is FAILED missing-terminal", func(t *testing.T) {
+		res, err := run(t, "claude", `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "2.1.215 (Claude Code)"; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
+exit 0
+`, false)
+		if err == nil || res.Termination.Ambiguous ||
+			res.Termination.Cause == nil || res.Termination.Cause.Code != CauseMissingTerminal {
+			t.Fatalf("clean no-output exit must be FAILED missing-terminal (DR-811): err=%v termination=%+v", err, res.Termination)
+		}
+	})
+
+	t.Run("codex signal kill is UNKNOWN", func(t *testing.T) {
+		res, err := run(t, "codex", `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
+if [ "$1" = "doctor" ]; then echo '{"checks":{"config.load":{"status":"ok","details":{"model":"m","provider":"p"}}}}'; exit 0; fi
+if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config --ignore-rules --strict-config --sandbox'; exit 0; fi
+if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
+printf '%s\n' '{"type":"thread.started","thread_id":"thread-fixture-1"}'
+kill -KILL $$
+`, false)
+		if err == nil || !res.Termination.Ambiguous ||
+			res.Termination.Cause == nil || res.Termination.Cause.Code != CauseTerminatedSignal {
+			t.Fatalf("codex signal kill must be ambiguous UNKNOWN: err=%v termination=%+v", err, res.Termination)
+		}
+	})
+
+	t.Run("codex clean exit without terminal turn is FAILED missing-terminal", func(t *testing.T) {
+		res, err := run(t, "codex", `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
+if [ "$1" = "doctor" ]; then echo '{"checks":{"config.load":{"status":"ok","details":{"model":"m","provider":"p"}}}}'; exit 0; fi
+if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config --ignore-rules --strict-config --sandbox'; exit 0; fi
+if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
+printf '%s\n' '{"type":"thread.started","thread_id":"thread-fixture-1"}'
+exit 0
+`, false)
+		if err == nil || res.Termination.Ambiguous ||
+			res.Termination.Cause == nil || res.Termination.Cause.Code != CauseMissingTerminal {
+			t.Fatalf("codex clean no-terminal exit must be FAILED missing-terminal: err=%v termination=%+v", err, res.Termination)
+		}
+	})
+
+	t.Run("claude resume-not-found envelope classifies resume-handle-invalid", func(t *testing.T) {
+		res, err := run(t, "claude", `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "2.1.215 (Claude Code)"; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
+printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"No conversation found with session ID","session_id":"11111111-2222-3333-4444-555555555555"}'
+exit 1
+`, true)
+		if err == nil || res.Termination.Ambiguous || res.Termination.Cause == nil ||
+			res.Termination.Cause.Code != CauseResumeHandleInvalid ||
+			res.Termination.Cause.Source != CauseSourceInferred {
+			t.Fatalf("resume-not-found must classify resume-handle-invalid (inferred, consuming FAILED): err=%v termination=%+v", err, res.Termination)
+		}
+	})
+}
+
+// FEAT-20260721-002 R1-CX-F4/R2-CX-F2: a Cancel that arms the escalation
+// timer before trackGroup registration must not be orphaned — releaseGroup
+// must stop it so the SIGKILL escalation never fires after the child is
+// reaped. This observes the escalation callback directly, so reverting
+// trackGroup to the unconditional-overwrite implementation makes it fail.
+func TestEscalationTimerSurvivesStartTrackInterleaving(t *testing.T) {
+	origHook := beforeTrackGroupHook
+	origKill := escalationKill
+	t.Cleanup(func() { beforeTrackGroupHook = origHook; escalationKill = origKill })
+
+	var killMu sync.Mutex
+	var killed []int
+	escalationKill = func(pgid int) {
+		killMu.Lock()
+		killed = append(killed, pgid)
+		killMu.Unlock()
+	}
+
+	baseline := ActiveProcessGroupCount()
+	ctx, cancel := context.WithCancel(context.Background())
+	// Force Cancel to run (arming the timer via armEscalation) after Start but
+	// before trackGroup, reproducing the interleaving.
+	beforeTrackGroupHook = func(cmd *exec.Cmd) {
+		cancel()
+		_ = cmd.Cancel() // idempotent; arms the escalation timer
+	}
+	// A short grace so a leaked timer would fire well within the test window;
+	// the child exits on the Cancel SIGTERM before grace elapses.
+	grace := 150 * time.Millisecond
+	cmd := newGroupCmd(ctx, grace, "sh", "-c", "sleep 5")
+	_ = runWithProgress(cmd, nil)
+
+	// The interleaved-armed timer must not be orphaned: releaseGroup removed
+	// this cmd's entry and stopped its timer, returning to baseline.
+	if got := ActiveProcessGroupCount(); got != baseline {
+		t.Fatalf("group tracker leaked: count %d, baseline %d", got, baseline)
+	}
+	if cmd.ProcessState == nil {
+		t.Fatal("child must have been reaped after interleaved cancellation")
+	}
+	// Wait well past grace: a stopped timer never fires; an orphaned one would.
+	time.Sleep(3 * grace)
+	killMu.Lock()
+	fired := append([]int(nil), killed...)
+	killMu.Unlock()
+	if len(fired) != 0 {
+		t.Fatalf("escalation timer fired after release (orphaned timer): pgids=%v", fired)
+	}
+}
+
+// R1-CX-F6: a corrupted persisted handle-v2 file is rejected at Lookup — the
+// tampered handle never reaches vendor argv.
+func TestCorruptedHandleFileFailsClosedAtLookup(t *testing.T) {
+	dir := t.TempDir()
+	h := &HandleStore{Path: filepath.Join(dir, "handles.json")}
+	ref, err := h.Register("codex", "thread-fixture-1", profileID(WorkingDirNeutral), testHandleWorkingDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Tamper the stored native handle into an argv-unsafe value.
+	raw, err := os.ReadFile(h.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := strings.Replace(string(raw), "thread-fixture-1", "-injected --flag", 1)
+	if err := os.WriteFile(h.Path, []byte(tampered), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, err := h.Lookup(ref); err == nil {
+		t.Fatal("corrupted native handle must fail closed at Lookup, never reach vendor argv")
+	}
+}
+
+// R1-CX-F6: precedence conflict — a conclusive terminal marker followed by a
+// signal must keep the terminal classification, not become UNKNOWN.
+func TestTerminalMarkerWinsOverLaterSignal(t *testing.T) {
+	dir, _ := installAdapterCLI(t, "codex", `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
+if [ "$1" = "doctor" ]; then echo '{"checks":{"config.load":{"status":"ok","details":{"model":"m","provider":"p"}}}}'; exit 0; fi
+if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config --ignore-rules --strict-config --sandbox'; exit 0; fi
+if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
+printf '%s\n' '{"type":"thread.started","thread_id":"thread-fixture-1"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"verdict\":\"approve\",\"examined\":[],\"findings\":[],\"approval_requests\":[]}"}}'
+printf '%s\n' '{"type":"turn.completed"}'
+kill -KILL $$
+`)
+	handles := &HandleStore{Path: filepath.Join(dir, "handles.json")}
+	req := approvedTestRequest(t, Request{Prompt: "review", SchemaJSON: `{"type":"object"}`})
+	prepared, err := CodexAdapter{}.Prepare(context.Background(), req, handles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Close()
+	res, err := prepared.Dispatch(context.Background())
+	// A completed terminal turn is authoritative: the post-marker signal must
+	// not turn this into an ambiguous UNKNOWN.
+	if err != nil || res.Termination.Ambiguous || res.Structured == nil {
+		t.Fatalf("terminal turn must win over the later signal: err=%v termination=%+v structured=%v",
+			err, res.Termination, res.Structured != nil)
+	}
+}
+
+// R1-CX-F6 item 3: a real OS SIGINT delivered to a helper process must, via a
+// real signal handler, cancel the dispatch context and terminate the grouped
+// child — the actual signal→context→group-kill path end to end.
+func TestRealSignalTerminatesGroupedChild(t *testing.T) {
+	if os.Getenv("ACRELAY_SIGNAL_HELPER") == "1" {
+		runSignalHelperChild()
+		return
+	}
+	marker := filepath.Join(t.TempDir(), "childpid")
+	helper := exec.Command(os.Args[0], "-test.run=TestRealSignalTerminatesGroupedChild$")
+	helper.Env = append(os.Environ(), "ACRELAY_SIGNAL_HELPER=1", "ACRELAY_SIGNAL_MARKER="+marker)
+	helper.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := helper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var childPID int
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && childPID == 0 {
+		if b, err := os.ReadFile(marker); err == nil {
+			fmt.Sscanf(string(b), "%d", &childPID)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if childPID == 0 {
+		helper.Process.Kill()
+		t.Fatal("helper never reported a running grouped child")
+	}
+	if err := helper.Process.Signal(syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	_ = helper.Wait()
+	time.Sleep(500 * time.Millisecond)
+	if err := syscall.Kill(childPID, 0); err == nil {
+		syscall.Kill(childPID, syscall.SIGKILL)
+		t.Fatalf("grouped child %d survived the real SIGINT cancellation", childPID)
+	}
+}
+
+// runSignalHelperChild runs in the helper process: it installs a real signal
+// handler that cancels the dispatch context on SIGINT, starts a grouped child
+// via the production newGroupCmd, records the child PID, and exits once the
+// signal-cancelled Wait returns.
+func runSignalHelperChild() {
+	ctx, cancel := context.WithCancel(context.Background())
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	go func() { <-sig; cancel() }()
+
+	cmd := newGroupCmd(ctx, 200*time.Millisecond, "sh", "-c", "sleep 30")
+	if err := cmd.Start(); err != nil {
+		os.Exit(3)
+	}
+	trackGroup(cmd)
+	defer releaseGroup(cmd)
+	if marker := os.Getenv("ACRELAY_SIGNAL_MARKER"); marker != "" {
+		os.WriteFile(marker, []byte(fmt.Sprintf("%d", cmd.Process.Pid)), 0o600)
+	}
+	_ = cmd.Wait() // returns after the signal cancels ctx and the group is killed
+	os.Exit(1)
+}
+
+// R2-CX-F1: the marker-first precedence boundary, pinned with real children
+// across the conflict cases the packet promised.
+func TestTerminationPrecedenceConflictMatrix(t *testing.T) {
+	dispatch := func(t *testing.T, name, script string) (*Result, error) {
+		t.Helper()
+		dir, _ := installAdapterCLI(t, name, script)
+		handles := &HandleStore{Path: filepath.Join(dir, "handles.json")}
+		req := approvedTestRequest(t, Request{Prompt: "review", SchemaJSON: `{"type":"object"}`})
+		var a Adapter = ClaudeAdapter{}
+		if name == "codex" {
+			a = CodexAdapter{}
+		}
+		prepared, err := a.Prepare(context.Background(), req, handles)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer prepared.Close()
+		return prepared.Dispatch(context.Background())
+	}
+	codexHead := `if [ "$1" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
+if [ "$1" = "doctor" ]; then echo '{"checks":{"config.load":{"status":"ok","details":{"model":"m","provider":"p"}}}}'; exit 0; fi
+if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config --ignore-rules --strict-config --sandbox'; exit 0; fi
+if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
+printf '%s\n' '{"type":"thread.started","thread_id":"thread-fixture-1"}'
+`
+	claudeHead := `if [ "$1" = "--version" ]; then echo "2.1.215 (Claude Code)"; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
+`
+
+	// 1. partial malformed JSONL + external signal → UNKNOWN (no terminal marker).
+	t.Run("codex partial malformed then signal is UNKNOWN", func(t *testing.T) {
+		res, err := dispatch(t, "codex", "#!/bin/sh\n"+codexHead+
+			"printf '%s' '{\"type\":\"item.par'\nkill -KILL $$\n")
+		if err == nil || !res.Termination.Ambiguous || res.Termination.Cause == nil ||
+			res.Termination.Cause.Code != CauseTerminatedSignal {
+			t.Fatalf("partial malformed + signal must be UNKNOWN(terminated.signal): err=%v termination=%+v", err, res.Termination)
+		}
+	})
+
+	// 2. terminal failure event + later signal → vendor FAILED (marker wins).
+	t.Run("codex turn.failed then signal stays vendor FAILED", func(t *testing.T) {
+		res, err := dispatch(t, "codex", "#!/bin/sh\n"+codexHead+
+			"printf '%s\\n' '{\"type\":\"turn.failed\",\"error\":{\"message\":\"boom\"}}'\nkill -KILL $$\n")
+		if err == nil || res.Termination.Ambiguous || res.Termination.Cause == nil ||
+			res.Termination.Cause.Code != CauseVendorTurnFailed || res.Termination.Cause.Source != CauseSourceVendorDeclared {
+			t.Fatalf("terminal failure + signal must stay vendor FAILED: err=%v termination=%+v", err, res.Termination)
+		}
+	})
+
+	// 3. no terminal marker + hard-cap → UNKNOWN.
+	t.Run("codex no terminal marker then hard-cap is UNKNOWN", func(t *testing.T) {
+		// Keep emitting non-terminal activity so the idle timer never fires;
+		// only the hard-cap can end this, and with no terminal marker that is
+		// an UNKNOWN.
+		dir, _ := installAdapterCLI(t, "codex", "#!/bin/sh\n"+codexHead+
+			"while true; do printf '%s\\n' '{\"type\":\"item.started\"}'; sleep 0.1; done\n")
+		handles := &HandleStore{Path: filepath.Join(dir, "handles.json")}
+		req := approvedTestRequest(t, Request{Prompt: "review", SchemaJSON: `{"type":"object"}`,
+			Timeouts: Timeouts{Startup: 300 * time.Millisecond, Idle: 400 * time.Millisecond, HardCap: 600 * time.Millisecond, Grace: 100 * time.Millisecond}})
+		prepared, err := CodexAdapter{}.Prepare(context.Background(), req, handles)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer prepared.Close()
+		res, err := prepared.Dispatch(context.Background())
+		if err == nil || !res.Termination.Ambiguous || res.Termination.Cause == nil ||
+			res.Termination.Cause.Code != CauseTimeoutHardCap {
+			t.Fatalf("no terminal marker + hard-cap must be UNKNOWN(hard-cap): err=%v termination=%+v", err, res.Termination)
+		}
+	})
+
+	// 4. Claude terminal success + later signal → success wins (marker-first).
+	t.Run("claude terminal success then signal keeps success", func(t *testing.T) {
+		res, err := dispatch(t, "claude", "#!/bin/sh\n"+claudeHead+
+			"printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"11111111-2222-3333-4444-555555555555\",\"structured_output\":{\"verdict\":\"approve\",\"findings\":[]},\"modelUsage\":{\"m\":{}}}'\nkill -KILL $$\n")
+		if err != nil || res.Termination.Ambiguous || res.Structured == nil {
+			t.Fatalf("claude terminal success must win over the later signal: err=%v termination=%+v", err, res.Termination)
+		}
+	})
+
+	// 5. Claude no terminal envelope + signal → UNKNOWN.
+	t.Run("claude signal without envelope is UNKNOWN", func(t *testing.T) {
+		res, err := dispatch(t, "claude", "#!/bin/sh\n"+claudeHead+"kill -KILL $$\n")
+		if err == nil || !res.Termination.Ambiguous || res.Termination.Cause == nil ||
+			res.Termination.Cause.Code != CauseTerminatedSignal {
+			t.Fatalf("claude signal without envelope must be UNKNOWN: err=%v termination=%+v", err, res.Termination)
+		}
+	})
 }
