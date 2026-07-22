@@ -328,8 +328,14 @@ func execSpawn(secs string) {
 	if err := child.Start(); err != nil {
 		fail("spawn start: %v", err)
 	}
-	if err := os.WriteFile(exe+".grandchild", []byte(strconv.Itoa(child.Process.Pid)), 0o644); err != nil {
+	// Atomic publish: a reader polling for this file must never observe a
+	// partial write (CI-observed race on the Windows lane).
+	tmp := exe + ".grandchild.tmp"
+	if err := os.WriteFile(tmp, []byte(strconv.Itoa(child.Process.Pid)), 0o644); err != nil {
 		fail("spawn pid record: %v", err)
+	}
+	if err := os.Rename(tmp, exe+".grandchild"); err != nil {
+		fail("spawn pid publish: %v", err)
 	}
 	// Deliberately not waited: the grandchild must be reaped by the
 	// confinement boundary, not by this process.

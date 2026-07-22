@@ -68,11 +68,11 @@ func readGrandchildPID(t *testing.T, exe string) int {
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if b, err := os.ReadFile(exe + ".grandchild"); err == nil {
-			pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-			if err != nil {
-				t.Fatalf("grandchild pid file corrupt: %q", b)
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && pid > 0 {
+				return pid
 			}
-			return pid
+			// keep polling: the publish is atomic, but an empty pre-rename
+			// observation window is still possible on some filesystems
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -126,12 +126,12 @@ func TestWindowsJobKillOnCloseIsNoOrphanBackstop(t *testing.T) {
 	if err := trackGroup(cmd); err != nil {
 		t.Fatalf("confinement must succeed: %v", err)
 	}
+	// N1 + leak guard: register cleanup IMMEDIATELY after tracking so any
+	// later t.Fatal cannot leak a tracked entry into subsequent fixtures.
+	t.Cleanup(func() { releaseGroup(cmd); _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
 	waitForFileWin(t, marker, 15*time.Second)
 	grandchild := readGrandchildPID(t, exe)
 	child := cmd.Process.Pid
-	// N1: even on assertion failure the job handle must close so a failed CI
-	// run does not hold the 60s children alive.
-	t.Cleanup(func() { releaseGroup(cmd); _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
 	// Simulate the post-reap release path directly: close the job handle.
 	releaseGroup(cmd)
 	deadline := time.Now().Add(10 * time.Second)
@@ -204,13 +204,13 @@ func startSuspendedFixture(t *testing.T) (*exec.Cmd, string) {
 	return cmd, marker
 }
 
-func assertConfinementFailure(t *testing.T, cmd *exec.Cmd, marker string, confineErr error, needle string) {
+func assertConfinementFailure(t *testing.T, cmd *exec.Cmd, marker string, baseline int, confineErr error, needle string) {
 	t.Helper()
 	if confineErr == nil || !strings.Contains(confineErr.Error(), needle) {
 		t.Fatalf("confinement must fail closed with %q, got: %v", needle, confineErr)
 	}
-	if got := ActiveProcessGroupCount(); got != 0 {
-		t.Fatalf("tracker must be rolled back, got %d entries", got)
+	if got := ActiveProcessGroupCount(); got != baseline {
+		t.Fatalf("tracker must roll back to baseline %d, got %d entries", baseline, got)
 	}
 	pid := cmd.Process.Pid
 	_ = cmd.Wait()
@@ -263,9 +263,10 @@ func TestWindowsConfinementFailuresFailClosed(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			withConfinementSeams(t)
+			baseline := ActiveProcessGroupCount()
 			cmd, marker := startSuspendedFixture(t)
 			tc.mutate(uint32(cmd.Process.Pid))
-			assertConfinementFailure(t, cmd, marker, trackGroup(cmd), tc.needle)
+			assertConfinementFailure(t, cmd, marker, baseline, trackGroup(cmd), tc.needle)
 		})
 	}
 }
