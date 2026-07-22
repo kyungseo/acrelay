@@ -15,6 +15,7 @@ import (
 
 	"github.com/kyungseo/acrelay/internal/adapter"
 	"github.com/kyungseo/acrelay/internal/kernel"
+	"github.com/kyungseo/acrelay/internal/platform"
 	"github.com/kyungseo/acrelay/internal/review"
 	"github.com/kyungseo/acrelay/internal/store"
 )
@@ -167,12 +168,11 @@ func loadDispatchJournal(canonical, path string) (*dispatchJournal, []byte, erro
 	if filepath.Dir(path) != filepath.Dir(canonical) || !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, ".json") {
 		return nil, nil, fmt.Errorf("dispatch journal %s is not bound to canonical %s: fail-closed", path, canonical)
 	}
-	info, err := os.Stat(path)
-	if err != nil {
+	if _, err := os.Stat(path); err != nil {
 		return nil, nil, err
 	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return nil, nil, fmt.Errorf("dispatch journal %s permission %o exposes group/other: fail-closed", path, info.Mode().Perm())
+	if err := platform.VerifyPrivateFile(path); err != nil {
+		return nil, nil, fmt.Errorf("dispatch journal %s %v: fail-closed", path, err)
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {

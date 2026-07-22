@@ -13,10 +13,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
+
+	"github.com/kyungseo/acrelay/internal/platform"
 )
 
 // ObservationState qualifies every resolved value: nothing observed is ever
@@ -37,12 +39,17 @@ type Capability struct {
 	Vendor              string
 	ContractVersion     string
 	KnownGoodCLIVersion string
-	EffortEnum          []string
-	SchemaFlag          string
-	SupportsResume      bool
-	ModelObservation    ObservationState
-	ProgressEvents      bool
-	IdleTimeoutMode     string // "event-stream" or "unsupported"
+	// KnownGoodPlatforms lists the exact GOOS/GOARCH values the restriction
+	// spike verified for KnownGoodCLIVersion. Evidence is platform-bound
+	// (FEAT-20260722-002 R0-CX-F1): a platform absent from this list
+	// fail-closes real vendor dispatch regardless of version equality.
+	KnownGoodPlatforms []string
+	EffortEnum         []string
+	SchemaFlag         string
+	SupportsResume     bool
+	ModelObservation   ObservationState
+	ProgressEvents     bool
+	IdleTimeoutMode    string // "event-stream" or "unsupported"
 }
 
 const (
@@ -174,9 +181,18 @@ func PreflightVersion(cap Capability, observed string) error {
 }
 
 // VerifyRestrictionEvidence binds security-critical restriction semantics to
-// the exact CLI version exercised by the positive behavioral spike. Version
-// drift is an owner gate; there is no unrestricted fallback.
+// the exact CLI version AND the exact GOOS/GOARCH exercised by the positive
+// behavioral spike (FEAT-20260722-002 R0-CX-F1): evidence observed on one
+// platform is never promoted to another. Version or platform drift is an
+// owner gate; there is no unrestricted fallback.
 func VerifyRestrictionEvidence(cap Capability, observed string) error {
+	return verifyRestrictionEvidenceFor(cap, observed, runtime.GOOS, runtime.GOARCH)
+}
+
+// verifyRestrictionEvidenceFor is the pure evidence-key check
+// (vendor + CLI version + GOOS + GOARCH), split out so platform-mismatch
+// paths are unit-testable on any host.
+func verifyRestrictionEvidenceFor(cap Capability, observed, goos, goarch string) error {
 	if err := PreflightVersion(cap, observed); err != nil {
 		return err
 	}
@@ -184,7 +200,14 @@ func VerifyRestrictionEvidence(cap Capability, observed string) error {
 		return fmt.Errorf("%s CLI %s has no verified restriction evidence (verified %s): owner gate required, unrestricted fallback forbidden",
 			cap.Vendor, observed, cap.KnownGoodCLIVersion)
 	}
-	return nil
+	host := goos + "/" + goarch
+	for _, p := range cap.KnownGoodPlatforms {
+		if p == host {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s CLI %s has no verified restriction evidence on %s (verified platforms %v): real vendor dispatch stays unsupported on this platform until a platform-specific owner-reviewed spike — unrestricted fallback forbidden",
+		cap.Vendor, observed, host, cap.KnownGoodPlatforms)
 }
 
 const (
@@ -615,8 +638,7 @@ func prepareExecutionRoot(req Request, resumeWorkingDir string) (Request, string
 		if !isNeutralNamespacePath(resumeWorkingDir) {
 			return req, "", fmt.Errorf("stored neutral working directory is outside the acrelay-owned temp namespace: explicit session reset required, fail-closed")
 		}
-		st, err := os.Lstat(resumeWorkingDir)
-		if err != nil || st.Mode()&os.ModeSymlink != 0 || !st.IsDir() || st.Mode().Perm()&0o077 != 0 {
+		if err := platform.VerifyPrivateDir(resumeWorkingDir); err != nil {
 			return req, "", fmt.Errorf("stored neutral working directory is unavailable or not owner-only: explicit session reset required, fail-closed")
 		}
 		inside, err := pathWithin(req.SubjectRoot, resumeWorkingDir)
@@ -626,12 +648,8 @@ func prepareExecutionRoot(req Request, resumeWorkingDir string) (Request, string
 		req.WorkingDir = resumeWorkingDir
 		return req, "", nil
 	}
-	dir, err := os.MkdirTemp("", "acrelay-review-root-")
+	dir, err := platform.MkdirTempPrivate("acrelay-review-root-")
 	if err != nil {
-		return req, "", err
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		os.RemoveAll(dir)
 		return req, "", err
 	}
 	inside, err := pathWithin(req.SubjectRoot, dir)
@@ -707,120 +725,6 @@ func baseProvenance(cap Capability, req Request, observedVersion, versionBanner,
 // ambiguous termination as canceled.parent-signal (FEAT-20260721-002).
 var ErrParentSignal = errors.New("acrelay parent received a termination signal")
 
-// groupTracker owns every live child process group and its single escalation
-// timer. Ownership is exclusive: Cancel arms the timer at most once, and the
-// post-Wait release stops it so a reused pgid is never signaled after reap
-// (R0-CX-F5 — the inherent POSIX pid-reuse window during the grace interval
-// remains a documented residual risk).
-var groupTracker = struct {
-	mu     sync.Mutex
-	groups map[*exec.Cmd]*groupState
-}{groups: map[*exec.Cmd]*groupState{}}
-
-type groupState struct {
-	pgid  int
-	timer *time.Timer
-}
-
-func trackGroup(cmd *exec.Cmd) {
-	if cmd.Process == nil {
-		return
-	}
-	groupTracker.mu.Lock()
-	defer groupTracker.mu.Unlock()
-	// get-or-create (R1-CX-F4): a Cancel racing ahead of trackGroup may have
-	// already created the entry and armed the escalation timer. Overwriting
-	// would orphan that timer, so preserve any existing state.
-	if _, ok := groupTracker.groups[cmd]; !ok {
-		groupTracker.groups[cmd] = &groupState{pgid: cmd.Process.Pid}
-	}
-}
-
-func releaseGroup(cmd *exec.Cmd) {
-	groupTracker.mu.Lock()
-	defer groupTracker.mu.Unlock()
-	if g, ok := groupTracker.groups[cmd]; ok {
-		if g.timer != nil {
-			g.timer.Stop()
-		}
-		delete(groupTracker.groups, cmd)
-	}
-}
-
-func armEscalation(cmd *exec.Cmd, grace time.Duration, pgid int) {
-	groupTracker.mu.Lock()
-	defer groupTracker.mu.Unlock()
-	g, ok := groupTracker.groups[cmd]
-	if !ok {
-		// Cancel is invoked by exec.CommandContext only while the child is
-		// still being waited on; the inherent POSIX window between reap and
-		// timer stop remains a documented residual risk (R0-CX-F5).
-		g = &groupState{pgid: pgid}
-		groupTracker.groups[cmd] = g
-	}
-	if g.timer != nil { // already armed: idempotent
-		return
-	}
-	g.timer = time.AfterFunc(grace, func() { escalationKill(pgid) })
-}
-
-// escalationKill is the group SIGKILL escalation. It is a package var so a
-// test can observe whether an orphaned timer fires after release (R2-CX-F2):
-// with the correct get-or-create trackGroup the timer is stopped on release
-// and this never runs; the reverted overwrite implementation orphans the
-// timer and this fires against the reaped pgid.
-var escalationKill = func(pgid int) {
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
-}
-
-// ForceKillActiveProcessGroups SIGKILLs every tracked child group. It is the
-// CLI's second-signal escape hatch; classification and durable recording stay
-// with the journal/reconcile path, never with this helper.
-func ForceKillActiveProcessGroups() {
-	groupTracker.mu.Lock()
-	defer groupTracker.mu.Unlock()
-	for _, g := range groupTracker.groups {
-		if g.timer != nil {
-			g.timer.Stop()
-		}
-		_ = syscall.Kill(-g.pgid, syscall.SIGKILL)
-	}
-}
-
-// ActiveProcessGroupCount is a test observability hook for timer/group
-// lifecycle assertions.
-func ActiveProcessGroupCount() int {
-	groupTracker.mu.Lock()
-	defer groupTracker.mu.Unlock()
-	return len(groupTracker.groups)
-}
-
-// newGroupCmd builds an exec.Cmd whose child runs in an isolated,
-// terminable lifecycle boundary. On POSIX this is a new process group; the
-// Windows Job Object equivalent is a follow-up platform port (DR-811).
-// On cancellation the whole group gets SIGTERM, then SIGKILL after grace —
-// grandchildren that ignore SIGTERM do not survive (R0-CX-F8). Cancel is
-// idempotent and the escalation timer is owned by the group tracker.
-func newGroupCmd(ctx context.Context, grace time.Duration, name string, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	var cancelOnce sync.Once
-	cmd.Cancel = func() error {
-		var err error
-		cancelOnce.Do(func() {
-			if cmd.Process == nil {
-				return
-			}
-			pgid := cmd.Process.Pid
-			err = syscall.Kill(-pgid, syscall.SIGTERM)
-			armEscalation(cmd, grace, pgid)
-		})
-		return err
-	}
-	cmd.WaitDelay = grace + 2*time.Second // backstop for the direct child
-	return cmd
-}
-
 // runWithProgress starts the child, emits a "running" progress event once the
 // process is actually running (the reviewer's observable start), then waits.
 // Splitting Start/Wait lets the caller surface running distinct from started
@@ -831,6 +735,26 @@ func newGroupCmd(ctx context.Context, grace time.Duration, name string, args ...
 // ahead of registration (R1-CX-F4). Nil in production.
 var beforeTrackGroupHook func(*exec.Cmd)
 
+// ConfinementError marks a pre-user-code lifecycle confinement failure: the
+// child process was created but terminated before executing any user code
+// (e.g. Windows job assign/resume failure). Adapters classify it as a
+// non-consuming start failure (started=false) — FEAT-20260722-002 R0.
+type ConfinementError struct{ Err error }
+
+func (e *ConfinementError) Error() string { return e.Err.Error() }
+func (e *ConfinementError) Unwrap() error { return e.Err }
+
+// startedForResult reports whether the dispatch counts as started for result
+// classification: the process must have been reaped and must not have failed
+// pre-user-code confinement.
+func startedForResult(cmd *exec.Cmd, runErr error) bool {
+	if cmd.ProcessState == nil {
+		return false
+	}
+	var c *ConfinementError
+	return !errors.As(runErr, &c)
+}
+
 func runWithProgress(cmd *exec.Cmd, progress func(state, detail string)) error {
 	if err := cmd.Start(); err != nil {
 		return err
@@ -838,23 +762,18 @@ func runWithProgress(cmd *exec.Cmd, progress func(state, detail string)) error {
 	if beforeTrackGroupHook != nil {
 		beforeTrackGroupHook(cmd)
 	}
-	trackGroup(cmd)
+	if err := trackGroup(cmd); err != nil {
+		// The platform layer already terminated the child pre-user-code;
+		// reap it so no zombie remains, then surface the typed confinement
+		// failure for the non-consuming start-failure path.
+		_ = cmd.Wait()
+		return &ConfinementError{Err: err}
+	}
 	defer releaseGroup(cmd)
 	if progress != nil {
 		progress("running", "reviewer process started")
 	}
 	return cmd.Wait()
-}
-
-// terminatedBySignal reports whether the reaped child died from a signal —
-// the runtime-verified fact behind the UNKNOWN classification rows of the
-// FEAT-20260721-002 precedence table.
-func terminatedBySignal(cmd *exec.Cmd) bool {
-	if cmd.ProcessState == nil {
-		return false
-	}
-	ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
-	return ok && ws.Signaled()
 }
 
 // modelSelection classifies the request kind for provenance.

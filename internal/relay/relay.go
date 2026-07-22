@@ -18,11 +18,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"unicode/utf8"
 
 	"github.com/kyungseo/acrelay/internal/adapter"
 	"github.com/kyungseo/acrelay/internal/kernel"
+	"github.com/kyungseo/acrelay/internal/platform"
 	"github.com/kyungseo/acrelay/internal/review"
 	"github.com/kyungseo/acrelay/internal/store"
 	"github.com/kyungseo/acrelay/internal/subject"
@@ -2253,15 +2253,15 @@ func appendState(canonical string, st *State, header, expectedRev string) error 
 // write and drop each other's state blocks; the CAS in appendState remains as
 // defense in depth against any non-locking writer.
 func withCanonicalLock(canonical string, fn func() error) error {
-	fd, err := os.OpenFile(canonical+".lock", os.O_CREATE|os.O_WRONLY, 0o600)
+	fd, err := platform.OpenPrivateFile(canonical+".lock", os.O_CREATE|os.O_WRONLY)
 	if err != nil {
 		return err
 	}
 	defer fd.Close()
-	if err := syscall.Flock(int(fd.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("canonical lock failed: fail-closed, refusing unserialized mutation: %w", err)
+	if err := platform.LockExclusive(fd); err != nil {
+		return fmt.Errorf("canonical lock failed: %w", err)
 	}
-	defer syscall.Flock(int(fd.Fd()), syscall.LOCK_UN)
+	defer platform.Unlock(fd)
 	return fn()
 }
 

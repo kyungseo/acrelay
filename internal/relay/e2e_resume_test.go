@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/kyungseo/acrelay/internal/adapter"
+	"github.com/kyungseo/acrelay/internal/testenv"
 )
 
 // R2-CX-F3 item 1: a real Claude child returning the resume-not-found
@@ -33,9 +34,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.InstallFakeVendor(t, filepath.Join(bin, "claude"), script)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	target := filepath.Join(dir, "target.go")
