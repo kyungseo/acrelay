@@ -25,12 +25,14 @@ func (ClaudeAdapter) Capability() Capability {
 		Vendor:              "claude",
 		ContractVersion:     "claude-final-envelope-v1",
 		KnownGoodCLIVersion: "2.1.217",
-		EffortEnum:          []string{"low", "medium", "high", "xhigh", "max"},
-		SchemaFlag:          "--json-schema",
-		SupportsResume:      true,
-		ModelObservation:    ObsVerified, // resolved model observable via modelUsage
-		ProgressEvents:      true,        // stream-json surface exists; v1 dispatch uses final envelope
-		IdleTimeoutMode:     "unsupported",
+		// 2026-07-22 restriction spike ran on darwin/arm64 (FEAT-20260722-002).
+		KnownGoodPlatforms: []string{"darwin/arm64"},
+		EffortEnum:         []string{"low", "medium", "high", "xhigh", "max"},
+		SchemaFlag:         "--json-schema",
+		SupportsResume:     true,
+		ModelObservation:   ObsVerified, // resolved model observable via modelUsage
+		ProgressEvents:     true,        // stream-json surface exists; v1 dispatch uses final envelope
+		IdleTimeoutMode:    "unsupported",
 	}
 }
 
@@ -186,7 +188,7 @@ func (p *preparedClaude) Dispatch(ctx context.Context) (*Result, error) {
 	runErr := runWithProgress(cmd, req.Progress)
 
 	res := &Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: exitCode(cmd),
-		Started: cmd.ProcessState != nil, Provenance: p.provenance}
+		Started: startedForResult(cmd, runErr), Provenance: p.provenance}
 	if !res.Started {
 		return res, fmt.Errorf("claude process never started (pre-dispatch failure, no attempt consumed): %v", runErr)
 	}

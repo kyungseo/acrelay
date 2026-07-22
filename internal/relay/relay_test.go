@@ -15,6 +15,7 @@ import (
 
 	"github.com/kyungseo/acrelay/internal/adapter"
 	"github.com/kyungseo/acrelay/internal/kernel"
+	"github.com/kyungseo/acrelay/internal/platform"
 	"github.com/kyungseo/acrelay/internal/review"
 	"github.com/kyungseo/acrelay/internal/store"
 	"github.com/kyungseo/acrelay/internal/subject"
@@ -1249,8 +1250,16 @@ func TestConcurrentFirstReviewBoundBinding(t *testing.T) {
 			if loser.err == nil {
 				t.Fatal("losing concurrent review must fail before dispatch")
 			}
-			if loser.requested != winnerBound && !strings.Contains(loser.err.Error(), "immutable") {
-				t.Fatalf("conflicting loser must receive bound mismatch: %v", loser.err)
+			// Two fail-closed loser outcomes are legitimate depending on the
+			// interleaving: the immutability mismatch (loser re-validated after
+			// the winner's bind append) or the pending-journal duplicate-
+			// execution guard (loser hit the lock while the winner's journal
+			// was already durable). Both refuse the dispatch before a child
+			// starts; neither is a silent pass.
+			if loser.requested != winnerBound &&
+				!strings.Contains(loser.err.Error(), "immutable") &&
+				!strings.Contains(loser.err.Error(), "pending transactions") {
+				t.Fatalf("conflicting loser must fail closed on bound mismatch or pending journal: %v", loser.err)
 			}
 			close(dispatchGate)
 			winner := <-results
@@ -1419,9 +1428,8 @@ func TestR1AppendConflictRecovery(t *testing.T) {
 	if len(recs) != 1 {
 		t.Fatalf("recovery file missing: %v", recs)
 	}
-	fi, _ := os.Stat(recs[0])
-	if fi.Mode().Perm() != 0o600 {
-		t.Fatalf("recovery must be 0600, got %o", fi.Mode().Perm())
+	if err := platform.VerifyPrivateFile(recs[0]); err != nil {
+		t.Fatalf("recovery journal must be private: %v", err)
 	}
 	// duplicate-dispatch guard
 	s.Adapter = fake
@@ -1443,7 +1451,9 @@ func TestR1AppendConflictRecovery(t *testing.T) {
 	}
 	// Replay after append is idempotent cleanup: marker+digest prove the
 	// transaction was already applied, so no second round is appended.
-	os.WriteFile(recs[0], rb, 0o600)
+	if err := platform.WritePrivateFile(recs[0], rb); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := Reconcile(s.Canonical, recs[0]); err != nil {
 		t.Fatalf("already-applied journal must clean up idempotently: %v", err)
 	}
@@ -1671,7 +1681,9 @@ func TestCP2ReconcileSectionLineage(t *testing.T) {
 	if _, err := Reconcile(s.Canonical, recs[0]); err == nil {
 		t.Fatal("recovery with mismatched section lineage must be refused")
 	}
-	os.WriteFile(recs[0], rb, 0o600)
+	if err := platform.WritePrivateFile(recs[0], rb); err != nil {
+		t.Fatal(err)
+	}
 	// 정상 reconcile은 divergence note와 함께 성공
 	st, err := Reconcile(s.Canonical, recs[0])
 	if err != nil {

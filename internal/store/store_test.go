@@ -1,6 +1,8 @@
 package store
 
 import (
+	"github.com/kyungseo/acrelay/internal/platform"
+
 	"bytes"
 	"os"
 	"path/filepath"
@@ -154,9 +156,8 @@ func TestPrivateAtomicReplaceAndRemoveLifecycle(t *testing.T) {
 	if _, err := WritePrivateAtomic(path, []byte("new")); err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("atomic replacement must be owner-only: info=%v err=%v", info, err)
+	if err := platform.VerifyPrivateFile(path); err != nil {
+		t.Fatalf("atomic replacement must be owner-only: %v", err)
 	}
 	if got, _ := os.ReadFile(path); string(got) != "new" {
 		t.Fatalf("atomic replacement wrote %q", got)

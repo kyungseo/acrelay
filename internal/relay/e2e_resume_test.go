@@ -4,17 +4,35 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/kyungseo/acrelay/internal/adapter"
+	"github.com/kyungseo/acrelay/internal/testenv"
 )
 
 // R2-CX-F3 item 1: a real Claude child returning the resume-not-found
 // envelope must produce a consuming FAILED review transaction with the
 // resume-handle-invalid cause — driven through relay.Session.Review with the
 // production ClaudeAdapter, not a FakeAdapter.
+// skipUnlessVendorPlatformVerified skips real-adapter dispatch tests on
+// platforms outside the restriction-evidence set (FEAT-20260722-002 F1): the
+// production gate fail-closes Prepare there by design, and the classification
+// logic under test is platform-independent (covered on the verified lane).
+func skipUnlessVendorPlatformVerified(t *testing.T) {
+	t.Helper()
+	host := runtime.GOOS + "/" + runtime.GOARCH
+	for _, p := range (adapter.ClaudeAdapter{}).Capability().KnownGoodPlatforms {
+		if p == host {
+			return
+		}
+	}
+	t.Skipf("capability: real-adapter dispatch is restriction-gated on %s (verified platforms only)", host)
+}
+
 func TestRealClaudeResumeNotFoundConsumesReviewAttempt(t *testing.T) {
+	skipUnlessVendorPlatformVerified(t)
 	dir := t.TempDir()
 	// A fake `claude` that succeeds on the initial (new-session) dispatch and
 	// returns the resume-not-found error envelope whenever --resume is passed.
@@ -33,9 +51,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.InstallFakeVendor(t, filepath.Join(bin, "claude"), script)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	target := filepath.Join(dir, "target.go")

@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 
+	"github.com/kyungseo/acrelay/internal/platform"
 	"github.com/kyungseo/acrelay/internal/store"
 )
 
@@ -33,15 +33,15 @@ type HandleStore struct {
 // goes through it, so two acrelay processes can never interleave
 // load→mutate→save and drop each other's entries.
 func (h *HandleStore) withExclusiveLock(fn func() error) error {
-	fd, err := os.OpenFile(h.Path+".lock", os.O_CREATE|os.O_WRONLY, 0o600)
+	fd, err := platform.OpenPrivateFile(h.Path+".lock", os.O_CREATE|os.O_WRONLY)
 	if err != nil {
 		return err
 	}
 	defer fd.Close()
-	if err := syscall.Flock(int(fd.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("handle store lock failed: fail-closed, refusing unserialized mutation: %w", err)
+	if err := platform.LockExclusive(fd); err != nil {
+		return fmt.Errorf("handle store lock failed: %w", err)
 	}
-	defer syscall.Flock(int(fd.Fd()), syscall.LOCK_UN)
+	defer platform.Unlock(fd)
 	if afterLockAcquired != nil {
 		afterLockAcquired()
 	}
@@ -71,15 +71,15 @@ const handleFileVersion = 2
 // version-mismatched, or group/other-accessible file fails closed — it is
 // never silently recreated or repaired.
 func (h *HandleStore) load() (*handleFile, error) {
-	st, err := os.Stat(h.Path)
+	_, err := os.Stat(h.Path)
 	if os.IsNotExist(err) {
 		return &handleFile{Version: handleFileVersion, Entries: map[string]handleEntry{}}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	if st.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("handle store %s permission %o exposes group/other: fail-closed", h.Path, st.Mode().Perm())
+	if err := platform.VerifyPrivateFile(h.Path); err != nil {
+		return nil, fmt.Errorf("handle store %s %v: fail-closed", h.Path, err)
 	}
 	b, err := os.ReadFile(h.Path)
 	if err != nil {

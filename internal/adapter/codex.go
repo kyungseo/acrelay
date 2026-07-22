@@ -24,12 +24,14 @@ func (CodexAdapter) Capability() Capability {
 		Vendor:              "codex",
 		ContractVersion:     "codex-jsonl-v1",
 		KnownGoodCLIVersion: "0.144.1",
-		EffortEnum:          []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"},
-		SchemaFlag:          "--output-schema",
-		SupportsResume:      true, // codex exec resume <thread_id>
-		ModelObservation:    ObsAttested,
-		ProgressEvents:      true, // JSONL event stream
-		IdleTimeoutMode:     "event-stream",
+		// FEAT-20260720-002 restriction evidence was observed on darwin/arm64.
+		KnownGoodPlatforms: []string{"darwin/arm64"},
+		EffortEnum:         []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"},
+		SchemaFlag:         "--output-schema",
+		SupportsResume:     true, // codex exec resume <thread_id>
+		ModelObservation:   ObsAttested,
+		ProgressEvents:     true, // JSONL event stream
+		IdleTimeoutMode:    "event-stream",
 	}
 }
 
@@ -307,7 +309,7 @@ func (p *preparedCodex) Dispatch(ctx context.Context) (*Result, error) {
 	runErr := runWithProgress(cmd, req.Progress)
 
 	res := &Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: exitCode(cmd),
-		Started: cmd.ProcessState != nil, Provenance: p.provenance,
+		Started: startedForResult(cmd, runErr), Provenance: p.provenance,
 		Diagnostic: joinDiagnostics(p.provenance.CapabilityProbeDiagnostic, p.provenance.ModelDiagnostic)}
 	if !res.Started {
 		return res, fmt.Errorf("codex process never started (pre-dispatch failure, no attempt consumed): %v", runErr)

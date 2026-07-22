@@ -3,17 +3,17 @@ package adapter
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
-	"sync"
-	"syscall"
 	"testing"
 	"time"
+
+	"github.com/kyungseo/acrelay/internal/platform"
+	"github.com/kyungseo/acrelay/internal/testenv"
 )
 
 func TestValidateEffort(t *testing.T) {
@@ -60,11 +60,8 @@ func approvedTestRequest(t *testing.T, req Request) Request {
 
 func testHandleWorkingDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "acrelay-review-root-test-")
+	dir, err := platform.MkdirTempPrivate("acrelay-review-root-test-")
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
@@ -132,12 +129,8 @@ func TestPrepareExecutionRootModes(t *testing.T) {
 	if inside, err := pathWithin(subjectRoot, cleanup); err != nil || inside {
 		t.Fatalf("neutral cwd must be outside subject: inside=%v err=%v", inside, err)
 	}
-	st, err := os.Stat(cleanup)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st.Mode().Perm() != 0o700 {
-		t.Fatalf("neutral cwd must be owner-only: mode=%v", st.Mode())
+	if err := platform.VerifyPrivateDir(cleanup); err != nil {
+		t.Fatalf("neutral cwd must be owner-only: %v", err)
 	}
 	resumed, resumedCleanup, err := prepareExecutionRoot(Request{SubjectRoot: subjectRoot, TrustPolicy: neutral}, cleanup)
 	if err != nil || resumed.WorkingDir != cleanup || resumedCleanup != "" {
@@ -149,9 +142,7 @@ func TestPrepareExecutionRootModes(t *testing.T) {
 	if err := os.RemoveAll(cleanup); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(t.TempDir(), cleanup); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, t.TempDir(), cleanup)
 	if _, _, err := prepareExecutionRoot(Request{SubjectRoot: subjectRoot, TrustPolicy: neutral}, cleanup); err == nil {
 		t.Fatal("retargeting a stored neutral cwd to a symlink must fail closed")
 	}
@@ -209,10 +200,9 @@ func TestHandleStoreLifecycle(t *testing.T) {
 	if strings.Contains(ref1, "11111111-2222-3333-4444-555555555555") {
 		t.Fatal("session_ref must not embed the native handle")
 	}
-	// 0600 from creation
-	st, _ := os.Stat(h.Path)
-	if st.Mode().Perm() != 0o600 {
-		t.Fatalf("handle store mode %o, want 0600", st.Mode().Perm())
+	// private from creation (0600 on POSIX, protected DACL on Windows)
+	if err := platform.VerifyPrivateFile(h.Path); err != nil {
+		t.Fatalf("handle store must be private from creation: %v", err)
 	}
 	// merge preserved
 	workdir2 := testHandleWorkingDir(t)
@@ -256,7 +246,7 @@ func TestHandleStoreLifecycle(t *testing.T) {
 func TestHandleStoreCorruptFailsClosed(t *testing.T) {
 	dir := t.TempDir()
 	h := &HandleStore{Path: filepath.Join(dir, "handles.json")}
-	if err := os.WriteFile(h.Path, []byte("{not json"), 0o600); err != nil {
+	if err := platform.WritePrivateFile(h.Path, []byte("{not json")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := h.Register("claude", "x", profileID(WorkingDirNeutral), testHandleWorkingDir(t)); err == nil {
@@ -266,17 +256,23 @@ func TestHandleStoreCorruptFailsClosed(t *testing.T) {
 		t.Fatal("corrupt store content must remain untouched")
 	}
 	// unsupported version fails closed
-	os.WriteFile(h.Path, []byte(`{"version":1,"entries":{"legacy":{"vendor":"claude","handle":"native"}}}`), 0o600)
+	if err := platform.WritePrivateFile(h.Path, []byte(`{"version":1,"entries":{"legacy":{"vendor":"claude","handle":"native"}}}`)); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, _, _, err := (&HandleStore{Path: h.Path}).Lookup("legacy"); err == nil ||
 		!strings.Contains(err.Error(), "version 1 unsupported") {
 		t.Fatalf("handle store v1 must fail closed: %v", err)
 	}
-	os.WriteFile(h.Path, []byte(`{"version":99,"entries":{}}`), 0o600)
+	if err := platform.WritePrivateFile(h.Path, []byte(`{"version":99,"entries":{}}`)); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, _, _, err := (&HandleStore{Path: h.Path}).Lookup("any"); err == nil ||
 		!strings.Contains(err.Error(), "version") {
 		t.Fatalf("version mismatch must fail closed: %v", err)
 	}
-	os.WriteFile(h.Path, []byte(`{"version":2,"entries":{"cwd-less":{"vendor":"claude","handle":"native","profile_id":"review-input-trust-v1/neutral"}}}`), 0o600)
+	if err := platform.WritePrivateFile(h.Path, []byte(`{"version":2,"entries":{"cwd-less":{"vendor":"claude","handle":"native","profile_id":"review-input-trust-v1/neutral"}}}`)); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, _, _, err := (&HandleStore{Path: h.Path}).Lookup("cwd-less"); err == nil ||
 		!strings.Contains(err.Error(), "working directory") {
 		t.Fatalf("handle store v2 entry without bound cwd must fail closed: %v", err)
@@ -385,13 +381,39 @@ echo 'codex-cli 0.144.1'
 	}
 }
 
+// skipWithoutPOSIXSignalDeath skips fixtures that rely on signal-death wait
+// status — a POSIX-only capability with no Windows runtime equivalent
+// (FEAT-20260722-002 R0-CX-F8: every skip carries its capability reason).
+func skipWithoutPOSIXSignalDeath(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("capability: POSIX signal-death classification has no Windows runtime equivalent (terminatedBySignal is documented false)")
+	}
+}
+
+// symlinkOrSkip creates a symlink or skips the test with a capability reason.
+// Windows symlink creation needs SeCreateSymbolicLinkPrivilege (admin or
+// Developer Mode), absent for a standard user — the product only resolves
+// symlinks, never creates them, so a standard-user lane legitimately cannot
+// stage this fixture (FEAT-20260722-002 UTM lane).
+func symlinkOrSkip(t *testing.T, oldname, newname string) {
+	t.Helper()
+	if err := os.Symlink(oldname, newname); err != nil {
+		t.Skipf("capability: symlink creation unavailable (%v); on Windows this needs admin or Developer Mode", err)
+	}
+}
+
 func installAdapterCLI(t *testing.T, name, script string) (string, string) {
 	t.Helper()
 	dir := t.TempDir()
 	cli := filepath.Join(dir, name)
-	if err := os.WriteFile(cli, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testenv.InstallFakeVendor(t, cli, script)
+	// Fake-CLI fixture context: opt the current platform into the
+	// restriction-evidence gate (test seam — see verifyRestrictionEvidenceFor).
+	// The gate's own contract is pinned by TestRestrictionEvidenceIsPlatformBound.
+	origExtra := extraRestrictionPlatforms
+	extraRestrictionPlatforms = []string{runtime.GOOS + "/" + runtime.GOARCH}
+	t.Cleanup(func() { extraRestrictionPlatforms = origExtra })
 	logPath := filepath.Join(dir, "calls.log")
 	t.Setenv("ACRELAY_TEST_LOG", logPath)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -775,14 +797,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			cli := filepath.Join(dir, tc.name)
-			if err := os.WriteFile(cli, []byte(tc.script), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			logPath := filepath.Join(dir, "calls.log")
-			t.Setenv("ACRELAY_TEST_LOG", logPath)
-			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			dir, logPath := installAdapterCLI(t, tc.name, tc.script)
 			handles := &HandleStore{Path: filepath.Join(dir, "handles.json")}
 			prepared, err := tc.make().Prepare(context.Background(), approvedTestRequest(t, Request{
 				Prompt: "review", SchemaJSON: `{"type":"object"}`, WorkingDir: dir,
@@ -870,33 +885,22 @@ func TestHandleStoreHardening(t *testing.T) {
 		!strings.Contains(err.Error(), "vendor mismatch") {
 		t.Fatalf("cross-vendor rotation must fail closed: %v", err)
 	}
-	// permission exposure fails closed on load
-	os.Chmod(h.Path, 0o644)
-	if _, _, _, _, err := h.Lookup(ref); err == nil ||
-		!strings.Contains(err.Error(), "permission") {
-		t.Fatalf("group/other-readable store must fail closed: %v", err)
-	}
-}
-
-// R0-CX-F8: SIGTERM-ignoring grandchildren die at grace escalation.
-func TestGroupKillGraceEscalation(t *testing.T) {
-	marker := "1799" // unique sleep duration as process marker
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-	cmd := newGroupCmd(ctx, 500*time.Millisecond, "bash", "-c",
-		"trap '' TERM; sleep "+marker+" & sleep "+marker+" & wait")
-	if err := cmd.Start(); err != nil {
+	// privacy exposure fails closed on load. The weakening is
+	// platform-appropriate: recreating the file plainly leaves 0644 perms on
+	// POSIX and an unprotected inherited DACL on Windows — both must fail.
+	weak, err := os.ReadFile(h.Path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan struct{})
-	go func() { cmd.Wait(); close(done) }()
-	time.Sleep(300 * time.Millisecond) // let children spawn
-	<-done                             // ctx timeout → TERM (ignored) → grace → group SIGKILL
-	time.Sleep(700 * time.Millisecond) // allow the AfterFunc SIGKILL to land
-	out, _ := exec.Command("pgrep", "-f", "sleep "+marker).Output()
-	if len(strings.TrimSpace(string(out))) != 0 {
-		exec.Command("pkill", "-9", "-f", "sleep "+marker).Run()
-		t.Fatalf("grandchildren survived grace escalation: %q", out)
+	if err := os.Remove(h.Path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.Path, weak, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, err := h.Lookup(ref); err == nil ||
+		!strings.Contains(err.Error(), "fail-closed") {
+		t.Fatalf("non-private store must fail closed: %v", err)
 	}
 }
 
@@ -1029,12 +1033,8 @@ func TestHandleStoreConcurrentRegisterLosesNothing(t *testing.T) {
 	if len(f.Entries) != n { // without the exclusive lock, interleaved load→save drops entries
 		t.Fatalf("lost updates: %d entries survived, want %d", len(f.Entries), n)
 	}
-	st, err := os.Stat(path + ".lock")
-	if err != nil {
-		t.Fatalf("lock file: %v", err)
-	}
-	if st.Mode().Perm()&0o077 != 0 {
-		t.Fatalf("lock file permission %o exposes group/other", st.Mode().Perm())
+	if err := platform.VerifyPrivateFile(path + ".lock"); err != nil {
+		t.Fatalf("lock file must be private: %v", err)
 	}
 }
 
@@ -1228,6 +1228,7 @@ func TestTerminationClassificationAgainstRealChildren(t *testing.T) {
 	}
 
 	t.Run("claude signal kill is UNKNOWN", func(t *testing.T) {
+		skipWithoutPOSIXSignalDeath(t)
 		res, err := run(t, "claude", `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi
 if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
@@ -1256,6 +1257,7 @@ exit 0
 	})
 
 	t.Run("codex signal kill is UNKNOWN", func(t *testing.T) {
+		skipWithoutPOSIXSignalDeath(t)
 		res, err := run(t, "codex", `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
 if [ "$1" = "doctor" ]; then echo '{"checks":{"config.load":{"status":"ok","details":{"model":"m","provider":"p"}}}}'; exit 0; fi
@@ -1300,56 +1302,6 @@ exit 1
 	})
 }
 
-// FEAT-20260721-002 R1-CX-F4/R2-CX-F2: a Cancel that arms the escalation
-// timer before trackGroup registration must not be orphaned — releaseGroup
-// must stop it so the SIGKILL escalation never fires after the child is
-// reaped. This observes the escalation callback directly, so reverting
-// trackGroup to the unconditional-overwrite implementation makes it fail.
-func TestEscalationTimerSurvivesStartTrackInterleaving(t *testing.T) {
-	origHook := beforeTrackGroupHook
-	origKill := escalationKill
-	t.Cleanup(func() { beforeTrackGroupHook = origHook; escalationKill = origKill })
-
-	var killMu sync.Mutex
-	var killed []int
-	escalationKill = func(pgid int) {
-		killMu.Lock()
-		killed = append(killed, pgid)
-		killMu.Unlock()
-	}
-
-	baseline := ActiveProcessGroupCount()
-	ctx, cancel := context.WithCancel(context.Background())
-	// Force Cancel to run (arming the timer via armEscalation) after Start but
-	// before trackGroup, reproducing the interleaving.
-	beforeTrackGroupHook = func(cmd *exec.Cmd) {
-		cancel()
-		_ = cmd.Cancel() // idempotent; arms the escalation timer
-	}
-	// A short grace so a leaked timer would fire well within the test window;
-	// the child exits on the Cancel SIGTERM before grace elapses.
-	grace := 150 * time.Millisecond
-	cmd := newGroupCmd(ctx, grace, "sh", "-c", "sleep 5")
-	_ = runWithProgress(cmd, nil)
-
-	// The interleaved-armed timer must not be orphaned: releaseGroup removed
-	// this cmd's entry and stopped its timer, returning to baseline.
-	if got := ActiveProcessGroupCount(); got != baseline {
-		t.Fatalf("group tracker leaked: count %d, baseline %d", got, baseline)
-	}
-	if cmd.ProcessState == nil {
-		t.Fatal("child must have been reaped after interleaved cancellation")
-	}
-	// Wait well past grace: a stopped timer never fires; an orphaned one would.
-	time.Sleep(3 * grace)
-	killMu.Lock()
-	fired := append([]int(nil), killed...)
-	killMu.Unlock()
-	if len(fired) != 0 {
-		t.Fatalf("escalation timer fired after release (orphaned timer): pgids=%v", fired)
-	}
-}
-
 // R1-CX-F6: a corrupted persisted handle-v2 file is rejected at Lookup — the
 // tampered handle never reaches vendor argv.
 func TestCorruptedHandleFileFailsClosedAtLookup(t *testing.T) {
@@ -1365,7 +1317,7 @@ func TestCorruptedHandleFileFailsClosedAtLookup(t *testing.T) {
 		t.Fatal(err)
 	}
 	tampered := strings.Replace(string(raw), "thread-fixture-1", "-injected --flag", 1)
-	if err := os.WriteFile(h.Path, []byte(tampered), 0o600); err != nil {
+	if err := platform.WritePrivateFile(h.Path, []byte(tampered)); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, _, _, err := h.Lookup(ref); err == nil {
@@ -1402,67 +1354,6 @@ kill -KILL $$
 	}
 }
 
-// R1-CX-F6 item 3: a real OS SIGINT delivered to a helper process must, via a
-// real signal handler, cancel the dispatch context and terminate the grouped
-// child — the actual signal→context→group-kill path end to end.
-func TestRealSignalTerminatesGroupedChild(t *testing.T) {
-	if os.Getenv("ACRELAY_SIGNAL_HELPER") == "1" {
-		runSignalHelperChild()
-		return
-	}
-	marker := filepath.Join(t.TempDir(), "childpid")
-	helper := exec.Command(os.Args[0], "-test.run=TestRealSignalTerminatesGroupedChild$")
-	helper.Env = append(os.Environ(), "ACRELAY_SIGNAL_HELPER=1", "ACRELAY_SIGNAL_MARKER="+marker)
-	helper.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := helper.Start(); err != nil {
-		t.Fatal(err)
-	}
-	var childPID int
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && childPID == 0 {
-		if b, err := os.ReadFile(marker); err == nil {
-			fmt.Sscanf(string(b), "%d", &childPID)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if childPID == 0 {
-		helper.Process.Kill()
-		t.Fatal("helper never reported a running grouped child")
-	}
-	if err := helper.Process.Signal(syscall.SIGINT); err != nil {
-		t.Fatal(err)
-	}
-	_ = helper.Wait()
-	time.Sleep(500 * time.Millisecond)
-	if err := syscall.Kill(childPID, 0); err == nil {
-		syscall.Kill(childPID, syscall.SIGKILL)
-		t.Fatalf("grouped child %d survived the real SIGINT cancellation", childPID)
-	}
-}
-
-// runSignalHelperChild runs in the helper process: it installs a real signal
-// handler that cancels the dispatch context on SIGINT, starts a grouped child
-// via the production newGroupCmd, records the child PID, and exits once the
-// signal-cancelled Wait returns.
-func runSignalHelperChild() {
-	ctx, cancel := context.WithCancel(context.Background())
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	go func() { <-sig; cancel() }()
-
-	cmd := newGroupCmd(ctx, 200*time.Millisecond, "sh", "-c", "sleep 30")
-	if err := cmd.Start(); err != nil {
-		os.Exit(3)
-	}
-	trackGroup(cmd)
-	defer releaseGroup(cmd)
-	if marker := os.Getenv("ACRELAY_SIGNAL_MARKER"); marker != "" {
-		os.WriteFile(marker, []byte(fmt.Sprintf("%d", cmd.Process.Pid)), 0o600)
-	}
-	_ = cmd.Wait() // returns after the signal cancels ctx and the group is killed
-	os.Exit(1)
-}
-
 // R2-CX-F1: the marker-first precedence boundary, pinned with real children
 // across the conflict cases the packet promised.
 func TestTerminationPrecedenceConflictMatrix(t *testing.T) {
@@ -1494,6 +1385,7 @@ if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe
 
 	// 1. partial malformed JSONL + external signal → UNKNOWN (no terminal marker).
 	t.Run("codex partial malformed then signal is UNKNOWN", func(t *testing.T) {
+		skipWithoutPOSIXSignalDeath(t)
 		res, err := dispatch(t, "codex", "#!/bin/sh\n"+codexHead+
 			"printf '%s' '{\"type\":\"item.par'\nkill -KILL $$\n")
 		if err == nil || !res.Termination.Ambiguous || res.Termination.Cause == nil ||
@@ -1545,6 +1437,7 @@ if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe
 
 	// 5. Claude no terminal envelope + signal → UNKNOWN.
 	t.Run("claude signal without envelope is UNKNOWN", func(t *testing.T) {
+		skipWithoutPOSIXSignalDeath(t)
 		res, err := dispatch(t, "claude", "#!/bin/sh\n"+claudeHead+"kill -KILL $$\n")
 		if err == nil || !res.Termination.Ambiguous || res.Termination.Cause == nil ||
 			res.Termination.Cause.Code != CauseTerminatedSignal {

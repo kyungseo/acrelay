@@ -16,11 +16,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/kyungseo/acrelay/internal/adapter"
 	"github.com/kyungseo/acrelay/internal/kernel"
+	"github.com/kyungseo/acrelay/internal/platform"
 	"github.com/kyungseo/acrelay/internal/relay"
 	"github.com/kyungseo/acrelay/internal/review"
 	"github.com/kyungseo/acrelay/internal/subject"
@@ -54,21 +54,31 @@ func dispatchSignalContext(parent context.Context, signals <-chan os.Signal, for
 
 func newDispatchContext() (context.Context, context.CancelFunc) {
 	signals := make(chan os.Signal, 2)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(signals, platform.InterruptSignals()...)
 	return dispatchSignalContext(context.Background(), signals, func() {
 		fmt.Fprintln(os.Stderr, "second signal: child groups force-killed; reconcile the pending journal before further mutation")
 		os.Exit(130)
 	})
 }
 
-func defaultHandles() string {
+// resolveHandles returns the handle store path. An explicit -handles value
+// is used as-is (private verification still happens in the store); the
+// default resolution fails closed — home or private-directory failure is a
+// preflight error, never a silent cwd fallback that could lose the
+// persisted reviewer binding (R1-CX-F3).
+func resolveHandles(explicit string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ".acrelay-handles.json"
+		return "", fmt.Errorf("default handle store unavailable (no user home): pass -handles explicitly: %w", err)
 	}
 	dir := filepath.Join(home, ".acrelay")
-	os.MkdirAll(dir, 0o700)
-	return filepath.Join(dir, "handles.json")
+	if err := platform.MkdirPrivate(dir); err != nil {
+		return "", fmt.Errorf("default handle store directory %s is not usable as private storage: fix it or pass -handles explicitly: %w", dir, err)
+	}
+	return filepath.Join(dir, "handles.json"), nil
 }
 
 func adapterFor(name string) (adapter.Adapter, error) {
@@ -220,7 +230,7 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 		model := fs.String("model", "", "explicit model (default: platform default)")
 		effort := fs.String("effort", "", "explicit effort (default: omitted, no flag sent)")
 		roundBound := fs.String("round-bound", "", "objective formal round bound 1..5 (first review default: 3)")
-		handles := fs.String("handles", defaultHandles(), "session handle store path")
+		handles := fs.String("handles", "", "session handle store path (default: ~/.acrelay/handles.json, fail-closed)")
 		workdir := fs.String("workdir", "", "reviewer cwd (default: private neutral temp root; in-target requires init approval)")
 		resetMode := fs.String("session-reset", "", "second-opinion|context-reset|resume-failure|unrelated")
 		resetReason := fs.String("session-reset-reason", "", "reason for the session reset")
@@ -247,8 +257,12 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 		if err != nil {
 			fail(err)
 		}
+		handlesPath, err := resolveHandles(*handles)
+		if err != nil {
+			fail(err)
+		}
 		s := &relay.Session{
-			Adapter: a, Handles: &adapter.HandleStore{Path: *handles}, Canonical: *canonical,
+			Adapter: a, Handles: &adapter.HandleStore{Path: handlesPath}, Canonical: *canonical,
 			FormalRoundBound: bound,
 		}
 		if *resetMode != "" || *resetReason != "" {
@@ -411,7 +425,7 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 		reviewer := fs.String("reviewer", "", "claude|codex (confirmation is reviewer-judged)")
 		model := fs.String("model", "", "explicit model")
 		effort := fs.String("effort", "", "explicit effort")
-		handles := fs.String("handles", defaultHandles(), "session handle store path")
+		handles := fs.String("handles", "", "session handle store path (default: ~/.acrelay/handles.json, fail-closed)")
 		workdir := fs.String("workdir", "", "reviewer cwd (default: objective trust profile mode)")
 		fs.Parse(args)
 		split := func(v string) []string {
@@ -440,7 +454,11 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 			if err != nil {
 				fail(err)
 			}
-			cSess := &relay.Session{Adapter: a, Handles: &adapter.HandleStore{Path: *handles}, Canonical: *canonical}
+			handlesPath, err := resolveHandles(*handles)
+			if err != nil {
+				fail(err)
+			}
+			cSess := &relay.Session{Adapter: a, Handles: &adapter.HandleStore{Path: handlesPath}, Canonical: *canonical}
 			dispatchCtx, cancelDispatch := newDispatchContext()
 			defer cancelDispatch()
 			st, done, err := cSess.ConfirmWithReviewer(dispatchCtx, *round, *expected, split(*submit), *delta,

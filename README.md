@@ -2,9 +2,11 @@
 
 Portable agent collaboration relay — v1 reference implementation.
 
-`acrelay` is a working identifier, not a public product name. Contract SSoT:
-Toolstead `DR-811` (Agent Collab v1 Feasibility Contract And Session Continuity),
-`DR-812` (Declared Authority Model), and `DR-813` (Durable Dispatch Transaction).
+`acrelay` is a working identifier, not a public product name. The behavioral
+contracts referenced throughout this document — session continuity, the
+declared authority model, and the durable dispatch transaction — are stated
+in full in this README and enforced by the runtime; this document is the
+self-contained public statement of those contracts.
 
 ## Layout
 
@@ -33,16 +35,22 @@ Toolstead `DR-811` (Agent Collab v1 Feasibility Contract And Session Continuity)
 The canonical Markdown record preserves raw reviewer output including
 provenance. Keep it in private local storage outside any shared, synced, or
 published boundary. There is no share/export path in v1 — copying the raw
-canonical into a shareable artifact requires explicit opt-in per DR-811, and
+canonical into a shareable artifact requires explicit owner opt-in, and
 a redacted-export tool is a release-gate decision. The session handle store
-(`~/.acrelay/handles.json`) is 0600 and never leaves the machine. Handle store
+(`~/.acrelay/handles.json`) is private storage — 0600 on POSIX, a
+creation-time protected current-user-only DACL on Windows — and never leaves
+the machine. Handle store
 v2 binds vendor, native handle, trust-profile identity, and the reviewer cwd;
 v1 stores and profile-less/cwd-less entries fail closed. A neutral cwd stays
 owner-only and is reused for that handle because vendor resume lookup can be
 cwd-scoped; deleting the handle removes the acrelay-owned neutral root. Every
 canonical and handle-store mutation is
-serialized across processes by an advisory `flock` on a sidecar lock file, so
-cooperating acrelay invocations do not lose each other's updates (advisory locks bind only lock-taking processes and depend on filesystem flock support).
+serialized across processes by an exclusive lock on a sidecar lock file —
+POSIX uses an advisory `flock`; Windows uses a `LockFileEx` fixed byte range
+(cooperative serialization, not flock equivalence) — so cooperating acrelay
+invocations do not lose each other's updates. Either lock binds only
+lock-taking processes and depends on local-filesystem support; a
+non-cooperating writer is stopped by the store revision guard.
 
 Every reviewer child start is preceded by a 0600 private dispatch journal.
 While a journal is pending, the same canonical rejects every mutator except
@@ -93,14 +101,52 @@ Persisted native resume handles are validated against vendor-safe formats
 before any child start; a malformed handle fails closed without consuming an
 attempt and is never silently replaced by a new session. A vendor-side
 resume rejection after child start remains a consuming `FAILED` with the
-`resume-handle-invalid` cause (AR-1). The first parent SIGINT/SIGTERM
-cancels the dispatch gracefully (group SIGTERM, then SIGKILL after the grace
-window) and classifies `canceled.parent-signal`; a second signal force-kills
-the tracked child groups and exits. A parent killed with SIGKILL cannot run
+`resume-handle-invalid` cause (AR-1). On POSIX, the first parent
+SIGINT/SIGTERM cancels the dispatch gracefully (group SIGTERM, then SIGKILL
+after the grace window) and classifies `canceled.parent-signal`; a second
+signal force-kills the tracked child groups and exits. On Windows only
+console interrupts (`os.Interrupt`) are deliverable and cancellation is an
+immediate job termination with no graceful stage. A parent killed with SIGKILL cannot run
 cleanup: the child group may orphan and the durable journal remains the
 authoritative recovery path. The POSIX pid-reuse window around group kill
 and the deterministic suite's inability to observe real vendor error
 phrasing are documented residual risks.
+
+## Platform Support
+
+Support is stated per surface and per recorded lane — never as a single
+"Windows supported" claim, and lanes are never aggregated.
+
+- macOS arm64: core runtime verified (local + hosted CI lane green);
+  real-vendor dispatch verified on the recorded local darwin/arm64 vendor
+  tuples (recorded restriction evidence — no vendor dispatch runs in CI).
+  File and parent-directory sync remain best-effort power-loss hardening; no
+  power-loss durability claim is made on any platform.
+- Linux amd64: core runtime verified (GitHub-hosted CI lane green, race
+  included). Real vendor dispatch stays unsupported pending a platform-
+  specific restriction spike.
+- Windows Server x64: core runtime verified (GitHub-hosted `windows-latest`
+  lane green, race included). Real vendor dispatch stays unsupported pending
+  a platform-specific restriction spike.
+- Windows 11 ARM64: core runtime verified on an owner-operated UTM guest
+  (guest-local NTFS, standard user, deterministic suite and Windows
+  capability fixtures; no race claim on this lane). Real vendor dispatch
+  stays unsupported pending a platform-specific restriction spike.
+
+Real-vendor dispatch for Linux, Windows, and any vendor+version+GOOS+GOARCH
+tuple without recorded restriction evidence is fail-closed; only the verified
+darwin/arm64 tuples are supported. Lane evidence is never aggregated across
+platforms.
+
+Platform behavior differences are recorded, not equalized: Windows
+cancellation is an immediate Job Object termination (no SIGTERM-like graceful
+stage); an external TerminateProcess is not distinguishable from an ordinary
+nonzero exit, so the POSIX signal-death UNKNOWN classification has no Windows
+runtime equivalent; Windows exclusive locking is cooperative serialization
+over a fixed byte range (not flock equivalence); private storage on Windows
+is a creation-time protected DACL whose only explicit allow ACE is the
+current user SID — ordinary cross-user access denial is the whole privacy
+claim, and privileged-administrator takeover is not defended against.
 
 ## Reviewer Topology And Independence Claims
 
@@ -434,10 +480,13 @@ new bound independently. Attempt and confirmation limits are unchanged.
 Claude Code and Codex CLI versions are observed on every invocation and stored
 in provenance. General transport compatibility remains capability-first, but
 the security-critical restriction profile is bound to positive behavioral
-evidence for an exact CLI version. The current verified references are Claude
-Code `2.1.217` (re-verified 2026-07-22 restriction spike) and Codex CLI `0.144.1`. A different or unobservable version
-fails before child start and requires a new owner-reviewed capability spike;
-there is no unrestricted fallback.
+evidence for an exact CLI version AND an exact GOOS/GOARCH (evidence is never
+promoted across platforms). The current verified references are Claude Code
+`2.1.217` and Codex CLI `0.144.1`, both on `darwin/arm64` only (2026-07-22
+restriction spike). A different or unobservable version — or any platform
+absent from the verified list — fails before child start and requires a new
+owner-reviewed, platform-specific capability spike; there is no unrestricted
+fallback.
 
 Required help tokens are probed on every invocation as an advisory diagnostic.
 Missing or reformatted help text remains diagnostic-only; help presence alone
@@ -454,19 +503,6 @@ the terminal envelope's `modelUsage` as verified. Codex uses the bounded
 effective-config observation; every other doctor field and the raw output are
 discarded. Doctor failure, timeout, or malformed output records an empty,
 `unverified` model observation and never blocks dispatch.
-
-## Supported Platforms
-
-- **macOS** — runtime-verified in this cycle: process-group termination of the
-  reviewer child tree, owner-only permissions, and atomic file replace. File
-  and parent-directory sync are best-effort power-loss hardening; no
-  `F_FULLFSYNC` or power-loss durability claim is made.
-- **Linux** — builds and shares the POSIX process-group termination path, but
-  its runtime (termination, permissions, atomic replace, timeout grace) is not
-  yet verified in this cycle; treat as unverified until it is.
-- **Windows** — unsupported. The child-process lifecycle boundary uses POSIX
-  process groups; the Windows Job Object equivalent is a follow-up port and the
-  package does not build for `GOOS=windows`.
 
 ## Install / Verify
 

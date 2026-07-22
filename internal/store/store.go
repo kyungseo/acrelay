@@ -15,6 +15,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"github.com/kyungseo/acrelay/internal/platform"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -175,7 +176,7 @@ func WritePrivateAtomic(path string, data []byte) (diagnostic string, err error)
 	}
 	tmp := filepath.Join(filepath.Dir(path),
 		fmt.Sprintf(".%s.tmp-%d-%s", filepath.Base(path), os.Getpid(), hex.EncodeToString(suffix)))
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	f, err := platform.OpenPrivateFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY)
 	if err != nil {
 		return "", err
 	}
