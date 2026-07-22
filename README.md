@@ -117,18 +117,26 @@ phrasing are documented residual risks.
 Support is stated per surface and per recorded lane — never as a single
 "Windows supported" claim, and lanes are never aggregated.
 
-- macOS arm64: core runtime and real vendor adapters locally verified
-  (restriction evidence above); the hosted CI lane is planned / not yet run.
+- macOS arm64: core runtime verified (local + hosted CI lane green);
+  real-vendor dispatch verified on the recorded local darwin/arm64 vendor
+  tuples (recorded restriction evidence — no vendor dispatch runs in CI).
   File and parent-directory sync remain best-effort power-loss hardening; no
   power-loss durability claim is made on any platform.
-- Linux amd64: core runtime planned / not yet verified (GitHub-hosted CI
-  lane; becomes verified when that lane is green). Real vendor dispatch stays
-  unsupported pending a platform-specific restriction spike.
-- Windows Server x64: core runtime planned / not yet verified (GitHub-hosted
-  `windows-latest` lane). Real vendor dispatch stays unsupported pending a
-  platform-specific restriction spike.
-- Windows 11 ARM64: core runtime planned / not yet verified (owner-operated
-  UTM manual lane, guest-local NTFS; no race claim on this lane).
+- Linux amd64: core runtime verified (GitHub-hosted CI lane green, race
+  included). Real vendor dispatch stays unsupported pending a platform-
+  specific restriction spike.
+- Windows Server x64: core runtime verified (GitHub-hosted `windows-latest`
+  lane green, race included). Real vendor dispatch stays unsupported pending
+  a platform-specific restriction spike.
+- Windows 11 ARM64: core runtime verified on an owner-operated UTM guest
+  (guest-local NTFS, standard user, deterministic suite and Windows
+  capability fixtures; no race claim on this lane). Real vendor dispatch
+  stays unsupported pending a platform-specific restriction spike.
+
+Real-vendor dispatch for Linux, Windows, and any vendor+version+GOOS+GOARCH
+tuple without recorded restriction evidence is fail-closed; only the verified
+darwin/arm64 tuples are supported. Lane evidence is never aggregated across
+platforms.
 
 Platform behavior differences are recorded, not equalized: Windows
 cancellation is an immediate Job Object termination (no SIGTERM-like graceful
