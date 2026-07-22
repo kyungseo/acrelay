@@ -60,11 +60,8 @@ func approvedTestRequest(t *testing.T, req Request) Request {
 
 func testHandleWorkingDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "acrelay-review-root-test-")
+	dir, err := platform.MkdirTempPrivate("acrelay-review-root-test-")
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
@@ -790,14 +787,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			cli := filepath.Join(dir, tc.name)
-			if err := os.WriteFile(cli, []byte(tc.script), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			logPath := filepath.Join(dir, "calls.log")
-			t.Setenv("ACRELAY_TEST_LOG", logPath)
-			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			dir, logPath := installAdapterCLI(t, tc.name, tc.script)
 			handles := &HandleStore{Path: filepath.Join(dir, "handles.json")}
 			prepared, err := tc.make().Prepare(context.Background(), approvedTestRequest(t, Request{
 				Prompt: "review", SchemaJSON: `{"type":"object"}`, WorkingDir: dir,
@@ -1407,6 +1397,7 @@ if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe
 
 	// 1. partial malformed JSONL + external signal → UNKNOWN (no terminal marker).
 	t.Run("codex partial malformed then signal is UNKNOWN", func(t *testing.T) {
+		skipWithoutPOSIXSignalDeath(t)
 		res, err := dispatch(t, "codex", "#!/bin/sh\n"+codexHead+
 			"printf '%s' '{\"type\":\"item.par'\nkill -KILL $$\n")
 		if err == nil || !res.Termination.Ambiguous || res.Termination.Cause == nil ||
@@ -1458,6 +1449,7 @@ if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe
 
 	// 5. Claude no terminal envelope + signal → UNKNOWN.
 	t.Run("claude signal without envelope is UNKNOWN", func(t *testing.T) {
+		skipWithoutPOSIXSignalDeath(t)
 		res, err := dispatch(t, "claude", "#!/bin/sh\n"+claudeHead+"kill -KILL $$\n")
 		if err == nil || !res.Termination.Ambiguous || res.Termination.Cause == nil ||
 			res.Termination.Cause.Code != CauseTerminatedSignal {

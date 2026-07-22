@@ -93,11 +93,15 @@ func TestWindowsPrivateDACLShapes(t *testing.T) {
 	})
 
 	t.Run("non-private SDDL shapes rejected", func(t *testing.T) {
+		// Note: an "unprotected DACL via explicit SDDL at creation" case is
+		// deliberately absent — CreateFile applies an explicit DACL as-is and
+		// the resulting control bits are not a reliable cross-image fixture.
+		// The unprotected/inherited rejection is pinned deterministically by
+		// the plain-created-file subtest above.
 		cases := []struct {
 			name string
 			sddl string
 		}{
-			{"unprotected dacl", fmt.Sprintf("D:(A;;FA;;;%s)", me)},
 			{"other principal allow", "D:P(A;;FA;;;WD)"},
 			// Any non-basic-allow ACE type exercises the same v1 rejection
 			// branch as object/callback/unknown types.

@@ -250,7 +250,7 @@ func verifyPrivateHandle(h windows.Handle) error {
 		return fmt.Errorf("no DACL present (unrestricted object): fail-closed")
 	}
 	if control&windows.SE_DACL_PROTECTED == 0 {
-		return fmt.Errorf("DACL is not protected (inheritance not blocked): fail-closed")
+		return fmt.Errorf("DACL is not protected (inheritance not blocked; control=%#x): fail-closed", control)
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil || dacl == nil {
