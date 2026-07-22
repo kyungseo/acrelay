@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kyungseo/acrelay/internal/platform"
 	"github.com/kyungseo/acrelay/internal/testenv"
 )
 
@@ -131,12 +132,8 @@ func TestPrepareExecutionRootModes(t *testing.T) {
 	if inside, err := pathWithin(subjectRoot, cleanup); err != nil || inside {
 		t.Fatalf("neutral cwd must be outside subject: inside=%v err=%v", inside, err)
 	}
-	st, err := os.Stat(cleanup)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st.Mode().Perm() != 0o700 {
-		t.Fatalf("neutral cwd must be owner-only: mode=%v", st.Mode())
+	if err := platform.VerifyPrivateDir(cleanup); err != nil {
+		t.Fatalf("neutral cwd must be owner-only: %v", err)
 	}
 	resumed, resumedCleanup, err := prepareExecutionRoot(Request{SubjectRoot: subjectRoot, TrustPolicy: neutral}, cleanup)
 	if err != nil || resumed.WorkingDir != cleanup || resumedCleanup != "" {
@@ -208,10 +205,9 @@ func TestHandleStoreLifecycle(t *testing.T) {
 	if strings.Contains(ref1, "11111111-2222-3333-4444-555555555555") {
 		t.Fatal("session_ref must not embed the native handle")
 	}
-	// 0600 from creation
-	st, _ := os.Stat(h.Path)
-	if st.Mode().Perm() != 0o600 {
-		t.Fatalf("handle store mode %o, want 0600", st.Mode().Perm())
+	// private from creation (0600 on POSIX, protected DACL on Windows)
+	if err := platform.VerifyPrivateFile(h.Path); err != nil {
+		t.Fatalf("handle store must be private from creation: %v", err)
 	}
 	// merge preserved
 	workdir2 := testHandleWorkingDir(t)
@@ -255,7 +251,7 @@ func TestHandleStoreLifecycle(t *testing.T) {
 func TestHandleStoreCorruptFailsClosed(t *testing.T) {
 	dir := t.TempDir()
 	h := &HandleStore{Path: filepath.Join(dir, "handles.json")}
-	if err := os.WriteFile(h.Path, []byte("{not json"), 0o600); err != nil {
+	if err := platform.WritePrivateFile(h.Path, []byte("{not json")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := h.Register("claude", "x", profileID(WorkingDirNeutral), testHandleWorkingDir(t)); err == nil {
@@ -265,17 +261,23 @@ func TestHandleStoreCorruptFailsClosed(t *testing.T) {
 		t.Fatal("corrupt store content must remain untouched")
 	}
 	// unsupported version fails closed
-	os.WriteFile(h.Path, []byte(`{"version":1,"entries":{"legacy":{"vendor":"claude","handle":"native"}}}`), 0o600)
+	if err := platform.WritePrivateFile(h.Path, []byte(`{"version":1,"entries":{"legacy":{"vendor":"claude","handle":"native"}}}`)); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, _, _, err := (&HandleStore{Path: h.Path}).Lookup("legacy"); err == nil ||
 		!strings.Contains(err.Error(), "version 1 unsupported") {
 		t.Fatalf("handle store v1 must fail closed: %v", err)
 	}
-	os.WriteFile(h.Path, []byte(`{"version":99,"entries":{}}`), 0o600)
+	if err := platform.WritePrivateFile(h.Path, []byte(`{"version":99,"entries":{}}`)); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, _, _, err := (&HandleStore{Path: h.Path}).Lookup("any"); err == nil ||
 		!strings.Contains(err.Error(), "version") {
 		t.Fatalf("version mismatch must fail closed: %v", err)
 	}
-	os.WriteFile(h.Path, []byte(`{"version":2,"entries":{"cwd-less":{"vendor":"claude","handle":"native","profile_id":"review-input-trust-v1/neutral"}}}`), 0o600)
+	if err := platform.WritePrivateFile(h.Path, []byte(`{"version":2,"entries":{"cwd-less":{"vendor":"claude","handle":"native","profile_id":"review-input-trust-v1/neutral"}}}`)); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, _, _, err := (&HandleStore{Path: h.Path}).Lookup("cwd-less"); err == nil ||
 		!strings.Contains(err.Error(), "working directory") {
 		t.Fatalf("handle store v2 entry without bound cwd must fail closed: %v", err)
@@ -399,6 +401,12 @@ func installAdapterCLI(t *testing.T, name, script string) (string, string) {
 	dir := t.TempDir()
 	cli := filepath.Join(dir, name)
 	testenv.InstallFakeVendor(t, cli, script)
+	// Fake-CLI fixture context: opt the current platform into the
+	// restriction-evidence gate (test seam — see verifyRestrictionEvidenceFor).
+	// The gate's own contract is pinned by TestRestrictionEvidenceIsPlatformBound.
+	origExtra := extraRestrictionPlatforms
+	extraRestrictionPlatforms = []string{runtime.GOOS + "/" + runtime.GOARCH}
+	t.Cleanup(func() { extraRestrictionPlatforms = origExtra })
 	logPath := filepath.Join(dir, "calls.log")
 	t.Setenv("ACRELAY_TEST_LOG", logPath)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -877,11 +885,22 @@ func TestHandleStoreHardening(t *testing.T) {
 		!strings.Contains(err.Error(), "vendor mismatch") {
 		t.Fatalf("cross-vendor rotation must fail closed: %v", err)
 	}
-	// permission exposure fails closed on load
-	os.Chmod(h.Path, 0o644)
+	// privacy exposure fails closed on load. The weakening is
+	// platform-appropriate: recreating the file plainly leaves 0644 perms on
+	// POSIX and an unprotected inherited DACL on Windows — both must fail.
+	weak, err := os.ReadFile(h.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(h.Path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.Path, weak, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, _, _, err := h.Lookup(ref); err == nil ||
-		!strings.Contains(err.Error(), "permission") {
-		t.Fatalf("group/other-readable store must fail closed: %v", err)
+		!strings.Contains(err.Error(), "fail-closed") {
+		t.Fatalf("non-private store must fail closed: %v", err)
 	}
 }
 
@@ -1036,12 +1055,8 @@ func TestHandleStoreConcurrentRegisterLosesNothing(t *testing.T) {
 	if len(f.Entries) != n { // without the exclusive lock, interleaved load→save drops entries
 		t.Fatalf("lost updates: %d entries survived, want %d", len(f.Entries), n)
 	}
-	st, err := os.Stat(path + ".lock")
-	if err != nil {
-		t.Fatalf("lock file: %v", err)
-	}
-	if st.Mode().Perm()&0o077 != 0 {
-		t.Fatalf("lock file permission %o exposes group/other", st.Mode().Perm())
+	if err := platform.VerifyPrivateFile(path + ".lock"); err != nil {
+		t.Fatalf("lock file must be private: %v", err)
 	}
 }
 
@@ -1324,7 +1339,7 @@ func TestCorruptedHandleFileFailsClosedAtLookup(t *testing.T) {
 		t.Fatal(err)
 	}
 	tampered := strings.Replace(string(raw), "thread-fixture-1", "-injected --flag", 1)
-	if err := os.WriteFile(h.Path, []byte(tampered), 0o600); err != nil {
+	if err := platform.WritePrivateFile(h.Path, []byte(tampered)); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, _, _, err := h.Lookup(ref); err == nil {

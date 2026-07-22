@@ -15,6 +15,7 @@ import (
 
 	"github.com/kyungseo/acrelay/internal/adapter"
 	"github.com/kyungseo/acrelay/internal/kernel"
+	"github.com/kyungseo/acrelay/internal/platform"
 	"github.com/kyungseo/acrelay/internal/review"
 	"github.com/kyungseo/acrelay/internal/store"
 	"github.com/kyungseo/acrelay/internal/subject"
@@ -1419,9 +1420,8 @@ func TestR1AppendConflictRecovery(t *testing.T) {
 	if len(recs) != 1 {
 		t.Fatalf("recovery file missing: %v", recs)
 	}
-	fi, _ := os.Stat(recs[0])
-	if fi.Mode().Perm() != 0o600 {
-		t.Fatalf("recovery must be 0600, got %o", fi.Mode().Perm())
+	if err := platform.VerifyPrivateFile(recs[0]); err != nil {
+		t.Fatalf("recovery journal must be private: %v", err)
 	}
 	// duplicate-dispatch guard
 	s.Adapter = fake

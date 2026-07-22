@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -163,6 +164,9 @@ func TestDispatchSignalContextNormalCompletion(t *testing.T) {
 func TestRealCLIInitHostSubagentFailsClosed(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "acrelay")
+	if runtime.GOOS == "windows" {
+		bin += ".exe" // Windows requires the executable extension
+	}
 	build := exec.Command("go", "build", "-o", bin, ".")
 	build.Dir = mustModuleDir(t)
 	if out, err := build.CombinedOutput(); err != nil {

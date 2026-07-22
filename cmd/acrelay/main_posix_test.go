@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -21,6 +22,16 @@ import (
 // record an UNKNOWN round with the canceled.parent-signal cause — proving the
 // real main wiring, ErrParentSignal path, and durable classification.
 func TestRealCLIParentSignalRecordsUnknown(t *testing.T) {
+	host := runtime.GOOS + "/" + runtime.GOARCH
+	verified := false
+	for _, p := range (adapter.ClaudeAdapter{}).Capability().KnownGoodPlatforms {
+		if p == host {
+			verified = true
+		}
+	}
+	if !verified {
+		t.Skipf("capability: real-adapter dispatch is restriction-gated on %s (verified platforms only)", host)
+	}
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "acrelay")
 	build := exec.Command("go", "build", "-o", bin, ".")

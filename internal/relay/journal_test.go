@@ -11,6 +11,7 @@ import (
 
 	"github.com/kyungseo/acrelay/internal/adapter"
 	"github.com/kyungseo/acrelay/internal/kernel"
+	"github.com/kyungseo/acrelay/internal/platform"
 	"github.com/kyungseo/acrelay/internal/review"
 	"github.com/kyungseo/acrelay/internal/store"
 )
@@ -181,9 +182,8 @@ func createPreparedJournalVendorForTest(t *testing.T, s *Session, kind string, r
 func TestDR813PreparedCrashReconcilesUnknownIdempotently(t *testing.T) {
 	s, _, _ := newSession(t, nil)
 	journal := createPreparedJournalForTest(t, s, "review", 0)
-	info, err := os.Stat(journal)
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("prepared journal must exist as 0600: info=%v err=%v", info, err)
+	if err := platform.VerifyPrivateFile(journal); err != nil {
+		t.Fatalf("prepared journal must exist as private storage: %v", err)
 	}
 
 	// Simulate crash after canonical append but before journal cleanup during
@@ -270,7 +270,7 @@ func TestDR813PendingJournalGuardsEveryMutator(t *testing.T) {
 func TestDR813CorruptJournalRequiresDeclaredAbandon(t *testing.T) {
 	s, _, _ := newSession(t, nil)
 	journal := createPreparedJournalForTest(t, s, "review", 0)
-	if err := os.WriteFile(journal, []byte("{corrupt"), 0o600); err != nil {
+	if err := platform.WritePrivateFile(journal, []byte("{corrupt")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Reconcile(s.Canonical, journal); err == nil {

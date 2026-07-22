@@ -180,6 +180,8 @@ func PreflightVersion(cap Capability, observed string) error {
 	return nil
 }
 
+var extraRestrictionPlatforms []string // test-only; see verifyRestrictionEvidenceFor
+
 // VerifyRestrictionEvidence binds security-critical restriction semantics to
 // the exact CLI version AND the exact GOOS/GOARCH exercised by the positive
 // behavioral spike (FEAT-20260722-002 R0-CX-F1): evidence observed on one
@@ -202,6 +204,16 @@ func verifyRestrictionEvidenceFor(cap Capability, observed, goos, goarch string)
 	}
 	host := goos + "/" + goarch
 	for _, p := range cap.KnownGoodPlatforms {
+		if p == host {
+			return nil
+		}
+	}
+	// extraRestrictionPlatforms is a package-private TEST seam: fixture
+	// suites that exercise the real adapters against installed FAKE vendor
+	// CLIs opt the current platform in so adapter parse/dispatch logic stays
+	// covered on every CI lane. Production code never touches it — real
+	// vendor dispatch remains gated by KnownGoodPlatforms alone.
+	for _, p := range extraRestrictionPlatforms {
 		if p == host {
 			return nil
 		}

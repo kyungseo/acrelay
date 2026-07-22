@@ -197,7 +197,12 @@ func normalizeLogical(raw string) (string, error) {
 	if raw == "" || !utf8.ValidString(raw) || strings.IndexByte(raw, 0) >= 0 {
 		return "", fmt.Errorf("logical path must be non-empty valid UTF-8 without NUL: fail-closed")
 	}
-	if filepath.IsAbs(raw) || filepath.VolumeName(raw) != "" {
+	// Logical paths are slash-normalized cross-platform identifiers: a
+	// leading slash or backslash is absolute on SOME platform and must be
+	// rejected on EVERY platform (a Windows host must not accept "/a.txt"
+	// just because filepath.IsAbs says false there — FEAT-20260722-002 CI).
+	if strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "\\") ||
+		filepath.IsAbs(raw) || filepath.VolumeName(raw) != "" {
 		return "", fmt.Errorf("logical path must be root-relative: fail-closed")
 	}
 	clean := filepath.Clean(filepath.FromSlash(raw))
