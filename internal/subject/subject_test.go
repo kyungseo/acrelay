@@ -251,7 +251,12 @@ func TestSymlinkChainIdentityIsRecorded(t *testing.T) {
 func TestInvalidSelectorsAndPersistedTamperingFailClosed(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "a.txt"), "a")
-	for _, bad := range []string{"../a.txt", "/a.txt", "bad\x00path", string([]byte{0xff})} {
+	// TR-CX-F1 regression table: rejection must be host-invariant — the same
+	// raw identifier fails closed identically on macOS, Linux, and Windows.
+	for _, bad := range []string{
+		"../a.txt", "/a.txt", "bad\x00path", string([]byte{0xff}),
+		"\\a.txt", "a\\b.txt", "a\\..\\secret", "C:secret", "C:/secret",
+	} {
 		_, err := Normalize(Spec{Kind: KindFiles, Root: root, Members: []string{bad}}, "")
 		if err == nil {
 			t.Fatalf("invalid logical path %q accepted", bad)

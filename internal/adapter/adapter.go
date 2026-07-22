@@ -211,8 +211,9 @@ func verifyRestrictionEvidenceFor(cap Capability, observed, goos, goarch string)
 	// extraRestrictionPlatforms is a package-private TEST seam: fixture
 	// suites that exercise the real adapters against installed FAKE vendor
 	// CLIs opt the current platform in so adapter parse/dispatch logic stays
-	// covered on every CI lane. Production code never touches it — real
-	// vendor dispatch remains gated by KnownGoodPlatforms alone.
+	// covered on every CI lane. Non-test callers never set it, and in a
+	// non-test binary it is always the zero value — real vendor dispatch is
+	// therefore gated by KnownGoodPlatforms alone (TR-CX-N1 wording).
 	for _, p := range extraRestrictionPlatforms {
 		if p == host {
 			return nil

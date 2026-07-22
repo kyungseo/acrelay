@@ -193,27 +193,33 @@ func normalizeList(values []string, field string) ([]string, error) {
 	return out, nil
 }
 
+// normalizeLogical validates and normalizes a logical member identifier
+// under an OS-independent grammar (TR-CX-F1): logical paths are slash-only,
+// root-relative identifiers whose admission and normalized identity are
+// byte-identical on every host. Backslashes are rejected at any position
+// (separator on Windows, literal elsewhere — either way host-divergent), a
+// Windows drive prefix is rejected on every host, and normalization uses
+// slash-only path.Clean. filepath conversion happens only at the filesystem
+// resolution stage, never here.
 func normalizeLogical(raw string) (string, error) {
 	if raw == "" || !utf8.ValidString(raw) || strings.IndexByte(raw, 0) >= 0 {
 		return "", fmt.Errorf("logical path must be non-empty valid UTF-8 without NUL: fail-closed")
 	}
-	// Logical paths are slash-normalized cross-platform identifiers: a
-	// leading slash or backslash is absolute on SOME platform and must be
-	// rejected on EVERY platform (a Windows host must not accept "/a.txt"
-	// just because filepath.IsAbs says false there — FEAT-20260722-002 CI).
-	if strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "\\") ||
-		filepath.IsAbs(raw) || filepath.VolumeName(raw) != "" {
+	if strings.ContainsRune(raw, '\\') {
+		return "", fmt.Errorf("logical path must not contain a backslash: fail-closed")
+	}
+	if len(raw) >= 2 && raw[1] == ':' &&
+		(('a' <= raw[0] && raw[0] <= 'z') || ('A' <= raw[0] && raw[0] <= 'Z')) {
+		return "", fmt.Errorf("logical path must not carry a drive prefix: fail-closed")
+	}
+	if strings.HasPrefix(raw, "/") {
 		return "", fmt.Errorf("logical path must be root-relative: fail-closed")
 	}
-	clean := filepath.Clean(filepath.FromSlash(raw))
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+	clean := path.Clean(raw)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
 		return "", fmt.Errorf("logical path escapes or aliases the root: fail-closed")
 	}
-	logical := filepath.ToSlash(clean)
-	if !utf8.ValidString(logical) {
-		return "", fmt.Errorf("normalized logical path is invalid UTF-8: fail-closed")
-	}
-	return logical, nil
+	return clean, nil
 }
 
 func resolveRoot(spec Spec) (string, error) {
