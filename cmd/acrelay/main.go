@@ -186,6 +186,9 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 		approvalActor := fs.String("approval-actor", "", "declared owner identity for trust approvals")
 		ackEgress := fs.Bool("ack-vendor-egress", false, "approve vendor processing of content, absolute/resolved paths, and metadata")
 		inTargetWorkdir := fs.Bool("allow-in-target-workdir", false, "approve unsafe reviewer cwd inside subject (code-execution/read/egress risk)")
+		executionSurface := fs.String("execution-surface", "", "reviewer execution surface (external-cli; host-subagent is explicitly unsupported)")
+		driverVendor := fs.String("driver-vendor", "", "operator-declared driver agent vendor (claude|codex|other; omitted records undeclared)")
+		contextRelation := fs.String("context-relation", "", "operator-declared driver/reviewer context relation (separate|shared; omitted records undeclared)")
 		fs.Parse(args)
 		if *canonical == "" || *question == "" {
 			fail(fmt.Errorf("init requires -canonical and -question"))
@@ -198,7 +201,11 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 		if err != nil {
 			fail(err)
 		}
-		st, err := relay.InitSubject(*canonical, *question, spec, *prior, *diff, *seen, policy)
+		topology, err := relay.NewTopologyPolicy(*executionSurface, *driverVendor, *contextRelation)
+		if err != nil {
+			fail(err)
+		}
+		st, err := relay.InitSubjectTopology(*canonical, *question, spec, *prior, *diff, *seen, policy, topology)
 		if err != nil {
 			fail(err)
 		}

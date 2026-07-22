@@ -301,6 +301,24 @@ func unknownJournalPayload(st *State, j *dispatchJournal) (string, error) {
 		Execution: string(kernel.ExecUnknown),
 		CauseCode: adapter.CauseJournalReconciledUnknown, CauseSource: adapter.CauseSourceObserved,
 	})
+	// R1-CX-F1: the prepared journal proves which reviewer's child was
+	// started — preserve the vendor fact for the topology projection. The
+	// session outcome after a crash is unverifiable, so a same-vendor stored
+	// session's mode downgrades conservatively to unknown (keeps the
+	// non-fresh caution) instead of presenting a pre-crash mode as current.
+	// A cross-vendor journal (a reset-dispatch crash) follows Option A: the
+	// prior vendor's ref is never combined with the attempted reviewer, so
+	// the binding clears entirely.
+	priorVendor := st.Vendor
+	st.Vendor = j.Reviewer
+	switch {
+	case st.SessionRef == "":
+	case priorVendor != j.Reviewer:
+		st.SessionRef = ""
+		st.ReviewerSessionMode = ""
+	default:
+		st.ReviewerSessionMode = SessionModeUnknown
+	}
 	var header string
 	switch j.Kind {
 	case "review":

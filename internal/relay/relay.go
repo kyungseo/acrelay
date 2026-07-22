@@ -36,10 +36,11 @@ const ReviewSchema = `{"type":"object","properties":{"verdict":{"type":"string",
 const (
 	KernelVersion  = "kernel v0.2"
 	ProfileVersion = "review-profile v0.2"
-	// store-md v0.8 adds the typed transaction execution/cause ledger
-	// (FEAT-20260721-002). Private alpha uses an exact cutover; v0.7
-	// canonicals require the prior binary or a fresh objective/session.
-	StoreVersion = "store-md v0.8"
+	// store-md v0.9 adds the objective-immutable review-topology policy and
+	// the reviewer session-mode runtime fact (FEAT-20260722-001). Private
+	// alpha uses an exact cutover; v0.8 canonicals require the prior binary
+	// or a fresh objective/session.
+	StoreVersion = "store-md v0.9"
 )
 
 // State is the machine-readable snapshot appended after every mutation.
@@ -65,21 +66,27 @@ type State struct {
 	// Closure accountability (GB-CX-F2): who closed the objective, in what
 	// role, and the declared authority basis. v1 is declared metadata only —
 	// no authentication or RBAC is claimed.
-	CloseActor       string                   `json:"close_actor,omitempty"`
-	CloseRole        string                   `json:"close_role,omitempty"`
-	CloseAuthority   string                   `json:"close_authority,omitempty"`
-	SessionRef       string                   `json:"session_ref,omitempty"`
-	Vendor           string                   `json:"vendor,omitempty"`
-	SessionChanges   []SessionChange          `json:"session_changes,omitempty"`
-	Rounds           []RoundState             `json:"rounds"`
-	Confirmations    []ConfState              `json:"confirmations,omitempty"`
-	Transactions     []TransactionState       `json:"transactions,omitempty"`
-	Evidence         []review.EvidenceAnchor  `json:"evidence,omitempty"`
-	Findings         []review.Finding         `json:"findings"`
-	ApprovalRequests []review.ApprovalRequest `json:"approval_requests,omitempty"`
-	PriorObjective   string                   `json:"prior_objective,omitempty"`
-	MaterialDiff     string                   `json:"material_difference,omitempty"`
-	Advances         []AdvanceState           `json:"advances,omitempty"`
+	CloseActor     string `json:"close_actor,omitempty"`
+	CloseRole      string `json:"close_role,omitempty"`
+	CloseAuthority string `json:"close_authority,omitempty"`
+	SessionRef     string `json:"session_ref,omitempty"`
+	Vendor         string `json:"vendor,omitempty"`
+	// Topology is the objective-immutable review-topology v0.1 declaration
+	// (FEAT-20260722-001 AR-1/AR-2). ReviewerSessionMode is the runtime
+	// session fact (new|resumed|reset) recorded at dispatch — a fact record,
+	// never a policy change.
+	Topology            *TopologyPolicy          `json:"topology"`
+	ReviewerSessionMode string                   `json:"reviewer_session_mode,omitempty"`
+	SessionChanges      []SessionChange          `json:"session_changes,omitempty"`
+	Rounds              []RoundState             `json:"rounds"`
+	Confirmations       []ConfState              `json:"confirmations,omitempty"`
+	Transactions        []TransactionState       `json:"transactions,omitempty"`
+	Evidence            []review.EvidenceAnchor  `json:"evidence,omitempty"`
+	Findings            []review.Finding         `json:"findings"`
+	ApprovalRequests    []review.ApprovalRequest `json:"approval_requests,omitempty"`
+	PriorObjective      string                   `json:"prior_objective,omitempty"`
+	MaterialDiff        string                   `json:"material_difference,omitempty"`
+	Advances            []AdvanceState           `json:"advances,omitempty"`
 }
 
 // RoundState mirrors one committed round.
@@ -315,6 +322,20 @@ func validateState(st *State, labelSeq int) error {
 	}
 	if st.SessionRef != "" && strings.TrimSpace(st.Vendor) == "" {
 		return fmt.Errorf("persisted session_ref lacks vendor identity: fail-closed")
+	}
+	if st.Topology == nil {
+		return fmt.Errorf("state lacks the review-topology policy (store-md v0.9): fail-closed")
+	}
+	if err := st.Topology.Validate(); err != nil {
+		return fmt.Errorf("persisted topology policy invalid: %w", err)
+	}
+	switch st.ReviewerSessionMode {
+	case "", SessionModeNew, SessionModeResumed, SessionModeReset, SessionModeUnknown:
+	default:
+		return fmt.Errorf("persisted reviewer session mode %q invalid: fail-closed", st.ReviewerSessionMode)
+	}
+	if st.ReviewerSessionMode != "" && st.SessionRef == "" {
+		return fmt.Errorf("reviewer session mode recorded without a session reference: fail-closed")
 	}
 	if err := review.ValidateCanonical(st.Evidence, st.Findings, st.ApprovalRequests); err != nil {
 		return fmt.Errorf("persisted review evidence invalid: %w", err)
@@ -576,9 +597,20 @@ func validateSubjectRuntimeIsolation(canonical string, spec subject.Spec, resolv
 	return nil
 }
 
-// InitSubject creates an objective bound to a normalized local subject set.
+// InitSubject creates an objective bound to a normalized local subject set
+// with the fully undeclared topology (no topology claim derivable).
 func InitSubject(canonical, question string, input subject.Spec, priorObjective, materialDiff string, targetSeenBefore bool, policy adapter.TrustPolicy) (*State, error) {
+	return InitSubjectTopology(canonical, question, input, priorObjective, materialDiff, targetSeenBefore, policy, DefaultTopologyPolicy())
+}
+
+// InitSubjectTopology creates an objective bound to a normalized local subject
+// set and the objective-immutable review-topology declaration (AR-2: changing
+// the topology relation later requires a new objective).
+func InitSubjectTopology(canonical, question string, input subject.Spec, priorObjective, materialDiff string, targetSeenBefore bool, policy adapter.TrustPolicy, topology TopologyPolicy) (*State, error) {
 	if err := policy.Validate(); err != nil {
+		return nil, err
+	}
+	if err := topology.Validate(); err != nil {
 		return nil, err
 	}
 	spec, err := subject.Normalize(input, "")
@@ -653,6 +685,7 @@ func InitSubject(canonical, question string, input subject.Spec, priorObjective,
 			CollaborationID: collabID, ObjectiveID: objID, Question: question,
 			SubjectSpec: spec, Subject: snapshot, TargetRevision: snapshot.Aggregate,
 			TrustPolicy:    policy,
+			Topology:       &topology,
 			Governance:     string(kernel.GovOpen),
 			PriorObjective: priorObjective, MaterialDiff: materialDiff,
 			SessionRef: carrySessionRef, Vendor: carryVendor,
@@ -661,9 +694,10 @@ func InitSubject(canonical, question string, input subject.Spec, priorObjective,
 		if err != nil {
 			return err
 		}
-		section := fmt.Sprintf("\n## objective %s\n- collaboration: %s\n- question: %s\n- subject: %s\n- aggregate: %s\n- trust_profile: %s\n- owner_approvals: %d\n%s",
+		section := fmt.Sprintf("\n## objective %s\n- collaboration: %s\n- question: %s\n- subject: %s\n- aggregate: %s\n- trust_profile: %s\n- owner_approvals: %d\n- topology: surface=%s driver_vendor=%s context_relation=%s (operator-declared facts, not verified)\n%s",
 			objID, collabID, question, subject.Summary(spec, snapshot), snapshot.Aggregate,
-			policy.ProfileID, len(policy.Approvals), block)
+			policy.ProfileID, len(policy.Approvals),
+			topology.ExecutionSurface, topology.DriverVendor, topology.ContextRelation, block)
 		if _, err := store.AppendAtomic(canonical, section, rev); err != nil {
 			return err
 		}
@@ -683,6 +717,15 @@ func subjectPrompt(st *State, prompt string) string {
 	for _, member := range st.Subject.Members {
 		fmt.Fprintf(&b, "- %s sha256=%s kind=%s resolved=%s\n",
 			member.LogicalPath, member.Digest, member.Kind, member.ResolvedPath)
+	}
+	// Typed relation facts (R0-CX-F5): the reviewer receives its topology
+	// relation as source-qualified provenance instead of an asserted
+	// independence claim. Values are closed-enum relay facts, never raw input.
+	if facts := TopologyFacets(st); len(facts) > 0 {
+		b.WriteString("\nReviewer relation facts (provenance only; declared values are not verified; do not claim independence beyond them):\n")
+		for _, fact := range facts {
+			fmt.Fprintf(&b, "- %s: %s (%s)\n", fact.Name, fact.Value, fact.Source)
+		}
 	}
 	b.WriteString("\n")
 	b.WriteString(prompt)
@@ -936,20 +979,23 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	if _, err := admissionObjective.OpenRound(); err != nil {
 		return nil, "", err
 	}
-	// Session continuity (R1-CX-F6): an existing session binds the vendor.
-	// Switching requires an explicit reset with mode+reason — never silent.
+	// Session continuity (R1-CX-F6) and single-reviewer binding (R1 targeted
+	// recheck): the recorded reviewer vendor binds the objective regardless of
+	// whether a session ref survived. A failed reset clears the ref but keeps
+	// the attempted vendor bound, so only that vendor may continue (new
+	// session) — any other vendor fails closed before Prepare without an
+	// explicit reset. Never a silent reviewer or session switch.
 	sessionChanged := false
 	var sessionChange *SessionChange
+	if s.Reset == nil && strings.TrimSpace(st.Vendor) != "" && st.Vendor != s.Adapter.Vendor() {
+		return nil, "", fmt.Errorf("objective reviewer is bound to %s: switching to %s requires an explicit session reset (mode+reason) — silent reviewer switch is forbidden", st.Vendor, s.Adapter.Vendor())
+	}
 	if st.SessionRef != "" && s.Reset == nil {
-		switch {
-		case st.Vendor == s.Adapter.Vendor():
-			if req.ResumeRef == "" {
-				req.ResumeRef = st.SessionRef
-			} else if req.ResumeRef != st.SessionRef {
-				return nil, "", fmt.Errorf("explicit resume_ref differs from stored session %s: session reset with mode+reason required", st.SessionRef)
-			}
-		default:
-			return nil, "", fmt.Errorf("stored reviewer session belongs to %s: switching to %s requires an explicit session reset (mode+reason) — silent new-session fallback is forbidden", st.Vendor, s.Adapter.Vendor())
+		// Same vendor is guaranteed by the binding check above.
+		if req.ResumeRef == "" {
+			req.ResumeRef = st.SessionRef
+		} else if req.ResumeRef != st.SessionRef {
+			return nil, "", fmt.Errorf("explicit resume_ref differs from stored session %s: session reset with mode+reason required", st.SessionRef)
 		}
 	}
 	if s.Reset != nil {
@@ -966,6 +1012,10 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	req.TrustPolicy = st.TrustPolicy
 	req.Prompt = subjectPrompt(st, prompt)
 	req.SchemaJSON = ReviewSchema
+	// The dispatch session-attempt fact, fixed before Prepare (R1-CX-F1): the
+	// recorded mode must not depend on whether the result happened to return
+	// a session ref.
+	resumeAttempt := req.ResumeRef != ""
 
 	// 1. non-consuming preparation: ALL fallible pre-start work ends here.
 	prepared, err := s.Adapter.Prepare(ctx, req, s.Handles)
@@ -1162,8 +1212,35 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 		stale = true
 	}
 
-	if res != nil && res.Provenance.SessionRef != "" {
-		st.SessionRef, st.Vendor = res.Provenance.SessionRef, s.Adapter.Vendor()
+	// Runtime session facts (AR-2, R1-CX-F1): recorded at dispatch, never a
+	// policy change. The reviewer vendor is a fact of every started dispatch —
+	// including FAILED/UNKNOWN ones that return no session ref.
+	st.Vendor = vendor
+	switch {
+	case res != nil && res.Provenance.SessionRef != "":
+		st.SessionRef = res.Provenance.SessionRef
+		switch {
+		case sessionChanged:
+			st.ReviewerSessionMode = SessionModeReset
+		case res.Provenance.NewSession:
+			st.ReviewerSessionMode = SessionModeNew
+		default:
+			st.ReviewerSessionMode = SessionModeResumed
+		}
+	case resumeAttempt:
+		// The stored session was dispatched as a resume; a failed result does
+		// not erase that fact and the non-fresh-context caution must survive.
+		st.ReviewerSessionMode = SessionModeResumed
+	case sessionChanged:
+		// R1 confirmation Option A: a started reset that returned no new ref
+		// abandons the prior session binding entirely — a prior vendor's ref
+		// is never combined with the attempted reviewer vendor. The recorded
+		// SessionChange and the transaction ledger keep the attempt auditable,
+		// and the next dispatch starts a new session as the explicit
+		// continuation of the authorized reset (never a silent resume of the
+		// abandoned ref).
+		st.SessionRef = ""
+		st.ReviewerSessionMode = ""
 	}
 	txResult := "captured"
 	journalPhase := journalPhaseCaptured
@@ -1198,6 +1275,9 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 		round.Index, attempt.Index, journal.TransactionID, outcome, verdict, stale)
 	if sessionChanged {
 		section += fmt.Sprintf("- session_change: mode=%s reason=%q\n", s.Reset.Mode, s.Reset.Reason)
+	}
+	if st.ReviewerSessionMode != "" {
+		section += fmt.Sprintf("- reviewer_session: %s\n", st.ReviewerSessionMode)
 	}
 	if len(validationErrs) > 0 {
 		section += fmt.Sprintf("- validation_errors: %q\n", strings.Join(validationErrs, "; "))
@@ -1248,7 +1328,7 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	return st, outcome, nil
 }
 
-// Reconcile applies or cleans up a DR-813 dispatch journal. store-md v0.8 is a
+// Reconcile applies or cleans up a DR-813 dispatch journal. store-md v0.9 is a
 // hard cutover: legacy .recovery-* sidecars are neither guarded nor loaded.
 func Reconcile(canonical, transactionPath string) (*State, error) {
 	return reconcileDispatchJournal(canonical, transactionPath)
@@ -1506,11 +1586,13 @@ func (s *Session) ConfirmWithReviewer(ctx context.Context, roundIndex int, expec
 		return out, false, nil
 	}
 	// confirmation must run in the same reviewer session (contract): a
-	// different vendor is only possible through the explicit reset path.
+	// different vendor is only possible through the explicit reset path. The
+	// binding applies to the recorded reviewer vendor even when no session
+	// ref survived (R1 targeted recheck single-reviewer binding).
 	if st.SessionRef != "" && st.Vendor == s.Adapter.Vendor() && req.ResumeRef == "" {
 		req.ResumeRef = st.SessionRef
-	} else if st.SessionRef != "" && st.Vendor != s.Adapter.Vendor() {
-		return nil, false, fmt.Errorf("confirmation must use the stored reviewer session (%s): vendor switch is not allowed inside a confirmation cycle", st.Vendor)
+	} else if strings.TrimSpace(st.Vendor) != "" && st.Vendor != s.Adapter.Vendor() {
+		return nil, false, fmt.Errorf("confirmation must use the bound reviewer (%s): vendor switch is not allowed inside a confirmation cycle", st.Vendor)
 	}
 	capturedSubject, err := captureSubjectBytes(st.Subject)
 	if err != nil {
@@ -1622,8 +1704,20 @@ Output per the schema: results[] with id, status confirmed|not-confirmed, and no
 		section += fmt.Sprintf("- confirmed: %s\n- outstanding: %s\n- escalated: %v\n",
 			strings.Join(confirmed, ", "), strings.Join(cyc.Outstanding(), ", "), cyc.Escalated)
 	}
-	if res != nil && res.Provenance.SessionRef != "" {
-		st.SessionRef, st.Vendor = res.Provenance.SessionRef, s.Adapter.Vendor()
+	// Reviewer vendor/session facts survive FAILED/UNKNOWN confirmations too
+	// (R1-CX-F1). Confirmation dispatches resume the stored session by
+	// contract, so a missing result ref still records the resumed fact.
+	st.Vendor = s.Adapter.Vendor()
+	switch {
+	case res != nil && res.Provenance.SessionRef != "":
+		st.SessionRef = res.Provenance.SessionRef
+		if res.Provenance.NewSession {
+			st.ReviewerSessionMode = SessionModeNew
+		} else {
+			st.ReviewerSessionMode = SessionModeResumed
+		}
+	case st.SessionRef != "":
+		st.ReviewerSessionMode = SessionModeResumed
 	}
 	confExecution := kernel.ExecSucceeded
 	if txResult == "unknown" {
@@ -2189,6 +2283,14 @@ func Status(canonical string) (string, error) {
 		fmt.Fprintf(&b, "rounds: %d/%d\n", len(st.Rounds), st.FormalRoundBound)
 	}
 	fmt.Fprintf(&b, "subject: %s aggregate=%s\n", subject.Summary(st.SubjectSpec, st.Subject), st.TargetRevision[:12])
+	// FEAT-20260722-001: the private status surface shows the derived topology
+	// profile and its source-qualified facets. Declared values are provenance,
+	// never verification.
+	fmt.Fprintf(&b, "topology: profile=%s driver_session_separation=%s\n",
+		DerivedTopologyProfile(st), DriverSessionSeparation(st))
+	for _, fact := range TopologyFacets(st) {
+		fmt.Fprintf(&b, "- %s=%s (%s)\n", fact.Name, fact.Value, fact.Source)
+	}
 	// AR-2 Option B (FEAT-20260721-002): the private status surface shows the
 	// allowlisted cause phrase for the latest non-succeeded dispatch. The raw
 	// vendor output stays in the canonical; briefing-output v0.1 is unchanged.

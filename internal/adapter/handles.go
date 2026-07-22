@@ -125,9 +125,10 @@ func newRef(existing map[string]handleEntry) (string, error) {
 // handle reaches the vendor CLI argv verbatim, so a malformed entry is
 // rejected fail-closed before any child start — never dropped, truncated, or
 // silently replaced by a new session. The Claude session_id shape is the
-// observed UUID form (Claude Code 2.1.215); format drift fails closed like
-// every other version-bound observation. Codex thread IDs use a conservative
-// argv-safe charset with the same no-leading-option rule.
+// observed UUID form (Claude Code 2.1.215; re-observed on 2.1.217 during the
+// FEAT-20260722-001 restriction re-verification spike); format drift fails
+// closed like every other version-bound observation. Codex thread IDs use a
+// conservative argv-safe charset with the same no-leading-option rule.
 var claudeHandlePattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 var codexHandlePattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]{7,127}$`)
 

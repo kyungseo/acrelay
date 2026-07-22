@@ -142,6 +142,11 @@ func TestDR813HostProcessCrashWindows(t *testing.T) {
 
 func createPreparedJournalForTest(t *testing.T, s *Session, kind string, round int) string {
 	t.Helper()
+	return createPreparedJournalVendorForTest(t, s, kind, round, "fake")
+}
+
+func createPreparedJournalVendorForTest(t *testing.T, s *Session, kind string, round int, vendor string) string {
+	t.Helper()
 	var path string
 	err := withCanonicalLock(s.Canonical, func() error {
 		st, err := LoadState(s.Canonical)
@@ -163,7 +168,7 @@ func createPreparedJournalForTest(t *testing.T, s *Session, kind string, round i
 				return err
 			}
 		}
-		_, p, _, err := createDispatchJournalLocked(s.Canonical, st, kind, round, 0, "fake", rev)
+		_, p, _, err := createDispatchJournalLocked(s.Canonical, st, kind, round, 0, vendor, rev)
 		path = p
 		return err
 	})
