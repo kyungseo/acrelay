@@ -11,7 +11,11 @@ import (
 	"github.com/kyungseo/acrelay/internal/subject"
 )
 
-const BriefingOutputVersion = "briefing-output v0.1"
+// BriefingOutputVersion: v0.2 adds the allowlisted topology block (derived
+// profile, driver-session-separation state, and source-qualified facets) —
+// FEAT-20260722-001. The DTO extension is a version bump, not an in-place
+// change (R0-CX-F4).
+const BriefingOutputVersion = "briefing-output v0.2"
 
 type BriefingReadiness string
 
@@ -60,6 +64,15 @@ type BriefingObjective struct {
 	CloseActor       string `json:"close_actor,omitempty"`
 	CloseRole        string `json:"close_role,omitempty"`
 	CloseAuthority   string `json:"close_authority,omitempty"`
+}
+
+// BriefingTopology is the allowlisted topology projection: closed-enum relay
+// values only — no session ref, native handle, path, or raw input crosses it.
+type BriefingTopology struct {
+	Version                 string          `json:"version"`
+	Profile                 string          `json:"profile"`
+	DriverSessionSeparation string          `json:"driver_session_separation"`
+	Facets                  []TopologyFacet `json:"facets"`
 }
 
 type BriefingTrustApproval struct {
@@ -181,6 +194,7 @@ type Briefing struct {
 	Cautions           []BriefingReason          `json:"cautions"`
 	NextActions        []BriefingAction          `json:"next_actions"`
 	Objective          BriefingObjective         `json:"objective"`
+	Topology           BriefingTopology          `json:"topology"`
 	Trust              BriefingTrust             `json:"trust"`
 	Subject            BriefingSubject           `json:"subject"`
 	Rounds             []BriefingRound           `json:"rounds"`
@@ -385,6 +399,21 @@ func briefingCautions(st *State) []BriefingReason {
 			})
 		}
 	}
+	// Topology cautions (FEAT-20260722-001): same-vendor correlation,
+	// undeclared relations, and non-fresh reviewer sessions are surfaced in
+	// the result, never silently omitted (R1-CX-N1: relation facts, not an
+	// ordinal independence ranking).
+	switch DerivedTopologyProfile(st) {
+	case ProfileSameVendorExt:
+		cautions = append(cautions, BriefingReason{Code: "same-vendor-review"})
+	case ProfileUndeclared:
+		cautions = append(cautions, BriefingReason{Code: "topology-undeclared"})
+	}
+	// A resumed or carried reviewer session is not a fresh review context
+	// (R0-CX-F2) — related objectives carry the prior session by contract.
+	if st.SessionRef != "" && st.ReviewerSessionMode != SessionModeNew && st.ReviewerSessionMode != SessionModeReset {
+		cautions = append(cautions, BriefingReason{Code: "reviewer-session-resumed"})
+	}
 	return cautions
 }
 
@@ -482,6 +511,11 @@ func BuildBriefing(canonical string) (*Briefing, error) {
 			Vendor: st.Vendor, TerminalArbiter: st.TerminalArbiter, TerminalReason: st.TerminalReason,
 			CloseActor: st.CloseActor, CloseRole: st.CloseRole, CloseAuthority: st.CloseAuthority,
 		},
+		Topology: BriefingTopology{
+			Version: TopologyVersion, Profile: DerivedTopologyProfile(st),
+			DriverSessionSeparation: DriverSessionSeparation(st),
+			Facets:                  TopologyFacets(st),
+		},
 		Trust: BriefingTrust{
 			Version: st.TrustPolicy.Version, ProfileID: st.TrustPolicy.ProfileID,
 			WorkingDirMode: st.TrustPolicy.WorkingDirMode,
@@ -492,6 +526,7 @@ func BuildBriefing(canonical string) (*Briefing, error) {
 			"This briefing is a read-only projection and does not approve, close, dispatch, or retry.",
 			"The actual close command revalidates canonical, target, and pending transaction state.",
 			"content-match proves only that the reviewer returned matching bytes; it does not prove understanding or completeness.",
+			"Topology facets are operator-declared or runtime-observed provenance; reviewer independence is never verified. Same-vendor and shared-context review keeps correlated blind spots a separate session cannot remove.",
 		},
 	}
 
@@ -626,6 +661,9 @@ var reasonMessages = map[string]string{
 	"confirmation-not-confirmed":       "a dispositioned finding was not confirmed",
 	"confirmation-escalated":           "confirmation attempts were exhausted and require owner judgment",
 	"verdict-contradiction-history":    "the review history contains an approve/blocking contradiction",
+	"same-vendor-review":               "driver and reviewer vendors are declared identical; correlated blind spots remain despite the separate reviewer session",
+	"topology-undeclared":              "reviewer topology facets are undeclared; no independence relation can be derived",
+	"reviewer-session-resumed":         "the reviewer session is resumed or carried from earlier work; this is not a fresh review context",
 }
 
 var actionMessages = map[string]string{
@@ -653,6 +691,11 @@ func RenderBriefingHuman(b *Briefing) string {
 	fmt.Fprintf(&out, "rounds: %d/%d\n", b.Objective.RoundsUsed, b.Objective.FormalRoundBound)
 	fmt.Fprintf(&out, "reviewer: vendor=%s trust-profile=%s mode=%s\n",
 		b.Objective.Vendor, b.Trust.ProfileID, b.Trust.WorkingDirMode)
+	fmt.Fprintf(&out, "topology: profile=%s driver_session_separation=%s (%s)\n",
+		b.Topology.Profile, b.Topology.DriverSessionSeparation, b.Topology.Version)
+	for _, fact := range b.Topology.Facets {
+		fmt.Fprintf(&out, "- topology %s=%s (%s)\n", fact.Name, fact.Value, fact.Source)
+	}
 	for _, approval := range b.Trust.Approvals {
 		fmt.Fprintf(&out, "- trust approval %s actor=%s decision=%s scope=%q\n",
 			approval.ID, approval.Actor, approval.Decision, approval.Scope)

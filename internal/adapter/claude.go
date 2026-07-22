@@ -24,7 +24,7 @@ func (ClaudeAdapter) Capability() Capability {
 	return Capability{
 		Vendor:              "claude",
 		ContractVersion:     "claude-final-envelope-v1",
-		KnownGoodCLIVersion: "2.1.215",
+		KnownGoodCLIVersion: "2.1.217",
 		EffortEnum:          []string{"low", "medium", "high", "xhigh", "max"},
 		SchemaFlag:          "--json-schema",
 		SupportsResume:      true,
@@ -70,7 +70,7 @@ func parseClaudeEnvelope(stdout []byte) (*claudeEnvelope, string, error) {
 	return &env, fmt.Sprintf("non-JSON prefix %d bytes before envelope", i), nil
 }
 
-// detectClaudeVersion parses `claude --version` ("2.1.215 (Claude Code)")
+// detectClaudeVersion parses `claude --version` ("2.1.217 (Claude Code)")
 // while retaining the normalized banner for provenance.
 func detectClaudeVersion(ctx context.Context) (string, string, error) {
 	banner, err := probeVersion(ctx, "claude", "--version")

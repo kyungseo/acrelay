@@ -19,7 +19,7 @@ func TestRealClaudeResumeNotFoundConsumesReviewAttempt(t *testing.T) {
 	// A fake `claude` that succeeds on the initial (new-session) dispatch and
 	// returns the resume-not-found error envelope whenever --resume is passed.
 	script := `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "2.1.215 (Claude Code)"; exit 0; fi
+if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi
 if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
 for a in "$@"; do
   if [ "$a" = "--resume" ]; then

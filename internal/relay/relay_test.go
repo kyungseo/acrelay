@@ -43,7 +43,18 @@ func newSession(t *testing.T, script []adapter.FakeResult) (*Session, *adapter.F
 		Handles:   &adapter.HandleStore{Path: filepath.Join(dir, "handles.json")},
 		Canonical: filepath.Join(dir, "canonical.md"),
 	}
-	if _, err := Init(s.Canonical, "is hello ok?", target, "", "", false, approvedPolicy(t)); err != nil {
+	// Declared cross-vendor topology: the shared fixture keeps the caution-free
+	// "ready" paths testable; undeclared/same-vendor cautions are covered in
+	// topology_test.go.
+	spec, err := subject.SingleFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	topology, err := NewTopologyPolicy("", "claude", "separate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InitSubjectTopology(s.Canonical, "is hello ok?", spec, "", "", false, approvedPolicy(t), topology); err != nil {
 		t.Fatal(err)
 	}
 	return s, fake, dir
@@ -73,6 +84,10 @@ func bindValidSubject(t *testing.T, st *State) *State {
 	st.SubjectSpec, st.Subject = validSubject(t)
 	st.TargetRevision = st.Subject.Aggregate
 	st.TrustPolicy = approvedPolicy(t)
+	if st.Topology == nil {
+		topology := DefaultTopologyPolicy()
+		st.Topology = &topology
+	}
 	return st
 }
 
@@ -154,7 +169,7 @@ func TestReviewProfileSchemasAreValidJSON(t *testing.T) {
 			t.Fatalf("%s schema is not valid JSON", name)
 		}
 	}
-	if ProfileVersion != "review-profile v0.2" || StoreVersion != "store-md v0.8" {
+	if ProfileVersion != "review-profile v0.2" || StoreVersion != "store-md v0.9" {
 		t.Fatalf("unexpected format contract: %s / %s", ProfileVersion, StoreVersion)
 	}
 }

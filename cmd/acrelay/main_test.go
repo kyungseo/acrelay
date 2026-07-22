@@ -178,7 +178,7 @@ func TestRealCLIParentSignalRecordsUnknown(t *testing.T) {
 		t.Fatal(err)
 	}
 	claude := `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "2.1.215 (Claude Code)"; exit 0; fi
+if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi
 if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
 touch "` + filepath.Join(dir, "child-started") + `"
 sleep 60
@@ -231,6 +231,39 @@ sleep 60
 	if !strings.Contains(string(body), adapter.CauseCanceledParentSignal) &&
 		!strings.Contains(string(body), adapter.CauseJournalReconciledUnknown) {
 		t.Fatalf("UNKNOWN round must carry the parent-signal (or reconciled-unknown) cause.\ncanonical:\n%s", body)
+	}
+}
+
+// FEAT-20260722-001 AR-3: requesting the host-subagent execution surface at
+// init fails closed through the real CLI with the actionable diagnostic, and
+// no canonical is created — no silent fallback to another topology.
+func TestRealCLIInitHostSubagentFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "acrelay")
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = mustModuleDir(t)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build acrelay: %v\n%s", err, out)
+	}
+	canonical := filepath.Join(dir, "review.md")
+	target := filepath.Join(dir, "target.go")
+	if err := os.WriteFile(target, []byte(`func greet() string { return "hi" }`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initCmd := exec.Command(bin, "init", "-canonical", canonical, "-question", "ready?",
+		"-target", target, "-approval-actor", "owner", "-ack-vendor-egress",
+		"-execution-surface", "host-subagent")
+	out, err := initCmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("host-subagent init must fail closed:\n%s", out)
+	}
+	for _, needle := range []string{"not supported", "deferred", "no fallback"} {
+		if !strings.Contains(string(out), needle) {
+			t.Fatalf("diagnostic must be actionable (missing %q):\n%s", needle, out)
+		}
+	}
+	if _, statErr := os.Stat(canonical); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed init must not create a canonical: %v", statErr)
 	}
 }
 

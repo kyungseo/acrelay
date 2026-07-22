@@ -21,7 +21,7 @@ Toolstead `DR-811` (Agent Collab v1 Feasibility Contract And Session Continuity)
 - `internal/relay` — prepared one-shot review flow (`Prepare` → snapshots →
   objective-bound append → private dispatch journal → in-memory attempt
   admission → child start/capture → transaction-tagged canonical append), state
-  as sequence-numbered blocks inside the canonical document; `store-md v0.8` /
+  as sequence-numbered blocks inside the canonical document; `store-md v0.9` /
   `dispatch-journal v0.1`
 - `cmd/acrelay` — CLI: `init` / `review` / `confirm` / `disposition` /
   `request-approval` / `respond-approval` / `withdraw-approval` / `advance` /
@@ -42,7 +42,7 @@ owner-only and is reused for that handle because vendor resume lookup can be
 cwd-scoped; deleting the handle removes the acrelay-owned neutral root. Every
 canonical and handle-store mutation is
 serialized across processes by an advisory `flock` on a sidecar lock file, so
-concurrent invocations cannot lose each other's updates.
+cooperating acrelay invocations do not lose each other's updates (advisory locks bind only lock-taking processes and depend on filesystem flock support).
 
 Every reviewer child start is preceded by a 0600 private dispatch journal.
 While a journal is pending, the same canonical rejects every mutator except
@@ -51,9 +51,9 @@ available. A crash with ambiguous execution reconciles to `UNKNOWN` and never
 retries automatically. Corrupt journals are recorded in the canonical before
 being moved to owner-only quarantine.
 
-`store-md v0.8` and handle store v2 are exact-version cutovers. Existing v0.7
+`store-md v0.9` and handle store v2 are exact-version cutovers. Existing v0.8
 canonicals and handle store v1 files are not silently migrated. Finish an old
-objective with its prior binary or initialize a new v0.8 canonical and new
+objective with its prior binary or initialize a new v0.9 canonical and new
 reviewer session.
 
 ## Dispatch Reliability And Failure Causes
@@ -75,7 +75,7 @@ state. Each code permits only specific sources — `observed` (runtime-verified
 fact: signal, timeout, exit status), `vendor-declared` (a typed vendor event
 field), or `inferred` (classified from vendor text, never a verified fact) —
 and the load gate rejects a code/source pair the registry does not allow, so a
-persisted `inferred` cause cannot be forged into `observed`. Raw stdout/stderr
+persisted pair cannot carry a source the registry disallows for that code (this is an allowlist gate, not tamper-proofing of the source field). Raw stdout/stderr
 stays in the canonical as before; the typed cause never stores vendor text,
 and `status` renders only the allowlisted phrase for the latest cause. Exit
 codes alone never decide a semantic cause; unclassifiable failures record
@@ -101,6 +101,47 @@ cleanup: the child group may orphan and the durable journal remains the
 authoritative recovery path. The POSIX pid-reuse window around group kill
 and the deterministic suite's inability to observe real vendor error
 phrasing are documented residual risks.
+
+## Reviewer Topology And Independence Claims
+
+acrelay automates only the reviewer leg, so it can never observe the driver
+agent. `review-topology v0.1` therefore records the reviewer relation as
+source-qualified facets instead of an independence claim: `reviewer_vendor`
+is runtime-observed once a dispatch has recorded the vendor fact, and before
+that projects as `none` with the `unknown-undeclared` source;
+`reviewer_session_mode` projects as runtime-observed across its values —
+`new`/`resumed`/`reset` after an observation, `carried`/`none` before one —
+except the ambiguity state `unknown` (an unverifiable session outcome, e.g. a
+prepared-journal UNKNOWN reconcile), which projects with the
+`unknown-undeclared` source; `execution_surface`,
+`driver_vendor`, and `context_relation` are operator-declared init policy
+(`-execution-surface external-cli`, `-driver-vendor claude|codex|other`,
+`-context-relation separate|shared`) — the CLI validates the surface value
+but never presents it as a runtime observation; `vendor_relation` is derived
+and marked `derived-not-verified`. An
+omitted declaration records the explicit `undeclared` fact and never upgrades
+to any topology claim. The declaration is objective-immutable: changing the
+topology relation requires a new objective; reviewer vendor and session mode
+are recorded at dispatch as facts, not policy changes.
+
+The derived profile is a display label only: `cross-vendor-external`,
+`same-vendor-external`, or `undeclared`. `independence verified` is never
+asserted by any profile — a declared separation only ever projects
+`driver_session_separation=declared-not-verified`. Briefing and `status`
+render the facets with their sources, and the briefing adds cautions for
+`same-vendor-review` (correlated blind spots survive a separate session),
+`topology-undeclared`, and `reviewer-session-resumed` (a resumed or carried
+session is not a fresh review context). A single-agent user can therefore run
+a same-vendor separate reviewer without a second vendor account, with the
+same-vendor relation, the declared-not-verified separation state, and the
+correlated-blind-spot caution stated in the output rather than hidden.
+
+`-execution-surface host-subagent` (a reviewer running as the driver's own
+host-orchestrated subagent) is explicitly unsupported and fails closed with
+an actionable diagnostic: this standalone CLI has no typed ingress for
+host-produced review results, and there is no silent fallback to another
+topology. That path is deferred until a stable host API and a typed
+external-result ingress contract exist.
 
 ## Review Subject
 
@@ -323,7 +364,7 @@ acrelay briefing -canonical review.md -format json -check
 
 The existing `status` command remains a short operational snapshot.
 `briefing` owns the decision-oriented human render and the versioned
-`briefing-output v0.1` machine schema. Both formats are rendered from the same
+`briefing-output v0.2` machine schema. Both formats are rendered from the same
 allowlisted typed projection; wrappers must consume JSON instead of reparsing
 the canonical Markdown or human prose.
 
@@ -394,7 +435,7 @@ Claude Code and Codex CLI versions are observed on every invocation and stored
 in provenance. General transport compatibility remains capability-first, but
 the security-critical restriction profile is bound to positive behavioral
 evidence for an exact CLI version. The current verified references are Claude
-Code `2.1.215` and Codex CLI `0.144.1`. A different or unobservable version
+Code `2.1.217` (re-verified 2026-07-22 restriction spike) and Codex CLI `0.144.1`. A different or unobservable version
 fails before child start and requires a new owner-reviewed capability spike;
 there is no unrestricted fallback.
 

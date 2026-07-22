@@ -359,7 +359,7 @@ func TestDefaultTimeoutsStructure(t *testing.T) {
 // pre-dispatch hard gate.
 func TestPreflightVersionObservability(t *testing.T) {
 	cap := ClaudeAdapter{}.Capability()
-	if err := PreflightVersion(cap, "2.1.215"); err != nil {
+	if err := PreflightVersion(cap, "2.1.217"); err != nil {
 		t.Fatal(err)
 	}
 	if err := PreflightVersion(cap, "9.9.9"); err != nil {
@@ -408,7 +408,7 @@ func TestRestrictedAdapterCommandSurfaceInitialAndResume(t *testing.T) {
 		{
 			name: "claude",
 			script: `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "2.1.215 (Claude Code)"; exit 0; fi
+if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi
 if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
 exit 99
 `,
@@ -643,7 +643,7 @@ func TestAdvisoryProbePassDoesNotMaskActualCommandFailure(t *testing.T) {
 		{
 			name: "claude",
 			script: `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "2.1.215 (Claude Code)"; exit 0; fi
+if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi
 if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
 echo 'unknown option --json-schema' >&2
 exit 2
@@ -693,7 +693,7 @@ func TestMissingOrMalformedStructuredOutputFailsAfterStart(t *testing.T) {
 		{
 			name: "claude",
 			script: `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "2.1.215 (Claude Code)"; exit 0; fi
+if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi
 if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume'; exit 0; fi
 echo '{"type":"result","subtype":"success","is_error":false,"session_id":"session-no-output","modelUsage":{"claude-default":{}}}'
 `,
@@ -768,7 +768,7 @@ printf '%s\n' '{"type":"turn.completed"}'
 			name: "claude",
 			script: `#!/bin/sh
 echo "$@" >> "$ACRELAY_TEST_LOG"
-if [ "$1" = "--version" ]; then echo "2.1.215 (Claude Code)"; exit 0; fi
+if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"11111111-2222-3333-4444-555555555555","structured_output":{"verdict":"approve","findings":[]},"modelUsage":{"claude-test":{}}}'
 `,
 			make: func() Adapter { return ClaudeAdapter{} },
@@ -1229,7 +1229,7 @@ func TestTerminationClassificationAgainstRealChildren(t *testing.T) {
 
 	t.Run("claude signal kill is UNKNOWN", func(t *testing.T) {
 		res, err := run(t, "claude", `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "2.1.215 (Claude Code)"; exit 0; fi
+if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi
 if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
 kill -KILL $$
 `, false)
@@ -1245,7 +1245,7 @@ kill -KILL $$
 
 	t.Run("claude clean exit without terminal contract is FAILED missing-terminal", func(t *testing.T) {
 		res, err := run(t, "claude", `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "2.1.215 (Claude Code)"; exit 0; fi
+if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi
 if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
 exit 0
 `, false)
@@ -1287,7 +1287,7 @@ exit 0
 
 	t.Run("claude resume-not-found envelope classifies resume-handle-invalid", func(t *testing.T) {
 		res, err := run(t, "claude", `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "2.1.215 (Claude Code)"; exit 0; fi
+if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi
 if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
 printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"No conversation found with session ID","session_id":"11111111-2222-3333-4444-555555555555"}'
 exit 1
@@ -1488,7 +1488,7 @@ if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config -
 if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
 printf '%s\n' '{"type":"thread.started","thread_id":"thread-fixture-1"}'
 `
-	claudeHead := `if [ "$1" = "--version" ]; then echo "2.1.215 (Claude Code)"; exit 0; fi
+	claudeHead := `if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi
 if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
 `
 
