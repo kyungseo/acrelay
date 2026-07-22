@@ -142,9 +142,7 @@ func TestPrepareExecutionRootModes(t *testing.T) {
 	if err := os.RemoveAll(cleanup); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(t.TempDir(), cleanup); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, t.TempDir(), cleanup)
 	if _, _, err := prepareExecutionRoot(Request{SubjectRoot: subjectRoot, TrustPolicy: neutral}, cleanup); err == nil {
 		t.Fatal("retargeting a stored neutral cwd to a symlink must fail closed")
 	}
@@ -390,6 +388,18 @@ func skipWithoutPOSIXSignalDeath(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("capability: POSIX signal-death classification has no Windows runtime equivalent (terminatedBySignal is documented false)")
+	}
+}
+
+// symlinkOrSkip creates a symlink or skips the test with a capability reason.
+// Windows symlink creation needs SeCreateSymbolicLinkPrivilege (admin or
+// Developer Mode), absent for a standard user — the product only resolves
+// symlinks, never creates them, so a standard-user lane legitimately cannot
+// stage this fixture (FEAT-20260722-002 UTM lane).
+func symlinkOrSkip(t *testing.T, oldname, newname string) {
+	t.Helper()
+	if err := os.Symlink(oldname, newname); err != nil {
+		t.Skipf("capability: symlink creation unavailable (%v); on Windows this needs admin or Developer Mode", err)
 	}
 }
 
@@ -891,28 +901,6 @@ func TestHandleStoreHardening(t *testing.T) {
 	if _, _, _, _, err := h.Lookup(ref); err == nil ||
 		!strings.Contains(err.Error(), "fail-closed") {
 		t.Fatalf("non-private store must fail closed: %v", err)
-	}
-}
-
-// R0-CX-F8: SIGTERM-ignoring grandchildren die at grace escalation.
-func TestGroupKillGraceEscalation(t *testing.T) {
-	marker := "1799" // unique sleep duration as process marker
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-	cmd := newGroupCmd(ctx, 500*time.Millisecond, "bash", "-c",
-		"trap '' TERM; sleep "+marker+" & sleep "+marker+" & wait")
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan struct{})
-	go func() { cmd.Wait(); close(done) }()
-	time.Sleep(300 * time.Millisecond) // let children spawn
-	<-done                             // ctx timeout → TERM (ignored) → grace → group SIGKILL
-	time.Sleep(700 * time.Millisecond) // allow the AfterFunc SIGKILL to land
-	out, _ := exec.Command("pgrep", "-f", "sleep "+marker).Output()
-	if len(strings.TrimSpace(string(out))) != 0 {
-		exec.Command("pkill", "-9", "-f", "sleep "+marker).Run()
-		t.Fatalf("grandchildren survived grace escalation: %q", out)
 	}
 }
 

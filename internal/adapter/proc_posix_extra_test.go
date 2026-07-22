@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -124,4 +125,26 @@ func runSignalHelperChild() {
 	}
 	_ = cmd.Wait() // returns after the signal cancels ctx and the group is killed
 	os.Exit(1)
+}
+
+// R0-CX-F8: SIGTERM-ignoring grandchildren die at grace escalation.
+func TestGroupKillGraceEscalation(t *testing.T) {
+	marker := "1799" // unique sleep duration as process marker
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	cmd := newGroupCmd(ctx, 500*time.Millisecond, "bash", "-c",
+		"trap '' TERM; sleep "+marker+" & sleep "+marker+" & wait")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { cmd.Wait(); close(done) }()
+	time.Sleep(300 * time.Millisecond) // let children spawn
+	<-done                             // ctx timeout → TERM (ignored) → grace → group SIGKILL
+	time.Sleep(700 * time.Millisecond) // allow the AfterFunc SIGKILL to land
+	out, _ := exec.Command("pgrep", "-f", "sleep "+marker).Output()
+	if len(strings.TrimSpace(string(out))) != 0 {
+		exec.Command("pkill", "-9", "-f", "sleep "+marker).Run()
+		t.Fatalf("grandchildren survived grace escalation: %q", out)
+	}
 }

@@ -21,6 +21,18 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+// symlinkOrSkip creates a symlink or skips with a capability reason: Windows
+// symlink creation needs SeCreateSymbolicLinkPrivilege (admin or Developer
+// Mode), absent for a standard user. The product resolves symlinks (fail-
+// closed on escape) but never creates them, so a standard-user lane cannot
+// stage this fixture (FEAT-20260722-002 UTM lane).
+func symlinkOrSkip(t *testing.T, oldname, newname string) {
+	t.Helper()
+	if err := os.Symlink(oldname, newname); err != nil {
+		t.Skipf("capability: symlink creation unavailable (%v); on Windows this needs admin or Developer Mode", err)
+	}
+}
+
 func TestSingleFileUsesDomainSeparatedAggregate(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "target.md")
@@ -177,9 +189,7 @@ func TestSymlinkIdentityAndRootContainmentAreFailClosed(t *testing.T) {
 	writeFile(t, filepath.Join(root, "one.txt"), "same")
 	writeFile(t, filepath.Join(root, "two.txt"), "same")
 	link := filepath.Join(root, "current.txt")
-	if err := os.Symlink("one.txt", link); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, "one.txt", link)
 	spec, err := SingleFile(link)
 	if err != nil {
 		t.Fatal(err)
@@ -228,12 +238,8 @@ func TestSymlinkIdentityAndRootContainmentAreFailClosed(t *testing.T) {
 func TestSymlinkChainIdentityIsRecorded(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "target.txt"), "target")
-	if err := os.Symlink("target.txt", filepath.Join(root, "leaf.txt")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("leaf.txt", filepath.Join(root, "chain.txt")); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkip(t, "target.txt", filepath.Join(root, "leaf.txt"))
+	symlinkOrSkip(t, "leaf.txt", filepath.Join(root, "chain.txt"))
 	spec, err := SingleFile(filepath.Join(root, "chain.txt"))
 	if err != nil {
 		t.Fatal(err)
