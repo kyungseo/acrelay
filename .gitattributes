@@ -1,0 +1,8 @@
+# Windows runner checkouts default to autocrlf; Go tooling (go mod tidy
+# -diff) and the fakevendor fixture literals require LF sources on every
+# lane (FEAT-20260722-002 CI evidence contract).
+* text=auto
+*.go text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
+*.yml text eol=lf
