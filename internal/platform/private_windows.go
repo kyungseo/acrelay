@@ -173,9 +173,11 @@ func MkdirPrivate(dir string) error {
 
 // MkdirTempPrivate creates a fresh protected temporary directory. Candidates
 // are created exclusively — an existing directory is never reused as a new
-// temp (R1-CX-F3) — and only ERROR_ALREADY_EXISTS triggers a retry.
+// temp (R1-CX-F3) — and only ERROR_ALREADY_EXISTS triggers a retry. The
+// system-owned parent need not itself carry acrelay's protected DACL; every
+// fresh child receives the explicit current-user-only DACL at creation.
 func MkdirTempPrivate(prefix string) (string, error) {
-	return MkdirTempPrivateAt(os.TempDir(), prefix)
+	return mkdirTempPrivateUnder(os.TempDir(), prefix)
 }
 
 // MkdirTempPrivateAt creates a fresh protected directory beneath an already
@@ -185,6 +187,10 @@ func MkdirTempPrivateAt(base, prefix string) (string, error) {
 	if err := MkdirPrivate(base); err != nil {
 		return "", err
 	}
+	return mkdirTempPrivateUnder(base, prefix)
+}
+
+func mkdirTempPrivateUnder(base, prefix string) (string, error) {
 	for i := 0; i < 10000; i++ {
 		candidate := filepath.Join(base, prefix+randomSuffix())
 		err := mkdirPrivateExclusive(candidate)

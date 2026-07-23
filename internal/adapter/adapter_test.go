@@ -1130,7 +1130,11 @@ func TestHandleStoreHelperProcessMutate(t *testing.T) {
 	}
 	s := &HandleStore{Path: path}
 	profile := profileID(WorkingDirNeutral)
-	workingDir, err := os.MkdirTemp("", "acrelay-review-root-helper-")
+	runtimeRoot, err := s.NeutralRuntimeRoot()
+	if err != nil {
+		t.Fatalf("helper runtime root: %v", err)
+	}
+	workingDir, err := platform.MkdirTempPrivateAt(runtimeRoot, "acrelay-review-root-helper-")
 	if err != nil {
 		t.Fatalf("helper working directory: %v", err)
 	}

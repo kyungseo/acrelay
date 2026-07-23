@@ -145,6 +145,9 @@ func TestWindowsPrivateDACLShapes(t *testing.T) {
 		if err := MkdirPrivate(weak); err == nil {
 			t.Fatal("MkdirPrivate must refuse an existing non-private directory")
 		}
+		if _, err := MkdirTempPrivateAt(weak, "acrelay-durable-"); err == nil {
+			t.Fatal("durable-root helper must refuse an existing non-private base")
+		}
 	})
 
 	t.Run("temp candidates are exclusive", func(t *testing.T) {

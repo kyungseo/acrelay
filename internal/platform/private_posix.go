@@ -32,9 +32,10 @@ func MkdirPrivate(dir string) error {
 }
 
 // MkdirTempPrivate creates an owner-only temporary directory with the given
-// prefix under the system temp root.
+// prefix under the system temp root. The system-owned parent need not itself
+// be private; the fresh child is owner-only from creation and rechecked below.
 func MkdirTempPrivate(prefix string) (string, error) {
-	return MkdirTempPrivateAt(os.TempDir(), prefix)
+	return mkdirTempPrivateUnder(os.TempDir(), prefix)
 }
 
 // MkdirTempPrivateAt creates a fresh owner-only directory beneath an already
@@ -44,6 +45,10 @@ func MkdirTempPrivateAt(base, prefix string) (string, error) {
 	if err := MkdirPrivate(base); err != nil {
 		return "", err
 	}
+	return mkdirTempPrivateUnder(base, prefix)
+}
+
+func mkdirTempPrivateUnder(base, prefix string) (string, error) {
 	dir, err := os.MkdirTemp(base, prefix)
 	if err != nil {
 		return "", err
