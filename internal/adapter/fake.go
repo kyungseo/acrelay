@@ -92,7 +92,7 @@ func (f *FakeAdapter) Prepare(ctx context.Context, req Request, handles *HandleS
 		}
 		resumeWorkingDir = workingDir
 	}
-	preparedReq, cleanupDir, err := prepareExecutionRoot(req, resumeWorkingDir)
+	preparedReq, cleanupDir, err := prepareExecutionRoot(req, resumeWorkingDir, handles)
 	if err != nil {
 		return nil, err
 	}

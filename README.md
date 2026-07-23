@@ -28,22 +28,43 @@ self-contained public statement of those contracts.
 - `cmd/acrelay` — CLI: `init` / `review` / `confirm` / `disposition` /
   `request-approval` / `respond-approval` / `withdraw-approval` / `advance` /
   `close` / `terminate` / `reconcile` / `abandon-transaction` / `status` /
-  `briefing`
+  `cleanup` / `briefing`
 
 ## Canonical Record Is Private
 
 The canonical Markdown record preserves raw reviewer output including
 provenance. Keep it in private local storage outside any shared, synced, or
-published boundary. There is no share/export path in v1 — copying the raw
-canonical into a shareable artifact requires explicit owner opt-in, and
-a redacted-export tool is a release-gate decision. The session handle store
+published boundary. `init` fails closed when it finds a `.git` ancestor or a
+supported, verified sync-root signal. Detection is intentionally incomplete:
+no warning is not proof that a location is safe. A one-shot override requires
+`-allow-unsafe-location`, the existing `-approval-actor`, and a non-empty
+`-unsafe-location-reason`; the actor, detected signal, and rationale are
+written to that canonical and do not become a reusable policy.
+The v1 sync signal set is limited to existing OneDrive roots declared by the
+platform `OneDrive`, `OneDriveCommercial`, or `OneDriveConsumer` environment
+variables and the existing macOS iCloud Drive root. Dropbox, Google Drive,
+aliases, and other providers are not detected unless a later implementation
+adds a verified signal.
+
+There is no share/export path in v1. The raw canonical is owner-retained and
+acrelay never deletes or automatically redacts it. Copying it into a shareable
+artifact may expose private prompts, evidence, and provenance. Public examples
+must use synthetic data; a redacted-export schema and leakage contract require
+a separate future decision and implementation. The session handle store
 (`~/.acrelay/handles.json`) is private storage — 0600 on POSIX, a
 creation-time protected current-user-only DACL on Windows — and never leaves
-the machine. Handle store
-v2 binds vendor, native handle, trust-profile identity, and the reviewer cwd;
-v1 stores and profile-less/cwd-less entries fail closed. A neutral cwd stays
-owner-only and is reused for that handle because vendor resume lookup can be
-cwd-scoped; deleting the handle removes the acrelay-owned neutral root. Every
+the machine. Local storage does not mean local model inference: the selected
+reviewer vendor may still process approved subject content, paths, and metadata,
+and vendor-owned session/config/history retention is outside acrelay's cleanup
+authority. Handle store v2 binds vendor, native handle, trust-profile identity,
+and the reviewer cwd; v1 stores and profile-less/cwd-less entries fail closed.
+A neutral cwd stays owner-only and is reused for that handle because vendor
+resume lookup can be cwd-scoped. New neutral cwd directories live under the
+handle store's private `runtime/` directory, not the OS temp directory. If that
+paired root would fall inside the review subject, acrelay uses its platform
+user-config fallback instead. Existing temp-bound handles are not moved or
+copied; they remain diagnosable until an explicit session reset or authorized
+cleanup. Every
 canonical and handle-store mutation is
 serialized across processes by an exclusive lock on a sidecar lock file —
 POSIX uses an advisory `flock`; Windows uses a `LockFileEx` fixed byte range
@@ -58,6 +79,75 @@ While a journal is pending, the same canonical rejects every mutator except
 available. A crash with ambiguous execution reconciles to `UNKNOWN` and never
 retries automatically. Corrupt journals are recorded in the canonical before
 being moved to owner-only quarantine.
+
+## Private Artifact Lifecycle
+
+| Artifact | Location and sensitivity | Retention / deletion authority |
+| --- | --- | --- |
+| Raw canonical | Owner-selected private path; raw review evidence | Owner-retained. Acrelay never deletes or applies a TTL. |
+| Canonical `.lock` | Beside the canonical; private coordination state | Acrelay opens/reuses it. An orphan lock is not auto-deleted because inactivity is not provable. |
+| `.dispatch-*` journal | Beside the canonical; private pending execution evidence | Removed after captured reconciliation, or moved to quarantine only after declared abandon is recorded canonical-first. |
+| `.quarantine-*` sidecar | Beside the canonical; private anomaly evidence | Exact transaction/digest purge only after durable canonical disposition and owner reason. |
+| Handle store and `.lock` | `~/.acrelay/` by default or explicit private path; native session secret | Exact ref cleanup only. No store-global liveness, TTL, or GC. |
+| Neutral cwd | Paired private `runtime/` root (platform fallback when needed) | Retained for resume; exact ref cleanup removes only the verified acrelay-owned directory. |
+| Vendor session/config/history | Vendor-owned location and retention | Outside acrelay authority; never reported as deleted by local cleanup. |
+
+Cleanup is explicit, canonical/ref-scoped, and non-destructive by default:
+
+```sh
+acrelay cleanup -canonical review.md -ref sref-... -mode list
+acrelay cleanup -canonical review.md -ref sref-... -mode dry-run
+acrelay cleanup -canonical review.md -ref sref-... -mode apply \
+  -actor owner \
+  -continuity-abandon-reason "No related objective will resume this session."
+```
+
+`OPEN`, `DECISION_REQUIRED`, and `CLOSABLE` objectives cannot clean up their
+session. A terminal objective still retains its handle and cwd until the owner
+names the exact canonical/ref and records that related-objective continuity is
+abandoned. Apply writes that declaration to the canonical before removing the
+mapping and acrelay-owned neutral cwd. In-target cwd paths are never deleted.
+Repeated cleanup converges to `already_clean`. Handle-store mutation and cwd
+removal are not one filesystem transaction; a crash can leave a retained
+mapping whose cwd is missing, and a retry diagnoses and completes that state.
+
+Pending journals and `UNKNOWN` transactions block session cleanup until normal
+`reconcile` or declared `abandon-transaction` resolves them. Quarantine purge
+is a separate exact-path action and requires the abandoned transaction's full
+digest to remain in the canonical:
+
+```sh
+acrelay cleanup -canonical review.md \
+  -quarantine review.md.quarantine-tx-...-<digest12>.json \
+  -mode apply -actor owner \
+  -sidecar-reason "The canonical disposition is durable."
+```
+
+If a canonical was externally deleted, `-orphan-sidecar` can list, dry-run, or
+remove one exact private dispatch/quarantine sidecar after an owner declaration.
+It never scans a store or computes global reference liveness. A lone `.lock`
+cannot prove that no process owns it, so automatic lock deletion stays blocked.
+None of these operations claims secure erase, backup/cloud-copy recovery, or
+deletion of vendor-owned data.
+
+Run session cleanup before deleting the raw canonical, and retain the canonical
+until cleanup reports `applied` or `already_clean`. If the canonical is deleted
+first, acrelay can no longer verify its bound session ref or record continuity
+abandonment. The handle mapping and durable cwd therefore remain owner-retained;
+there is no ref-only deletion escape hatch or global orphan lookup.
+
+The lifecycle gate follows the persisted state, not prose: `OPEN`,
+`DECISION_REQUIRED`, and `CLOSABLE` preserve the session; `CLOSED`, `ABANDONED`,
+and `SUPERSEDED` permit only owner-declared exact cleanup. A pending journal or
+`UNKNOWN` transaction blocks it. Corrupt/version-mismatched stores and cwd paths
+outside the durable or recognized legacy namespace fail closed. A missing cwd
+is diagnosed and requires explicit reset for further resume; it is never
+silently recreated or migrated.
+
+`status -canonical review.md` uses the default handle store for bounded
+lifecycle diagnostics; pass the same `-handles` path used for review when it
+was explicit. Status reports durable, legacy, missing, or unavailable state
+without printing the native handle or cwd path and without creating storage.
 
 `store-md v0.9` and handle store v2 are exact-version cutovers. Existing v0.8
 canonicals and handle store v1 files are not silently migrated. Finish an old
@@ -274,8 +364,10 @@ isolation. Immutable trust approvals remain separate from mutable review-time
 approval requests. Both preserve declared accountability, but neither is
 authentication, RBAC, or Close authority.
 
-The default reviewer cwd is a fresh owner-only temporary directory outside the
-subject. Acrelay removes it after the prepared invocation closes. Claude runs
+The default reviewer cwd is a fresh owner-only directory in acrelay's durable
+private runtime root outside the subject. It is retained with the opaque session
+reference for resume and removed only by explicitly authorized lifecycle
+cleanup. Claude runs
 with safe mode, an explicit subject `--add-dir`, no project MCP/config hooks,
 and only `Read,Glob,Grep`. Codex runs with user config and rules ignored,
 strict config parsing, and a read-only sandbox. Initial review, resume, and
@@ -288,7 +380,7 @@ In-target cwd is an explicitly unsafe objective mode. It must be approved at
 code-execution, read, and egress risk. Under this mode, omitted `-workdir`
 resolves to the subject root and an explicitly supplied cwd must remain inside
 that root. A neutral objective rejects every caller-supplied cwd and always
-uses an acrelay-owned temporary root.
+uses an acrelay-owned durable root.
 
 The assurance levels are deliberately different:
 
@@ -541,4 +633,8 @@ prompt, and built binary are synthetic temporary files removed when the script
 exits. Run it only by explicit owner choice; deterministic test success does
 not imply live-smoke evidence.
 
-Uninstall by deleting the binary and, if desired, `~/.acrelay/`.
+Uninstall the binary separately from private data. Delete `~/.acrelay/`, any
+explicit handle-store `runtime/` or platform user-config fallback, and any
+owner-selected raw canonicals only after deciding that their resume and audit
+value is no longer needed. Acrelay does not claim secure deletion or remove
+vendor-owned state.

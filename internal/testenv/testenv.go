@@ -20,6 +20,8 @@ const (
 var isolatedEnvKeys = []string{
 	"HOME",
 	"USERPROFILE",
+	"APPDATA",
+	"LOCALAPPDATA",
 	"HOMEDRIVE",
 	"HOMEPATH",
 	"XDG_CONFIG_HOME",
@@ -109,11 +111,13 @@ func defaultProductionDir() (string, error) {
 func configureIsolatedEnvironment(root string) (*isolatedEnvironment, func(), error) {
 	home := filepath.Join(root, "home")
 	xdg := filepath.Join(root, "xdg")
+	appData := filepath.Join(root, "appdata")
+	localAppData := filepath.Join(root, "local-appdata")
 	claudeConfig := filepath.Join(root, "claude-config")
 	codexHome := filepath.Join(root, "codex-home")
 	tempRoot := filepath.Join(root, "tmp")
 	sentinelDir := filepath.Join(root, "sentinel-bin")
-	for _, dir := range []string{home, xdg, claudeConfig, codexHome, tempRoot, sentinelDir} {
+	for _, dir := range []string{home, xdg, appData, localAppData, claudeConfig, codexHome, tempRoot, sentinelDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, func() {}, err
 		}
@@ -135,6 +139,8 @@ func configureIsolatedEnvironment(root string) (*isolatedEnvironment, func(), er
 	values := map[string]string{
 		"HOME":                home,
 		"USERPROFILE":         home,
+		"APPDATA":             appData,
+		"LOCALAPPDATA":        localAppData,
 		"HOMEDRIVE":           "",
 		"HOMEPATH":            home,
 		"XDG_CONFIG_HOME":     xdg,

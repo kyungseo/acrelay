@@ -34,7 +34,17 @@ func MkdirPrivate(dir string) error {
 // MkdirTempPrivate creates an owner-only temporary directory with the given
 // prefix under the system temp root.
 func MkdirTempPrivate(prefix string) (string, error) {
-	dir, err := os.MkdirTemp("", prefix)
+	return MkdirTempPrivateAt(os.TempDir(), prefix)
+}
+
+// MkdirTempPrivateAt creates a fresh owner-only directory beneath an already
+// private durable root. The caller chooses the lifecycle of base; unlike the
+// system-temp helper, this is suitable for resumable runtime state.
+func MkdirTempPrivateAt(base, prefix string) (string, error) {
+	if err := MkdirPrivate(base); err != nil {
+		return "", err
+	}
+	dir, err := os.MkdirTemp(base, prefix)
 	if err != nil {
 		return "", err
 	}

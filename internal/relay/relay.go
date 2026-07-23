@@ -607,6 +607,13 @@ func InitSubject(canonical, question string, input subject.Spec, priorObjective,
 // set and the objective-immutable review-topology declaration (AR-2: changing
 // the topology relation later requires a new objective).
 func InitSubjectTopology(canonical, question string, input subject.Spec, priorObjective, materialDiff string, targetSeenBefore bool, policy adapter.TrustPolicy, topology TopologyPolicy) (*State, error) {
+	return InitSubjectTopologyWithLocation(canonical, question, input, priorObjective, materialDiff, targetSeenBefore, policy, topology, nil)
+}
+
+// InitSubjectTopologyWithLocation adds the D5-1 private-location gate. A
+// verified risk signal fails closed unless this exact init carries a declared
+// actor and non-empty rationale; the decision is recorded in the canonical.
+func InitSubjectTopologyWithLocation(canonical, question string, input subject.Spec, priorObjective, materialDiff string, targetSeenBefore bool, policy adapter.TrustPolicy, topology TopologyPolicy, override *LocationOverride) (*State, error) {
 	if err := policy.Validate(); err != nil {
 		return nil, err
 	}
@@ -625,6 +632,20 @@ func InitSubjectTopology(canonical, question string, input subject.Spec, priorOb
 	}
 	if err := validateSubjectRuntimeIsolation(canonical, spec, resolvedRoot); err != nil {
 		return nil, err
+	}
+	locationSignals, err := InspectPrivateLocation(canonical)
+	if err != nil {
+		return nil, fmt.Errorf("inspect canonical private location: %w", err)
+	}
+	if len(locationSignals) > 0 {
+		if override == nil {
+			return nil, fmt.Errorf("init refused: canonical location has verified risk signal(s) %s; move it outside VCS/supported sync roots or use the one-shot unsafe-location override with actor and rationale", locationSignalKinds(locationSignals))
+		}
+		if strings.TrimSpace(override.Actor) == "" || strings.TrimSpace(override.Rationale) == "" {
+			return nil, fmt.Errorf("unsafe-location override requires a declared actor and non-empty rationale")
+		}
+	} else if override != nil {
+		return nil, fmt.Errorf("unsafe-location override supplied but no supported risk signal was detected; remove the override")
 	}
 	var out *State
 	err = withCanonicalLock(canonical, func() error {
@@ -694,9 +715,15 @@ func InitSubjectTopology(canonical, question string, input subject.Spec, priorOb
 		if err != nil {
 			return err
 		}
-		section := fmt.Sprintf("\n## objective %s\n- collaboration: %s\n- question: %s\n- subject: %s\n- aggregate: %s\n- trust_profile: %s\n- owner_approvals: %d\n- topology: surface=%s driver_vendor=%s context_relation=%s (operator-declared facts, not verified)\n%s",
+		locationRecord := "- private_location: no supported risk signal detected (not an exhaustive safety claim)\n"
+		if override != nil {
+			locationRecord = fmt.Sprintf("- private_location: one-shot override actor=%q signals=%s rationale=%q (not reusable; detection is non-exhaustive)\n",
+				override.Actor, locationSignalKinds(locationSignals), override.Rationale)
+		}
+		section := fmt.Sprintf("\n## objective %s\n- collaboration: %s\n- question: %s\n- subject: %s\n- aggregate: %s\n- trust_profile: %s\n- owner_approvals: %d\n%s- topology: surface=%s driver_vendor=%s context_relation=%s (operator-declared facts, not verified)\n%s",
 			objID, collabID, question, subject.Summary(spec, snapshot), snapshot.Aggregate,
 			policy.ProfileID, len(policy.Approvals),
+			locationRecord,
 			topology.ExecutionSurface, topology.DriverVendor, topology.ContextRelation, block)
 		if _, err := store.AppendAtomic(canonical, section, rev); err != nil {
 			return err
@@ -2283,6 +2310,13 @@ func Status(canonical string) (string, error) {
 		fmt.Fprintf(&b, "rounds: %d/%d\n", len(st.Rounds), st.FormalRoundBound)
 	}
 	fmt.Fprintf(&b, "subject: %s aggregate=%s\n", subject.Summary(st.SubjectSpec, st.Subject), st.TargetRevision[:12])
+	if signals, inspectErr := InspectPrivateLocation(canonical); inspectErr != nil {
+		fmt.Fprintf(&b, "private-location: diagnostic unavailable (%v); absence of a signal is not a safety claim\n", inspectErr)
+	} else if len(signals) > 0 {
+		fmt.Fprintf(&b, "private-location: WARNING signals=%s; move the canonical outside VCS/supported sync roots (detection is not exhaustive)\n", locationSignalKinds(signals))
+	} else {
+		fmt.Fprintln(&b, "private-location: no supported risk signal detected (not an exhaustive safety claim)")
+	}
 	// FEAT-20260722-001: the private status surface shows the derived topology
 	// profile and its source-qualified facets. Declared values are provenance,
 	// never verification.
@@ -2344,6 +2378,39 @@ func Status(canonical string) (string, error) {
 	}
 	if recs, _ := pendingTransactions(canonical); len(recs) > 0 {
 		fmt.Fprintf(&b, "PENDING TRANSACTION: %s (reconcile or declared abandon required before mutation)\n", strings.Join(recs, ", "))
+	}
+	return b.String(), nil
+}
+
+// StatusWithHandles adds bounded lifecycle diagnostics without exposing the
+// native handle or private cwd path. It remains read-only: a missing default
+// store/root is reported and never created by status.
+func StatusWithHandles(canonical string, handles *adapter.HandleStore) (string, error) {
+	out, err := Status(canonical)
+	if err != nil {
+		return "", err
+	}
+	st, err := LoadState(canonical)
+	if err != nil || st == nil || st.SessionRef == "" || handles == nil {
+		return out, err
+	}
+	info, found, inspectErr := handles.Inspect(st.SessionRef)
+	var b strings.Builder
+	b.WriteString(out)
+	switch {
+	case inspectErr != nil:
+		fmt.Fprintln(&b, "session lifecycle: diagnostic unavailable (handle store corrupt, unsupported, or not private); no mutation attempted")
+	case !found:
+		fmt.Fprintln(&b, "session lifecycle: handle mapping missing; explicit session reset is required (no silent fallback)")
+	default:
+		if info.LegacyTempRoot {
+			fmt.Fprintln(&b, "session lifecycle: legacy temp-bound neutral cwd; no automatic migration")
+		}
+		if info.WorkingDirGone {
+			fmt.Fprintln(&b, "session lifecycle: bound cwd missing; explicit session reset is required")
+		} else if info.Neutral && !info.LegacyTempRoot {
+			fmt.Fprintln(&b, "session lifecycle: durable acrelay-owned neutral cwd available")
+		}
 	}
 	return b.String(), nil
 }
