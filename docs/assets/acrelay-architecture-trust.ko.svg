@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">acRelay가 review 정보를 다루는 방식</title>
+  <desc id="desc">Driver는 변경을 작성하고 finding에 응답합니다. Owner는 승인을 결정하고 review를 종료합니다. acRelay는 review 기록과 복구 data를 비공개로 보관하고, 승인된 파일과 prompt만 Claude Code 또는 Codex reviewer CLI로 보냅니다.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#44546a"/>
+    </marker>
+    <style>
+      text { font-family: Inter, "Apple SD Gothic Neo", "Noto Sans KR", ui-sans-serif, sans-serif; fill: #172033; }
+      .title { font-size: 34px; font-weight: 700; }
+      .subtitle { font-size: 18px; fill: #526078; }
+      .zone-label { font-size: 17px; font-weight: 700; letter-spacing: .06em; }
+      .node-title { font-size: 21px; font-weight: 700; }
+      .node-copy { font-size: 15px; fill: #44546a; }
+      .edge { stroke: #44546a; stroke-width: 3; fill: none; marker-end: url(#arrow); }
+      .edge-dashed { stroke: #7b879b; stroke-width: 2.5; stroke-dasharray: 8 7; fill: none; marker-end: url(#arrow); }
+      .private-zone { fill: #edf6ff; stroke: #6aa9e9; stroke-width: 2; }
+      .vendor-zone { fill: #fff5e8; stroke: #e5a64f; stroke-width: 2; }
+      .human { fill: #f4f1ff; stroke: #8b78cf; stroke-width: 2; }
+      .system { fill: #ffffff; stroke: #3977bd; stroke-width: 2.5; }
+      .state { fill: #ffffff; stroke: #6aa9e9; stroke-width: 2; }
+      @media (prefers-color-scheme: dark) {
+        text { fill: #edf2ff; }
+        .subtitle, .node-copy { fill: #c5cee0; }
+        .private-zone { fill: #132b42; stroke: #62a9ee; }
+        .vendor-zone { fill: #3b2b15; stroke: #efb75f; }
+        .human { fill: #28213f; stroke: #a996ef; }
+        .system, .state { fill: #172033; }
+        .edge { stroke: #c5cee0; }
+        .edge-dashed { stroke: #9ba8bd; }
+      }
+    </style>
+  </defs>
+
+  <rect width="1200" height="720" fill="#fbfcff"/>
+  <text x="60" y="64" class="title">acRelay가 review 정보를 다루는 방식</text>
+  <text x="60" y="96" class="subtitle">승인과 종료는 사람이 결정합니다. Reviewer 전송은 따로 확인합니다.</text>
+
+  <rect x="40" y="130" width="820" height="540" rx="28" class="private-zone"/>
+  <text x="68" y="165" class="zone-label">비공개 로컬 기록</text>
+
+  <rect x="890" y="130" width="270" height="540" rx="28" class="vendor-zone"/>
+  <text x="918" y="165" class="zone-label">REVIEWER SERVICE</text>
+
+  <rect x="85" y="215" width="205" height="112" rx="18" class="human"/>
+  <text x="112" y="255" class="node-title">Driver agent</text>
+  <text x="112" y="284" class="node-copy">변경 작성</text>
+  <text x="112" y="307" class="node-copy">Finding 처리</text>
+
+  <rect x="85" y="470" width="205" height="112" rx="18" class="human"/>
+  <text x="112" y="510" class="node-title">Owner</text>
+  <text x="112" y="539" class="node-copy">승인 결정</text>
+  <text x="112" y="562" class="node-copy">Review 종료</text>
+
+  <rect x="365" y="290" width="240" height="138" rx="20" class="system"/>
+  <text x="410" y="337" class="node-title">acRelay CLI</text>
+  <text x="396" y="370" class="node-copy">확인 · 전송 · 기록</text>
+  <text x="397" y="395" class="node-copy">재확인 · 복구 · 요약</text>
+
+  <rect x="655" y="205" width="165" height="92" rx="16" class="state"/>
+  <text x="679" y="241" class="node-title">Review할 파일</text>
+  <text x="679" y="270" class="node-copy">파일 목록 + revision</text>
+
+  <rect x="655" y="330" width="165" height="92" rx="16" class="state"/>
+  <text x="677" y="366" class="node-title">Review 기록</text>
+  <text x="677" y="395" class="node-copy">근거 + 결정</text>
+
+  <rect x="655" y="455" width="165" height="120" rx="16" class="state"/>
+  <text x="677" y="491" class="node-title">복구 정보</text>
+  <text x="677" y="520" class="node-copy">Journal · quarantine</text>
+  <text x="677" y="544" class="node-copy">Session ID · 작업 폴더</text>
+
+  <rect x="910" y="280" width="230" height="166" rx="20" class="human"/>
+  <text x="945" y="327" class="node-title">Reviewer CLI</text>
+  <text x="940" y="360" class="node-copy">Claude Code 또는 Codex</text>
+  <text x="940" y="385" class="node-copy">제한된</text>
+  <text x="940" y="408" class="node-copy">read-only review</text>
+
+  <path d="M290 270 C330 270 330 320 365 330" class="edge"/>
+
+  <path d="M365 398 C330 430 330 500 290 520" class="edge"/>
+
+  <path d="M290 535 C350 540 350 425 398 414" class="edge"/>
+
+  <path d="M605 325 C625 300 635 273 655 260" class="edge-dashed"/>
+  <path d="M605 360 L655 372" class="edge"/>
+  <path d="M605 400 C628 438 635 490 655 505" class="edge"/>
+
+  <path d="M820 250 C860 250 872 315 910 340" class="edge-dashed"/>
+  <text x="872" y="235" class="node-copy">승인된 review 정보</text>
+
+  <path d="M910 400 C870 425 855 398 820 385" class="edge"/>
+  <text x="875" y="470" class="node-copy">정리된 finding</text>
+
+  <text x="68" y="638" class="node-copy">기록은 로컬에 남지만 reviewer는 provider를 사용할 수 있습니다. Provider의 session·설정은 acRelay가 삭제할 수 없습니다.</text>
+</svg>

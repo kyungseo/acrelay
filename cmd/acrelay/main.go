@@ -1,4 +1,4 @@
-// Command acrelay is the v1 one-shot review relay CLI (working name).
+// Command acrelay is the acRelay one-shot review relay CLI.
 // It automates the reviewer leg only: request assembly, one child
 // invocation, capture, validation, and canonical-record append. Driver
 // dispositions and arbiter decisions stay human commands.
@@ -26,8 +26,8 @@ import (
 	"github.com/kyungseo/acrelay/internal/subject"
 )
 
-// dispatchSignalContext implements the FEAT-20260721-002 parent-signal
-// contract for dispatching commands: the first SIGINT/SIGTERM cancels the
+// dispatchSignalContext implements the parent-signal contract for dispatching
+// commands: the first SIGINT/SIGTERM cancels the
 // dispatch context with adapter.ErrParentSignal (graceful group
 // SIGTERM->grace->SIGKILL, classified canceled.parent-signal, journal stays
 // authoritative); a second signal force-kills every tracked child group and
@@ -188,7 +188,7 @@ func runBriefing(args []string, stdout io.Writer) (int, error) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, `usage: acrelay <init|review|confirm|disposition|request-approval|respond-approval|withdraw-approval|advance|close|terminate|reconcile|abandon-transaction|cleanup|status|briefing> [flags]
+		fmt.Fprintln(os.Stderr, `usage: acrelay <init|review|confirm|disposition|request-approval|respond-approval|withdraw-approval|advance|close|terminate|reconcile|abandon-transaction|cleanup|status|briefing|version> [flags]
 The canonical record is private local storage: keep it outside shared/synced/
 published paths. Raw canonical sharing is unsupported; redacted export is not provided in v1.`)
 		os.Exit(2)
@@ -616,6 +616,11 @@ published paths. Raw canonical sharing is unsupported; redacted export is not pr
 		}
 		if code != 0 {
 			os.Exit(code)
+		}
+
+	case "version":
+		if err := runVersion(args, os.Stdout); err != nil {
+			fail(err)
 		}
 
 	default:

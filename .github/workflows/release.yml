@@ -1,0 +1,69 @@
+# Canonical release artifacts are produced only by an explicit manual run
+# against an already-approved exact tag. This workflow never creates a tag,
+# changes repository settings, or publishes a GitHub Release.
+name: release-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact approved release tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-build-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Verify exact tag and builder identity
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          test "$RELEASE_TAG" = "v0.1.0-alpha.1"
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$(git rev-parse HEAD)"
+          test "$(go env GOOS)" = "darwin"
+          test "$(go env GOARCH)" = "arm64"
+          go version
+          sw_vers
+      - name: Validate source
+        run: |
+          go mod tidy -diff
+          go vet ./...
+          go test ./... -race -count=1
+          go build ./cmd/...
+          go mod verify
+      - name: Build canonical release bundle
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: ./scripts/package-release.sh "$RELEASE_TAG" dist
+      - name: Verify package-installer contract
+        run: ./scripts/test-release.sh
+      - name: Upload canonical release bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: acrelay-${{ inputs.tag }}-darwin-arm64
+          path: |
+            dist/acrelay_0.1.0-alpha.1_darwin_arm64.tar.gz
+            dist/acrelay_0.1.0-alpha.1_provenance.json
+            dist/acrelay_0.1.0-alpha.1_checksums.txt
+          if-no-files-found: error
+          retention-days: 7
