@@ -236,7 +236,7 @@ func (a CodexAdapter) Prepare(ctx context.Context, req Request, handles *HandleS
 		resumeHandle = h
 		resumeWorkingDir = workingDir
 	}
-	preparedReq, cleanupDir, err := prepareExecutionRoot(req, resumeWorkingDir)
+	preparedReq, cleanupDir, err := prepareExecutionRoot(req, resumeWorkingDir, handles)
 	if err != nil {
 		return nil, err
 	}

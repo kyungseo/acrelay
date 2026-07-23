@@ -3,6 +3,8 @@ package adapter
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -124,7 +126,7 @@ func TestPrepareExecutionRootModes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cleanup == "" || prepared.WorkingDir != cleanup {
-		t.Fatalf("default neutral mode must create an owned temp cwd: req=%+v cleanup=%q", prepared, cleanup)
+		t.Fatalf("default neutral mode must create an owned durable cwd: req=%+v cleanup=%q", prepared, cleanup)
 	}
 	if inside, err := pathWithin(subjectRoot, cleanup); err != nil || inside {
 		t.Fatalf("neutral cwd must be outside subject: inside=%v err=%v", inside, err)
@@ -177,13 +179,17 @@ func TestPrepareExecutionRootModes(t *testing.T) {
 	if _, _, err := prepareExecutionRoot(Request{SubjectRoot: subjectRoot, WorkingDir: subjectRoot, TrustPolicy: unsafe}, boundInTarget); err == nil {
 		t.Fatal("in-target resume must reject a different caller cwd without explicit reset")
 	}
-	resolvedTemp, err := filepath.EvalSymlinks(os.TempDir())
+	durableRoot, err := (&HandleStore{}).NeutralRuntimeRoot()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := prepareExecutionRoot(Request{SubjectRoot: resolvedTemp, TrustPolicy: neutral}, ""); err == nil ||
+	resolvedDurableRoot, err := filepath.EvalSymlinks(durableRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := prepareExecutionRoot(Request{SubjectRoot: resolvedDurableRoot, TrustPolicy: neutral}, ""); err == nil ||
 		!strings.Contains(err.Error(), "neutral reviewer cwd unavailable") {
-		t.Fatalf("subject containing the system temp root must fail closed: %v", err)
+		t.Fatalf("subject containing the durable runtime root must fail closed: %v", err)
 	}
 }
 
@@ -276,6 +282,69 @@ func TestHandleStoreCorruptFailsClosed(t *testing.T) {
 	if _, _, _, _, err := (&HandleStore{Path: h.Path}).Lookup("cwd-less"); err == nil ||
 		!strings.Contains(err.Error(), "working directory") {
 		t.Fatalf("handle store v2 entry without bound cwd must fail closed: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "not-acrelay-owned")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tampered := fmt.Sprintf(`{"version":2,"entries":{"tampered":{"vendor":"codex","handle":"thread-safe-001","profile_id":"review-input-trust-v1/neutral","working_dir":%q}}}`, outside)
+	if err := platform.WritePrivateFile(h.Path, []byte(tampered)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, err := h.Lookup("tampered"); err == nil || !strings.Contains(err.Error(), "outside the acrelay-owned") {
+		t.Fatalf("namespace-external WorkingDir must fail closed: %v", err)
+	}
+}
+
+func TestLegacyTempCwdIsDiagnosedWithoutMigration(t *testing.T) {
+	h := &HandleStore{Path: filepath.Join(t.TempDir(), "handles.json")}
+	legacy, err := platform.MkdirTempPrivate("acrelay-review-root-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(legacy) })
+	ref, err := h.Register("codex", "thread-legacy-001", profileID(WorkingDirNeutral), legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, found, err := h.Inspect(ref)
+	if err != nil || !found || !info.LegacyTempRoot || info.WorkingDir != legacy {
+		t.Fatalf("legacy temp-bound handle not diagnosed exactly: info=%+v found=%v err=%v", info, found, err)
+	}
+	if _, _, _, resumed, err := h.Lookup(ref); err != nil || resumed != legacy {
+		t.Fatalf("legacy lookup must preserve exact cwd without migration: cwd=%q err=%v", resumed, err)
+	}
+}
+
+func TestHandleCleanupCrashWindowConverges(t *testing.T) {
+	h := &HandleStore{Path: filepath.Join(t.TempDir(), "handles.json")}
+	root, err := h.NeutralRuntimeRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := platform.MkdirTempPrivateAt(root, "acrelay-review-root-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := h.Register("codex", "thread-cleanup-001", profileID(WorkingDirNeutral), cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeHandleCleanupSave = func() error { return errors.New("simulated crash before handle-store save") }
+	t.Cleanup(func() { beforeHandleCleanupSave = nil })
+	if _, _, err := h.Cleanup(ref); err == nil {
+		t.Fatal("crash-window fixture must fail before handle-store save")
+	}
+	info, found, err := h.Inspect(ref)
+	if err != nil || !found || !info.WorkingDirGone {
+		t.Fatalf("post-crash mapping/missing-cwd state not diagnosable: info=%+v found=%v err=%v", info, found, err)
+	}
+	beforeHandleCleanupSave = nil
+	if _, found, err := h.Cleanup(ref); err != nil || !found {
+		t.Fatalf("cleanup retry did not converge: found=%v err=%v", found, err)
+	}
+	if _, found, err := h.Inspect(ref); err != nil || found {
+		t.Fatalf("cleanup retry left mapping: found=%v err=%v", found, err)
 	}
 }
 
@@ -1061,7 +1130,11 @@ func TestHandleStoreHelperProcessMutate(t *testing.T) {
 	}
 	s := &HandleStore{Path: path}
 	profile := profileID(WorkingDirNeutral)
-	workingDir, err := os.MkdirTemp("", "acrelay-review-root-helper-")
+	runtimeRoot, err := s.NeutralRuntimeRoot()
+	if err != nil {
+		t.Fatalf("helper runtime root: %v", err)
+	}
+	workingDir, err := platform.MkdirTempPrivateAt(runtimeRoot, "acrelay-review-root-helper-")
 	if err != nil {
 		t.Fatalf("helper working directory: %v", err)
 	}

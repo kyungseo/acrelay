@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -73,11 +74,13 @@ sleep 60
 		"-prompt", "look", "-handles", handles)
 	review.Env = env
 	review.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var reviewOutput bytes.Buffer
+	review.Stdout, review.Stderr = &reviewOutput, &reviewOutput
 	if err := review.Start(); err != nil {
 		t.Fatal(err)
 	}
 	// Wait until the child vendor is actually running, then deliver SIGINT.
-	waitForFile(t, filepath.Join(dir, "child-started"), 10*time.Second)
+	waitForFile(t, filepath.Join(dir, "child-started"), 10*time.Second, reviewOutput.String)
 	if err := review.Process.Signal(syscall.SIGINT); err != nil {
 		t.Fatal(err)
 	}

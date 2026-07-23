@@ -13,7 +13,7 @@ func TestRunIsolatedMainEnvironment(t *testing.T) {
 	if root == "" {
 		t.Fatal("TestMain did not publish the isolated test root")
 	}
-	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"} {
+	for _, key := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"} {
 		value := os.Getenv(key)
 		if value == "" || !pathWithin(root, value) {
 			t.Fatalf("%s=%q is outside isolated root %q", key, value, root)

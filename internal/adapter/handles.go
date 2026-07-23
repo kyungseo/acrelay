@@ -53,6 +53,10 @@ func (h *HandleStore) withExclusiveLock(fn func() error) error {
 // only by concurrency tests to widen the critical section (R2-F2).
 var afterLockAcquired func()
 
+// beforeHandleCleanupSave is a deterministic crash-window hook used only by
+// package tests. Production leaves it nil.
+var beforeHandleCleanupSave func() error
+
 type handleFile struct {
 	Version int                    `json:"version"`
 	Entries map[string]handleEntry `json:"entries"`
@@ -66,6 +70,67 @@ type handleEntry struct {
 }
 
 const handleFileVersion = 2
+
+const neutralRuntimeDir = "runtime"
+
+// HandleInfo is the non-secret lifecycle view of one opaque reference. The
+// native vendor handle is deliberately excluded from diagnostics and CLI
+// output.
+type HandleInfo struct {
+	Ref            string
+	Vendor         string
+	ProfileID      string
+	WorkingDir     string
+	Neutral        bool
+	LegacyTempRoot bool
+	WorkingDirGone bool
+}
+
+func platformNeutralRuntimeRoot() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("durable private runtime root unavailable: %w", err)
+	}
+	return filepath.Join(dir, "acrelay", neutralRuntimeDir), nil
+}
+
+// NeutralRuntimeRoot returns the durable cwd namespace paired with this
+// handle store. An empty store path uses the platform config fallback. Path
+// resolution never moves an existing handle or cwd.
+func (h *HandleStore) NeutralRuntimeRoot() (string, error) {
+	if strings.TrimSpace(h.Path) == "" {
+		return platformNeutralRuntimeRoot()
+	}
+	dir, err := filepath.Abs(filepath.Dir(h.Path))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, neutralRuntimeDir), nil
+}
+
+func directNeutralChild(root, path string) bool {
+	cleanRoot, cleanPath := filepath.Clean(root), filepath.Clean(path)
+	return filepath.IsAbs(cleanPath) && filepath.Dir(cleanPath) == cleanRoot &&
+		strings.HasPrefix(filepath.Base(cleanPath), "acrelay-review-root-")
+}
+
+func legacyTempNeutralPath(path string) bool {
+	clean := filepath.Clean(path)
+	return filepath.IsAbs(clean) && filepath.Dir(clean) == filepath.Clean(os.TempDir()) &&
+		strings.HasPrefix(filepath.Base(clean), "acrelay-review-root-")
+}
+
+func (h *HandleStore) classifyNeutralPath(path string) (durable, legacy bool, err error) {
+	root, err := h.NeutralRuntimeRoot()
+	if err != nil {
+		return false, false, err
+	}
+	durable = directNeutralChild(root, path)
+	if fallback, fallbackErr := platformNeutralRuntimeRoot(); fallbackErr == nil {
+		durable = durable || directNeutralChild(fallback, path)
+	}
+	return durable, legacyTempNeutralPath(path), nil
+}
 
 // load reads the store. A missing file yields an empty store; a corrupt,
 // version-mismatched, or group/other-accessible file fails closed — it is
@@ -169,8 +234,21 @@ func validateEntry(vendor, nativeHandle, profileID, workingDir string) error {
 	if !filepath.IsAbs(workingDir) {
 		return fmt.Errorf("handle working directory must be absolute: fail-closed")
 	}
-	if strings.HasSuffix(profileID, "/"+WorkingDirNeutral) && !isNeutralNamespacePath(workingDir) {
-		return fmt.Errorf("neutral handle working directory must use the acrelay-owned temp namespace: fail-closed")
+	return nil
+}
+
+func (h *HandleStore) validateEntry(vendor, nativeHandle, profileID, workingDir string) error {
+	if err := validateEntry(vendor, nativeHandle, profileID, workingDir); err != nil {
+		return err
+	}
+	if strings.HasSuffix(profileID, "/"+WorkingDirNeutral) {
+		durable, legacy, err := h.classifyNeutralPath(workingDir)
+		if err != nil {
+			return err
+		}
+		if !durable && !legacy {
+			return fmt.Errorf("neutral handle working directory is outside the acrelay-owned durable or legacy temp namespace: fail-closed")
+		}
 	}
 	return nil
 }
@@ -178,7 +256,7 @@ func validateEntry(vendor, nativeHandle, profileID, workingDir string) error {
 // Register stores a native handle under a fresh random reference and
 // returns the reference. Existing entries are preserved.
 func (h *HandleStore) Register(vendor, nativeHandle, profileID, workingDir string) (string, error) {
-	if err := validateEntry(vendor, nativeHandle, profileID, workingDir); err != nil {
+	if err := h.validateEntry(vendor, nativeHandle, profileID, workingDir); err != nil {
 		return "", err
 	}
 	var ref string
@@ -212,7 +290,7 @@ func (h *HandleStore) Lookup(ref string) (vendor, nativeHandle, profileID, worki
 	if !ok {
 		return "", "", "", "", fmt.Errorf("session_ref %s not found: fail-closed (no silent new-session fallback)", ref)
 	}
-	if err := validateEntry(e.Vendor, e.Handle, e.ProfileID, e.WorkingDir); err != nil {
+	if err := h.validateEntry(e.Vendor, e.Handle, e.ProfileID, e.WorkingDir); err != nil {
 		return "", "", "", "", fmt.Errorf("session_ref %s invalid: %w", ref, err)
 	}
 	return e.Vendor, e.Handle, e.ProfileID, e.WorkingDir, nil
@@ -239,7 +317,7 @@ func (h *HandleStore) Rotate(oldRef, vendor, newHandle, profileID string) (strin
 		if old.ProfileID != profileID {
 			return fmt.Errorf("rotation trust profile mismatch: ref %s belongs to %s, not %s: fail-closed", oldRef, old.ProfileID, profileID)
 		}
-		if err := validateEntry(vendor, newHandle, profileID, old.WorkingDir); err != nil {
+		if err := h.validateEntry(vendor, newHandle, profileID, old.WorkingDir); err != nil {
 			return err
 		}
 		delete(f.Entries, oldRef)
@@ -257,9 +335,40 @@ func (h *HandleStore) Rotate(oldRef, vendor, newHandle, profileID string) (strin
 	return ref, err
 }
 
-// Delete removes a reference (collaboration retention cleanup).
-func (h *HandleStore) Delete(ref string) error {
-	var removed handleEntry
+// Inspect returns a bounded lifecycle view without exposing the native vendor
+// handle. A missing cwd is diagnostic state, not an automatic migration.
+func (h *HandleStore) Inspect(ref string) (HandleInfo, bool, error) {
+	f, err := h.load()
+	if err != nil {
+		return HandleInfo{}, false, err
+	}
+	e, ok := f.Entries[ref]
+	if !ok {
+		return HandleInfo{Ref: ref}, false, nil
+	}
+	if err := h.validateEntry(e.Vendor, e.Handle, e.ProfileID, e.WorkingDir); err != nil {
+		return HandleInfo{}, true, fmt.Errorf("session_ref %s invalid: %w", ref, err)
+	}
+	neutral := strings.HasSuffix(e.ProfileID, "/"+WorkingDirNeutral)
+	_, legacy, err := h.classifyNeutralPath(e.WorkingDir)
+	if err != nil {
+		return HandleInfo{}, true, err
+	}
+	_, statErr := os.Lstat(e.WorkingDir)
+	return HandleInfo{
+		Ref: ref, Vendor: e.Vendor, ProfileID: e.ProfileID, WorkingDir: e.WorkingDir,
+		Neutral: neutral, LegacyTempRoot: neutral && legacy, WorkingDirGone: os.IsNotExist(statErr),
+	}, true, nil
+}
+
+// Cleanup removes an exact reference and its acrelay-owned neutral cwd. It is
+// idempotent for an already-absent ref. Cwd deletion happens before the atomic
+// store mutation: a crash may leave a retained ref pointing at a missing cwd,
+// which is diagnosable and converges on retry; cross-resource atomicity is not
+// claimed.
+func (h *HandleStore) Cleanup(ref string) (HandleInfo, bool, error) {
+	var removed HandleInfo
+	var found bool
 	err := h.withExclusiveLock(func() error {
 		f, err := h.load()
 		if err != nil {
@@ -267,17 +376,55 @@ func (h *HandleStore) Delete(ref string) error {
 		}
 		e, ok := f.Entries[ref]
 		if !ok {
-			return fmt.Errorf("session_ref %s not found for deletion", ref)
+			return nil
 		}
-		if strings.HasSuffix(e.ProfileID, "/"+WorkingDirNeutral) && !isNeutralNamespacePath(e.WorkingDir) {
-			return fmt.Errorf("refusing unsafe neutral working-directory cleanup %q: handle retained", e.WorkingDir)
+		if err := h.validateEntry(e.Vendor, e.Handle, e.ProfileID, e.WorkingDir); err != nil {
+			return fmt.Errorf("refusing cleanup for invalid session_ref %s: %w", ref, err)
 		}
-		removed = e
+		found = true
+		neutral := strings.HasSuffix(e.ProfileID, "/"+WorkingDirNeutral)
+		_, legacy, err := h.classifyNeutralPath(e.WorkingDir)
+		if err != nil {
+			return err
+		}
+		removed = HandleInfo{Ref: ref, Vendor: e.Vendor, ProfileID: e.ProfileID, WorkingDir: e.WorkingDir, Neutral: neutral, LegacyTempRoot: neutral && legacy}
+		if neutral {
+			if st, statErr := os.Lstat(e.WorkingDir); statErr == nil {
+				if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
+					return fmt.Errorf("refusing neutral cwd cleanup %q: not a plain directory", e.WorkingDir)
+				}
+				if err := platform.VerifyPrivateDir(e.WorkingDir); err != nil {
+					return fmt.Errorf("refusing neutral cwd cleanup %q: %w", e.WorkingDir, err)
+				}
+				if err := os.RemoveAll(filepath.Clean(e.WorkingDir)); err != nil {
+					return err
+				}
+			} else if !os.IsNotExist(statErr) {
+				return statErr
+			} else {
+				removed.WorkingDirGone = true
+			}
+		}
+		if beforeHandleCleanupSave != nil {
+			if err := beforeHandleCleanupSave(); err != nil {
+				return err
+			}
+		}
 		delete(f.Entries, ref)
 		return h.save(f)
 	})
-	if err != nil || !strings.HasSuffix(removed.ProfileID, "/"+WorkingDirNeutral) {
+	return removed, found, err
+}
+
+// Delete preserves the original strict missing-ref behavior for internal
+// callers; lifecycle cleanup uses Cleanup for idempotent convergence.
+func (h *HandleStore) Delete(ref string) error {
+	_, found, err := h.Cleanup(ref)
+	if err != nil {
 		return err
 	}
-	return os.RemoveAll(filepath.Clean(removed.WorkingDir))
+	if !found {
+		return fmt.Errorf("session_ref %s not found for deletion", ref)
+	}
+	return nil
 }

@@ -204,7 +204,7 @@ func mustModuleDir(t *testing.T) string {
 	return filepath.Join(wd) // test runs in cmd/acrelay; `go build .` builds this package
 }
 
-func waitForFile(t *testing.T, path string, within time.Duration) {
+func waitForFile(t *testing.T, path string, within time.Duration, diagnostic ...func() string) {
 	t.Helper()
 	deadline := time.Now().Add(within)
 	for time.Now().Before(deadline) {
@@ -213,5 +213,9 @@ func waitForFile(t *testing.T, path string, within time.Duration) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for %s", path)
+	extra := ""
+	if len(diagnostic) > 0 && diagnostic[0] != nil {
+		extra = "\nprocess output:\n" + diagnostic[0]()
+	}
+	t.Fatalf("timed out waiting for %s%s", path, extra)
 }

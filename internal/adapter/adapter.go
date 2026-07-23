@@ -608,17 +608,46 @@ func pathWithin(root, candidate string) (bool, error) {
 	return rel == "." || (rel != ".." && !filepath.IsAbs(rel) && !strings.HasPrefix(rel, ".."+string(filepath.Separator))), nil
 }
 
-func isNeutralNamespacePath(path string) bool {
-	clean := filepath.Clean(path)
-	return filepath.IsAbs(clean) && filepath.Dir(clean) == filepath.Clean(os.TempDir()) &&
-		strings.HasPrefix(filepath.Base(clean), "acrelay-review-root-")
+func plannedPathWithin(root, candidate string) (bool, error) {
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return false, err
+	}
+	abs, err := filepath.Abs(candidate)
+	if err != nil {
+		return false, err
+	}
+	probe := abs
+	var missing []string
+	var resolved string
+	for {
+		resolved, err = filepath.EvalSymlinks(probe)
+		if err == nil {
+			break
+		}
+		if !os.IsNotExist(err) || filepath.Dir(probe) == probe {
+			return false, err
+		}
+		missing = append(missing, filepath.Base(probe))
+		probe = filepath.Dir(probe)
+	}
+	planned := resolved
+	for i := len(missing) - 1; i >= 0; i-- {
+		planned = filepath.Join(planned, missing[i])
+	}
+	rel, err := filepath.Rel(resolvedRoot, planned)
+	if err != nil {
+		return false, err
+	}
+	return rel == "." || (rel != ".." && !filepath.IsAbs(rel) && !strings.HasPrefix(rel, ".."+string(filepath.Separator))), nil
 }
 
 // prepareExecutionRoot resolves the immutable cwd mode. A fresh neutral
-// session creates an owner-only temporary directory outside the subject.
+// session creates an owner-only directory in the durable handle-store runtime
+// namespace outside the subject.
 // A resumed session reuses only the directory bound to its private handle;
 // caller-supplied neutral cwd remains forbidden.
-func prepareExecutionRoot(req Request, resumeWorkingDir string) (Request, string, error) {
+func prepareExecutionRoot(req Request, resumeWorkingDir string, stores ...*HandleStore) (Request, string, error) {
 	if err := req.TrustPolicy.Validate(); err != nil {
 		return req, "", err
 	}
@@ -645,14 +674,29 @@ func prepareExecutionRoot(req Request, resumeWorkingDir string) (Request, string
 		return req, "", nil
 	}
 	if req.WorkingDir != "" {
-		return req, "", fmt.Errorf("neutral trust profile forbids caller-supplied cwd; acrelay-owned temporary cwd is required: fail-closed")
+		return req, "", fmt.Errorf("neutral trust profile forbids caller-supplied cwd; acrelay-owned durable cwd is required: fail-closed")
+	}
+	var handles *HandleStore
+	if len(stores) > 0 {
+		handles = stores[0]
+	}
+	if handles == nil {
+		handles = &HandleStore{}
 	}
 	if resumeWorkingDir != "" {
-		if !isNeutralNamespacePath(resumeWorkingDir) {
-			return req, "", fmt.Errorf("stored neutral working directory is outside the acrelay-owned temp namespace: explicit session reset required, fail-closed")
+		durable, legacy, err := handles.classifyNeutralPath(resumeWorkingDir)
+		if err != nil {
+			return req, "", err
+		}
+		if !durable && !legacy {
+			return req, "", fmt.Errorf("stored neutral working directory is outside the acrelay-owned durable or legacy temp namespace: explicit session reset required, fail-closed")
 		}
 		if err := platform.VerifyPrivateDir(resumeWorkingDir); err != nil {
-			return req, "", fmt.Errorf("stored neutral working directory is unavailable or not owner-only: explicit session reset required, fail-closed")
+			kind := "durable"
+			if legacy {
+				kind = "legacy temp-bound"
+			}
+			return req, "", fmt.Errorf("stored %s neutral working directory is unavailable or not owner-only: explicit session reset required, fail-closed", kind)
 		}
 		inside, err := pathWithin(req.SubjectRoot, resumeWorkingDir)
 		if err != nil || inside {
@@ -661,7 +705,19 @@ func prepareExecutionRoot(req Request, resumeWorkingDir string) (Request, string
 		req.WorkingDir = resumeWorkingDir
 		return req, "", nil
 	}
-	dir, err := platform.MkdirTempPrivate("acrelay-review-root-")
+	root, err := handles.NeutralRuntimeRoot()
+	if err != nil {
+		return req, "", err
+	}
+	if inside, insideErr := plannedPathWithin(req.SubjectRoot, root); insideErr != nil {
+		return req, "", fmt.Errorf("resolve planned durable runtime root: %w", insideErr)
+	} else if inside {
+		root, err = platformNeutralRuntimeRoot()
+		if err != nil {
+			return req, "", err
+		}
+	}
+	dir, err := platform.MkdirTempPrivateAt(root, "acrelay-review-root-")
 	if err != nil {
 		return req, "", err
 	}
@@ -671,7 +727,7 @@ func prepareExecutionRoot(req Request, resumeWorkingDir string) (Request, string
 		if err != nil {
 			return req, "", fmt.Errorf("resolve generated neutral cwd: %w", err)
 		}
-		return req, "", fmt.Errorf("system temp root is inside SubjectRoot; neutral reviewer cwd unavailable: fail-closed")
+		return req, "", fmt.Errorf("acrelay durable runtime root is inside SubjectRoot; neutral reviewer cwd unavailable: fail-closed")
 	}
 	req.WorkingDir = dir
 	return req, dir, nil

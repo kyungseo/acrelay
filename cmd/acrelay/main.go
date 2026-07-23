@@ -66,7 +66,7 @@ func newDispatchContext() (context.Context, context.CancelFunc) {
 // default resolution fails closed — home or private-directory failure is a
 // preflight error, never a silent cwd fallback that could lose the
 // persisted reviewer binding (R1-CX-F3).
-func resolveHandles(explicit string) (string, error) {
+func resolveHandlesPath(explicit string) (string, error) {
 	if explicit != "" {
 		return explicit, nil
 	}
@@ -74,11 +74,22 @@ func resolveHandles(explicit string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("default handle store unavailable (no user home): pass -handles explicitly: %w", err)
 	}
-	dir := filepath.Join(home, ".acrelay")
+	return filepath.Join(home, ".acrelay", "handles.json"), nil
+}
+
+func resolveHandles(explicit string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	path, err := resolveHandlesPath(explicit)
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Dir(path)
 	if err := platform.MkdirPrivate(dir); err != nil {
 		return "", fmt.Errorf("default handle store directory %s is not usable as private storage: fix it or pass -handles explicitly: %w", dir, err)
 	}
-	return filepath.Join(dir, "handles.json"), nil
+	return path, nil
 }
 
 func adapterFor(name string) (adapter.Adapter, error) {
@@ -177,9 +188,9 @@ func runBriefing(args []string, stdout io.Writer) (int, error) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, `usage: acrelay <init|review|confirm|disposition|request-approval|respond-approval|withdraw-approval|advance|close|terminate|reconcile|abandon-transaction|status|briefing> [flags]
+		fmt.Fprintln(os.Stderr, `usage: acrelay <init|review|confirm|disposition|request-approval|respond-approval|withdraw-approval|advance|close|terminate|reconcile|abandon-transaction|cleanup|status|briefing> [flags]
 The canonical record is private local storage: keep it outside shared/synced/
-published paths. Sharing requires a redacted export (not provided in v1).`)
+published paths. Raw canonical sharing is unsupported; redacted export is not provided in v1.`)
 		os.Exit(2)
 	}
 	cmd, args := os.Args[1], os.Args[2:]
@@ -199,6 +210,8 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 		executionSurface := fs.String("execution-surface", "", "reviewer execution surface (external-cli; host-subagent is explicitly unsupported)")
 		driverVendor := fs.String("driver-vendor", "", "operator-declared driver agent vendor (claude|codex|other; omitted records undeclared)")
 		contextRelation := fs.String("context-relation", "", "operator-declared driver/reviewer context relation (separate|shared; omitted records undeclared)")
+		allowUnsafeLocation := fs.Bool("allow-unsafe-location", false, "one-shot override for a detected VCS/supported sync location")
+		unsafeLocationReason := fs.String("unsafe-location-reason", "", "non-empty owner rationale for -allow-unsafe-location")
 		fs.Parse(args)
 		if *canonical == "" || *question == "" {
 			fail(fmt.Errorf("init requires -canonical and -question"))
@@ -215,7 +228,14 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 		if err != nil {
 			fail(err)
 		}
-		st, err := relay.InitSubjectTopology(*canonical, *question, spec, *prior, *diff, *seen, policy, topology)
+		var locationOverride *relay.LocationOverride
+		if *allowUnsafeLocation || *unsafeLocationReason != "" {
+			if !*allowUnsafeLocation {
+				fail(fmt.Errorf("-unsafe-location-reason requires -allow-unsafe-location"))
+			}
+			locationOverride = &relay.LocationOverride{Actor: *approvalActor, Rationale: *unsafeLocationReason}
+		}
+		st, err := relay.InitSubjectTopologyWithLocation(*canonical, *question, spec, *prior, *diff, *seen, policy, topology, locationOverride)
 		if err != nil {
 			fail(err)
 		}
@@ -512,11 +532,78 @@ published paths. Sharing requires a redacted export (not provided in v1).`)
 		}
 		fmt.Printf("transaction abandoned: objective=%s quarantine=%s\n", st.ObjectiveID, quarantine)
 
+	case "cleanup":
+		fs := flag.NewFlagSet("cleanup", flag.ExitOnError)
+		canonical := fs.String("canonical", "", "exact owner-retained canonical record path")
+		ref := fs.String("ref", "", "exact canonical-bound session_ref")
+		quarantine := fs.String("quarantine", "", "exact canonical-bound quarantine sidecar path")
+		orphanSidecar := fs.String("orphan-sidecar", "", "exact sidecar path whose declared canonical is missing")
+		mode := fs.String("mode", "list", "list|dry-run|apply")
+		handles := fs.String("handles", "", "session handle store path (default: ~/.acrelay/handles.json, fail-closed)")
+		actor := fs.String("actor", "", "declared owner/arbiter applying cleanup")
+		reason := fs.String("continuity-abandon-reason", "", "non-empty declaration that related-objective session continuity is abandoned")
+		sidecarReason := fs.String("sidecar-reason", "", "non-empty owner reason for quarantine/orphan sidecar cleanup")
+		fs.Parse(args)
+		selected := 0
+		for _, value := range []string{*ref, *quarantine, *orphanSidecar} {
+			if value != "" {
+				selected++
+			}
+		}
+		if selected != 1 {
+			fail(fmt.Errorf("cleanup requires exactly one of -ref, -quarantine, or -orphan-sidecar"))
+		}
+		if *ref != "" {
+			if *sidecarReason != "" {
+				fail(fmt.Errorf("-sidecar-reason is only valid with -quarantine or -orphan-sidecar"))
+			}
+			handlesPath, err := resolveHandlesPath(*handles)
+			if err != nil {
+				fail(err)
+			}
+			report, err := relay.CleanupSession(relay.CleanupRequest{
+				Canonical: *canonical, Ref: *ref, Mode: relay.CleanupMode(*mode), Actor: *actor, Reason: *reason,
+			}, &adapter.HandleStore{Path: handlesPath})
+			if err != nil {
+				fail(err)
+			}
+			fmt.Print(relay.RenderCleanupReport(report))
+			if relay.CleanupMode(*mode) == relay.CleanupApply && len(report.Blocked) > 0 {
+				fail(fmt.Errorf("cleanup apply blocked; no handle/cwd deletion occurred"))
+			}
+		} else {
+			if *reason != "" {
+				fail(fmt.Errorf("use -sidecar-reason, not -continuity-abandon-reason, for sidecar cleanup"))
+			}
+			req := relay.SidecarCleanupRequest{Canonical: *canonical, Mode: relay.CleanupMode(*mode), Actor: *actor, Reason: *sidecarReason}
+			var report *relay.SidecarCleanupReport
+			var err error
+			if *quarantine != "" {
+				req.Path = *quarantine
+				report, err = relay.CleanupQuarantine(req)
+			} else {
+				req.Path = *orphanSidecar
+				report, err = relay.CleanupOrphanSidecar(req)
+			}
+			if err != nil {
+				fail(err)
+			}
+			fmt.Print(relay.RenderSidecarCleanupReport(report))
+			if relay.CleanupMode(*mode) == relay.CleanupApply && len(report.Blocked) > 0 {
+				fail(fmt.Errorf("sidecar cleanup apply blocked; no deletion occurred"))
+			}
+		}
+
 	case "status":
 		fs := flag.NewFlagSet("status", flag.ExitOnError)
 		canonical := fs.String("canonical", "", "canonical record path")
+		handles := fs.String("handles", "", "session handle store path for lifecycle diagnostics (default: ~/.acrelay/handles.json)")
 		fs.Parse(args)
-		out, err := relay.Status(*canonical)
+		handlesPath, err := resolveHandlesPath(*handles)
+		if err != nil {
+			fail(err)
+		}
+		out, err := relay.StatusWithHandles(*canonical, &adapter.HandleStore{Path: handlesPath})
 		if err != nil {
 			fail(err)
 		}
