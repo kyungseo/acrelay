@@ -1,0 +1,270 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900"
+  role="img" aria-labelledby="diagram-title diagram-desc"
+  style="font-family:Pretendard,'Apple SD Gothic Neo','Malgun Gothic','Noto Sans KR',sans-serif">
+  <title id="diagram-title">How acRelay relays a review</title>
+  <desc id="diagram-desc">The owner confirms each send and decides when the review closes. The driver writes the change and responds to findings. acRelay sends confirmed review data to a Claude Code or Codex reviewer CLI, then keeps the findings, owner decision, and recovery data in a record on the user's computer.</desc>
+
+  <style>
+    svg {
+      --bg: #F8FAFC;
+      --ink: #172033;
+      --muted: #5B687A;
+      --hair: #CBD6E2;
+      --line: #516173;
+      --primary: #246BCE;
+      --primary-soft: #EAF2FF;
+      --primary-ink: #174A91;
+      --violet: #7157C8;
+      --violet-soft: #F0EDFF;
+      --violet-ink: #493794;
+      --green: #178269;
+      --green-soft: #E8F7F1;
+      --green-ink: #0F5C4B;
+      --amber: #B56816;
+      --amber-soft: #FFF4DF;
+      --amber-ink: #7B430D;
+      --workspace: #F1F6FC;
+      --reviewer-zone: #F6F3FF;
+      --card: #FFFFFF;
+      --footer: #EDF3F8;
+    }
+    .ink { fill: var(--ink); }
+    .muted { fill: var(--muted); }
+    .primary-ink { fill: var(--primary-ink); }
+    .violet-ink { fill: var(--violet-ink); }
+    .green-ink { fill: var(--green-ink); }
+    .amber-ink { fill: var(--amber-ink); }
+    .on-accent { fill: #FFFFFF; }
+    .card-title { font-size: 21px; font-weight: 700; letter-spacing: -0.15px; }
+    .card-body { font-size: 15px; font-weight: 500; }
+    .edge-label { font-size: 13px; font-weight: 700; }
+    .caption { font-size: 13px; font-weight: 600; }
+    .flow {
+      fill: none;
+      stroke: var(--line);
+      stroke-width: 2.5;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      marker-end: url(#arrow-open);
+    }
+    .arrow-glyph {
+      fill: none;
+      stroke: var(--line);
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+  </style>
+
+  <defs>
+    <filter id="soft-shadow" x="-15%" y="-20%" width="130%" height="150%">
+      <feDropShadow dx="0" dy="3" stdDeviation="3" flood-color="#172033" flood-opacity="0.10"/>
+    </filter>
+    <marker id="arrow-open" viewBox="0 0 12 12" refX="10" refY="6"
+      markerWidth="11.25" markerHeight="11.25" markerUnits="userSpaceOnUse"
+      orient="auto-start-reverse">
+      <path class="arrow-glyph" d="M2 2 L10 6 L2 10"/>
+    </marker>
+
+    <symbol id="ic-owner" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="8" r="3.5"/>
+      <path d="M5.5 20c.8-4 3-6 6.5-6s5.7 2 6.5 6"/>
+      <path d="M17.5 5.5l1.2 1.2 2.3-2.5"/>
+    </symbol>
+    <symbol id="ic-agent" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="4" y="6" width="16" height="13" rx="3"/>
+      <path d="M12 3v3M8 11h.01M16 11h.01M8.5 15.5h7"/>
+    </symbol>
+    <symbol id="ic-terminal" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="4" width="18" height="16" rx="2.5"/>
+      <path d="M7 9l3 3-3 3M13 15h4"/>
+    </symbol>
+    <symbol id="ic-review" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M6 3h8l4 4v14H6zM14 3v4h4"/>
+      <path d="M9 12h6M9 16h4"/>
+      <path d="M15.5 17.5l1.3 1.3 2.7-3"/>
+    </symbol>
+    <symbol id="ic-evidence" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M7 4h10v16H7zM9.5 8h5M9.5 12h5M9.5 16h3"/>
+      <path d="M5 7H3.5v14h10V20"/>
+    </symbol>
+    <symbol id="ic-check" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="9"/>
+      <path d="M8 12l2.7 2.7L16.5 9"/>
+    </symbol>
+    <symbol id="ic-bound" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M7 4H4v3M17 4h3v3M7 20H4v-3M17 20h3v-3"/>
+      <rect x="7" y="7" width="10" height="10" rx="2"/>
+    </symbol>
+    <symbol id="ic-human-gate" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/>
+      <path d="M9 12l2 2 4-4"/>
+    </symbol>
+  </defs>
+
+  <rect width="1600" height="900" fill="var(--bg)"/>
+
+  <!-- Header -->
+  <rect x="52" y="48" width="6" height="76" rx="3" fill="var(--primary)"/>
+  <text x="80" y="75" class="ink" font-size="43" font-weight="760"
+    dominant-baseline="central">How acRelay relays a review</text>
+  <text x="80" y="116" class="muted" font-size="17" font-weight="500"
+    dominant-baseline="central">Only confirmed review data crosses the trust boundary; findings and decisions stay in the local record.</text>
+  <rect x="1326" y="61" width="222" height="38" rx="19" fill="var(--amber-soft)" stroke="var(--amber)" stroke-width="1"/>
+  <use href="#ic-human-gate" x="1340" y="68" width="24" height="24" style="color:#B56816"/>
+  <text x="1451" y="80" class="amber-ink caption" text-anchor="middle"
+    dominant-baseline="central">HUMAN DECISION GATE</text>
+
+  <!-- Trust zones -->
+  <rect x="52" y="178" width="1050" height="550" rx="22" fill="var(--workspace)"
+    stroke="var(--hair)" stroke-width="1.5"/>
+  <rect x="1138" y="178" width="410" height="550" rx="22" fill="var(--reviewer-zone)"
+    stroke="var(--violet)" stroke-width="1.5"/>
+
+  <rect x="76" y="198" width="178" height="38" rx="19" fill="var(--primary)"/>
+  <text x="165" y="217" class="on-accent" font-size="15" font-weight="730"
+    text-anchor="middle" dominant-baseline="central">LOCAL WORKSPACE</text>
+  <text x="270" y="218" class="muted caption" dominant-baseline="central">local CLI + local record</text>
+
+  <rect x="1162" y="198" width="184" height="38" rx="19" fill="var(--violet)"/>
+  <text x="1254" y="217" class="on-accent" font-size="15" font-weight="730"
+    text-anchor="middle" dominant-baseline="central">REVIEWER RUNTIME</text>
+  <text x="1362" y="218" class="violet-ink caption" dominant-baseline="central">separate provider session</text>
+
+  <rect x="1028" y="242" width="148" height="32" rx="16" fill="var(--card)"
+    stroke="var(--violet)" stroke-width="1"/>
+  <text x="1102" y="258" class="violet-ink" font-size="12" font-weight="720"
+    text-anchor="middle" dominant-baseline="central">TRUST BOUNDARY</text>
+
+  <!-- Connectors sit behind cards -->
+  <path class="flow" d="M342 355 H382"/>
+  <path class="flow" d="M632 355 H672"/>
+  <path class="flow" d="M970 355 H1188"/>
+  <path class="flow" d="M1343 430 C1343 520 900 520 900 442"/>
+  <path class="flow" d="M827 430 V548"/>
+  <path class="flow" d="M223 430 C223 625 300 625 382 625"/>
+
+  <!-- Connector labels -->
+  <rect x="302" y="246" width="138" height="32" rx="16" fill="var(--card)"
+    stroke="var(--hair)" stroke-width="1"/>
+  <text x="371" y="262" class="edge-label primary-ink" text-anchor="middle"
+    dominant-baseline="central">starts review</text>
+
+  <rect x="592" y="246" width="132" height="32" rx="16" fill="var(--card)"
+    stroke="var(--hair)" stroke-width="1"/>
+  <text x="658" y="262" class="edge-label primary-ink" text-anchor="middle"
+    dominant-baseline="central">builds packet</text>
+
+  <rect x="1014" y="316" width="132" height="32" rx="16" fill="var(--card)"
+    stroke="var(--violet)" stroke-width="1"/>
+  <text x="1080" y="332" class="edge-label violet-ink" text-anchor="middle"
+    dominant-baseline="central">confirmed send</text>
+
+  <rect x="1042" y="489" width="178" height="32" rx="16" fill="var(--card)"
+    stroke="var(--violet)" stroke-width="1"/>
+  <text x="1131" y="505" class="edge-label violet-ink" text-anchor="middle"
+    dominant-baseline="central">findings return</text>
+
+  <rect x="842" y="474" width="126" height="32" rx="16" fill="var(--card)"
+    stroke="var(--green)" stroke-width="1"/>
+  <text x="905" y="490" class="edge-label green-ink" text-anchor="middle"
+    dominant-baseline="central">record evidence</text>
+
+  <rect x="238" y="522" width="132" height="32" rx="16" fill="var(--card)"
+    stroke="var(--amber)" stroke-width="1"/>
+  <text x="304" y="538" class="edge-label amber-ink" text-anchor="middle"
+    dominant-baseline="central">owner decision</text>
+
+  <!-- Owner -->
+  <g filter="url(#soft-shadow)">
+    <rect x="104" y="280" width="238" height="150" rx="16" fill="var(--card)"
+      stroke="var(--primary)" stroke-width="1.5"/>
+  </g>
+  <circle cx="157" cy="355" r="34" fill="var(--primary-soft)"/>
+  <use href="#ic-owner" x="137" y="335" width="40" height="40" style="color:#246BCE"/>
+  <text x="207" y="339" class="card-title primary-ink" dominant-baseline="central">Owner</text>
+  <text x="207" y="368" class="card-body muted" dominant-baseline="central">confirms send</text>
+  <text x="207" y="392" class="card-body muted" dominant-baseline="central">closes the review</text>
+
+  <!-- Driver Agent -->
+  <g filter="url(#soft-shadow)">
+    <rect x="394" y="280" width="238" height="150" rx="16" fill="var(--card)"
+      stroke="var(--primary)" stroke-width="1.5"/>
+  </g>
+  <circle cx="447" cy="355" r="34" fill="var(--primary-soft)"/>
+  <use href="#ic-agent" x="427" y="335" width="40" height="40" style="color:#246BCE"/>
+  <text x="497" y="339" class="card-title primary-ink" dominant-baseline="central">Driver Agent</text>
+  <text x="497" y="368" class="card-body muted" dominant-baseline="central">writes the change</text>
+  <text x="497" y="392" class="card-body muted" dominant-baseline="central">handles findings</text>
+
+  <!-- Local Relay CLI -->
+  <g filter="url(#soft-shadow)">
+    <rect x="684" y="280" width="286" height="150" rx="16" fill="var(--card)"
+      stroke="var(--primary)" stroke-width="2"/>
+  </g>
+  <circle cx="739" cy="355" r="34" fill="var(--primary-soft)"/>
+  <use href="#ic-terminal" x="719" y="335" width="40" height="40" style="color:#246BCE"/>
+  <text x="791" y="339" class="card-title primary-ink" dominant-baseline="central">acRelay CLI</text>
+  <text x="791" y="365" class="card-body muted" dominant-baseline="central">check · send · record</text>
+  <text x="791" y="388" class="card-body muted" dominant-baseline="central">recheck · recover · recap</text>
+  <text x="791" y="411" class="card-body muted" dominant-baseline="central">no daemon</text>
+
+  <!-- Reviewer Agent -->
+  <g filter="url(#soft-shadow)">
+    <rect x="1200" y="280" width="286" height="150" rx="16" fill="var(--card)"
+      stroke="var(--violet)" stroke-width="2"/>
+  </g>
+  <circle cx="1255" cy="355" r="34" fill="var(--violet-soft)"/>
+  <use href="#ic-review" x="1235" y="335" width="40" height="40" style="color:#7157C8"/>
+  <text x="1307" y="339" class="card-title violet-ink" dominant-baseline="central">Reviewer CLI</text>
+  <text x="1307" y="365" class="card-body muted" dominant-baseline="central">Claude Code or Codex</text>
+  <text x="1307" y="388" class="card-body muted" dominant-baseline="central">read-only review</text>
+  <text x="1307" y="411" class="card-body muted" dominant-baseline="central">no approval authority</text>
+
+  <!-- Evidence Store -->
+  <g filter="url(#soft-shadow)">
+    <rect x="394" y="560" width="576" height="130" rx="16" fill="var(--card)"
+      stroke="var(--green)" stroke-width="2"/>
+  </g>
+  <circle cx="449" cy="625" r="34" fill="var(--green-soft)"/>
+  <use href="#ic-evidence" x="429" y="605" width="40" height="40" style="color:#178269"/>
+  <text x="501" y="600" class="card-title green-ink" dominant-baseline="central">Local Review Record</text>
+  <text x="501" y="630" class="card-body muted" dominant-baseline="central">findings + owner decision · journal + quarantine</text>
+  <text x="501" y="653" class="caption muted" dominant-baseline="central">provider-owned sessions and settings remain outside acRelay authority</text>
+  <rect x="812" y="581" width="150" height="30" rx="15" fill="var(--green-soft)"
+    stroke="var(--green)" stroke-width="1"/>
+  <text x="887" y="596" class="green-ink" font-size="12" font-weight="760"
+    text-anchor="middle" dominant-baseline="central">ON THIS COMPUTER</text>
+
+  <!-- Footer guardrails -->
+  <rect x="52" y="760" width="1496" height="92" rx="18" fill="var(--footer)"
+    stroke="var(--hair)" stroke-width="1"/>
+
+  <circle cx="104" cy="806" r="25" fill="var(--primary-soft)"/>
+  <use href="#ic-check" x="88" y="790" width="32" height="32" style="color:#246BCE"/>
+  <text x="145" y="796" class="ink" font-size="16" font-weight="720"
+    dominant-baseline="central">One bounded run</text>
+  <text x="145" y="820" class="muted caption" dominant-baseline="central">1–5 rounds, no daemon</text>
+
+  <line x1="518" y1="782" x2="518" y2="830" stroke="var(--hair)" stroke-width="1"/>
+  <circle cx="570" cy="806" r="25" fill="var(--violet-soft)"/>
+  <use href="#ic-bound" x="554" y="790" width="32" height="32" style="color:#7157C8"/>
+  <text x="611" y="796" class="ink" font-size="16" font-weight="720"
+    dominant-baseline="central">Confirmed exchange</text>
+  <text x="611" y="820" class="muted caption" dominant-baseline="central">Only review files and prompts cross the boundary</text>
+
+  <line x1="1044" y1="782" x2="1044" y2="830" stroke="var(--hair)" stroke-width="1"/>
+  <circle cx="1096" cy="806" r="25" fill="var(--amber-soft)"/>
+  <use href="#ic-human-gate" x="1080" y="790" width="32" height="32" style="color:#B56816"/>
+  <text x="1137" y="796" class="ink" font-size="16" font-weight="720"
+    dominant-baseline="central">The owner decides</text>
+  <text x="1137" y="820" class="muted caption" dominant-baseline="central">Findings inform; only the owner closes the review</text>
+</svg>

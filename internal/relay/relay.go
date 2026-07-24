@@ -28,9 +28,44 @@ import (
 	"github.com/kyungseo/acrelay/internal/subject"
 )
 
+// Reviewer schemas use the strict structured-output subset: every object that
+// declares properties requires all of them. Location variants keep the runtime
+// evidence contract precise without nullable or semantically meaningless line
+// fields on opaque and empty members.
+const reviewLocationSchema = `{"anyOf":[{"type":"object","properties":{"kind":{"type":"string","enum":["text-lines"]},"start":{"type":"integer","minimum":1},"end":{"type":"integer","minimum":1}},"required":["kind","start","end"],"additionalProperties":false},{"type":"object","properties":{"kind":{"type":"string","enum":["opaque"]}},"required":["kind"],"additionalProperties":false},{"type":"object","properties":{"kind":{"type":"string","enum":["empty-member"]}},"required":["kind"],"additionalProperties":false}]}`
+
+const reviewEvidenceSchema = `{"type":"object","properties":{"id":{"type":"string"},"member":{"type":"string"},"location":` + reviewLocationSchema + `,"excerpt":{"type":"string"},"claim":{"type":"string"}},"required":["id","member","location","excerpt","claim"],"additionalProperties":false}`
+
+// reviewerEvidenceProtocol explains the semantic constraints that JSON Schema
+// cannot express: finding references must resolve to locally declared evidence
+// IDs, and text excerpts must match the complete declared line range. Review
+// and confirmation prompts share this single source so their evidence contract
+// cannot drift.
+func reviewerEvidenceProtocol() string {
+	return fmt.Sprintf(`Evidence output protocol (mandatory; the relay validates this after schema validation):
+- Give every examined[] item a short unique local id such as E1 or E2.
+- For a UTF-8 text member, use location.kind "text-lines" only. Set start and end to the exact examined line range, and copy the complete text from every line in that range into excerpt joined by newline. Do not abbreviate, summarize, omit lines, or use ellipses.
+- Keep each text excerpt within %d lines and %d bytes. Use multiple examined[] items when needed.
+- Use location.kind "opaque" only for a binary or otherwise non-text member, and set excerpt to the exact empty string.
+- Use location.kind "empty-member" only for a zero-byte member, and set excerpt to the exact empty string.
+- Every findings[].evidence entry must be exactly one examined[].id. Never put prose, line descriptions, paths, digests, claims, or excerpts in findings[].evidence.`,
+		review.MaxEvidenceLines, review.MaxEvidenceBytes)
+}
+
+// reviewerApprovalProtocol explains review-only approval-request constraints
+// that JSON Schema cannot fully express. Confirmation output has no
+// approval_requests field, so this protocol must not enter confirmation prompts.
+func reviewerApprovalProtocol() string {
+	return `Approval-request output protocol (mandatory when approval_requests is non-empty; the relay validates this after schema validation):
+- Return an approval request only when an owner decision is actually required. Otherwise return an empty approval_requests array.
+- Set approval_requests[].type to a lowercase dotted namespaced identifier matching ^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)+$. For example, use "review.owner-decision", not "owner-decision".
+- Set scope and reason to non-empty strings.
+- Give every request at least one option. Every option must have a unique non-empty id and a non-empty description.`
+}
+
 // ReviewSchema is review-profile v0.2. Reviewer fields are evidence inputs;
 // stable IDs, content-match assurance, and blocking are minted by the relay.
-const ReviewSchema = `{"type":"object","properties":{"verdict":{"type":"string","enum":["approve","changes-requested"]},"examined":{"type":"array","minItems":1,"items":{"type":"object","properties":{"id":{"type":"string"},"member":{"type":"string"},"location":{"type":"object","properties":{"kind":{"type":"string","enum":["text-lines","opaque","empty-member"]},"start":{"type":"integer","minimum":1},"end":{"type":"integer","minimum":1}},"required":["kind"],"additionalProperties":false},"excerpt":{"type":"string"},"claim":{"type":"string"}},"required":["id","member","location","claim"],"additionalProperties":false}},"findings":{"type":"array","items":{"type":"object","properties":{"summary":{"type":"string"},"reviewer_severity":{"type":"string","enum":["critical","high","medium","low"]},"evidence":{"type":"array","minItems":1,"items":{"type":"string"}},"recommendation":{"type":"string"}},"required":["summary","reviewer_severity","evidence","recommendation"],"additionalProperties":false}},"approval_requests":{"type":"array","items":{"type":"object","properties":{"type":{"type":"string"},"scope":{"type":"string"},"reason":{"type":"string"},"options":{"type":"array","minItems":1,"items":{"type":"object","properties":{"id":{"type":"string"},"description":{"type":"string"}},"required":["id","description"],"additionalProperties":false}}},"required":["type","scope","reason","options"],"additionalProperties":false}}},"required":["verdict","examined","findings","approval_requests"],"additionalProperties":false}`
+const ReviewSchema = `{"type":"object","properties":{"verdict":{"type":"string","enum":["approve","changes-requested"]},"examined":{"type":"array","minItems":1,"items":` + reviewEvidenceSchema + `},"findings":{"type":"array","items":{"type":"object","properties":{"summary":{"type":"string"},"reviewer_severity":{"type":"string","enum":["critical","high","medium","low"]},"evidence":{"type":"array","minItems":1,"items":{"type":"string"}},"recommendation":{"type":"string"}},"required":["summary","reviewer_severity","evidence","recommendation"],"additionalProperties":false}},"approval_requests":{"type":"array","items":{"type":"object","properties":{"type":{"type":"string"},"scope":{"type":"string"},"reason":{"type":"string"},"options":{"type":"array","minItems":1,"items":{"type":"object","properties":{"id":{"type":"string"},"description":{"type":"string"}},"required":["id","description"],"additionalProperties":false}}},"required":["type","scope","reason","options"],"additionalProperties":false}}},"required":["verdict","examined","findings","approval_requests"],"additionalProperties":false}`
 
 // Format versions (DR-811 §8). Unknown persisted versions fail closed.
 const (
@@ -756,7 +791,13 @@ func subjectPrompt(st *State, prompt string) string {
 	}
 	b.WriteString("\n")
 	b.WriteString(prompt)
+	b.WriteString("\n\n")
+	b.WriteString(reviewerEvidenceProtocol())
 	return b.String()
+}
+
+func reviewPrompt(st *State, prompt string) string {
+	return subjectPrompt(st, prompt) + "\n\n" + reviewerApprovalProtocol()
 }
 
 func subjectMember(snapshot subject.Snapshot, logical string) (subject.Member, bool) {
@@ -1037,7 +1078,7 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	}
 	req.SubjectRoot = st.Subject.ResolvedRoot
 	req.TrustPolicy = st.TrustPolicy
-	req.Prompt = subjectPrompt(st, prompt)
+	req.Prompt = reviewPrompt(st, prompt)
 	req.SchemaJSON = ReviewSchema
 	// The dispatch session-attempt fact, fixed before Prepare (R1-CX-F1): the
 	// recorded mode must not depend on whether the result happened to return
@@ -1417,7 +1458,7 @@ func OpenConfirmation(canonical string, roundIndex int, ids []string) (*State, e
 
 // ConfirmSchema keeps confirmation verdict-free and finding-free while still
 // requiring non-empty examined evidence for every per-ID judgment.
-const ConfirmSchema = `{"type":"object","properties":{"results":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"status":{"type":"string","enum":["confirmed","not-confirmed"]},"examined":{"type":"array","minItems":1,"items":{"type":"object","properties":{"id":{"type":"string"},"member":{"type":"string"},"location":{"type":"object","properties":{"kind":{"type":"string","enum":["text-lines","opaque","empty-member"]},"start":{"type":"integer","minimum":1},"end":{"type":"integer","minimum":1}},"required":["kind"],"additionalProperties":false},"excerpt":{"type":"string"},"claim":{"type":"string"}},"required":["id","member","location","claim"],"additionalProperties":false}}},"required":["id","status","examined"],"additionalProperties":false}}},"required":["results"],"additionalProperties":false}`
+const ConfirmSchema = `{"type":"object","properties":{"results":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"status":{"type":"string","enum":["confirmed","not-confirmed"]},"examined":{"type":"array","minItems":1,"items":` + reviewEvidenceSchema + `}},"required":["id","status","examined"],"additionalProperties":false}}},"required":["results"],"additionalProperties":false}`
 
 // parseConfirmResults validates reviewer confirmation output: every
 // submitted ID exactly once, statuses from the enum, nothing else.
