@@ -19,7 +19,7 @@ the shorter README and operations guide. The following terms appear throughout:
   up one specific reviewer session
 - **formal round:** one reviewer pass that may produce findings
 - **disposition:** the driver’s recorded response to a finding—accept, revise,
-  defend, or ask the owner
+  defend, or `needs-user` (ask the owner)
 - **fail closed:** stop without silently changing the review, consuming a round
   where prohibited, or falling back to a less restricted path
 - **vendor egress:** review content, resolved paths, and metadata sent to the
@@ -48,7 +48,7 @@ machine-readable form.
 - `cmd/acrelay` — CLI: `init` / `review` / `confirm` / `disposition` /
   `request-approval` / `respond-approval` / `withdraw-approval` / `advance` /
   `close` / `terminate` / `reconcile` / `abandon-transaction` / `status` /
-  `cleanup` / `briefing`
+  `cleanup` / `briefing` / `version`
 
 ## Keep The Canonical Record Private
 
@@ -211,7 +211,7 @@ Persisted native resume handles are validated against vendor-safe formats
 before any child start; a malformed handle fails closed without consuming an
 attempt and is never silently replaced by a new session. A vendor-side
 resume rejection after child start remains a consuming `FAILED` with the
-`resume-handle-invalid` cause (AR-1). On POSIX, the first parent
+`resume-handle-invalid` cause. On POSIX, the first parent
 SIGINT/SIGTERM cancels the dispatch gracefully (group SIGTERM, then SIGKILL
 after the grace window) and classifies `canceled.parent-signal`; a second
 signal force-kills the tracked child groups and exits. On Windows only
@@ -595,6 +595,10 @@ re-review round. A related objective keeps the reviewer session but selects a
 new bound independently. Attempt and confirmation limits are unchanged.
 
 ## CLI Compatibility And Provenance
+
+`acrelay version --short` is the machine-readable surface used by the release
+installer to verify the exact binary version. `acrelay version` displays the
+release version, source commit, and Go runtime version.
 
 Claude Code and Codex CLI versions are observed on every invocation and stored
 in provenance. General transport compatibility remains capability-first, but

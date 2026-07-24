@@ -118,12 +118,28 @@ if [[ "$reported" != "$VERSION" ]]; then
   exit 1
 fi
 
-mkdir -p "$bin_dir"
+destination_error() {
+  echo "error: cannot install acRelay into $bin_dir; choose a writable --bin-dir or fix the directory permissions" >&2
+}
+
+if ! mkdir -p "$bin_dir"; then
+  destination_error
+  exit 1
+fi
 install_tmp="$bin_dir/.acrelay-install.$$"
 trap 'rm -rf "$work_dir"; rm -f "$install_tmp"' EXIT
-cp "$extracted" "$install_tmp"
-chmod 0755 "$install_tmp"
-mv "$install_tmp" "$target"
+if ! cp "$extracted" "$install_tmp"; then
+  destination_error
+  exit 1
+fi
+if ! chmod 0755 "$install_tmp"; then
+  destination_error
+  exit 1
+fi
+if ! mv "$install_tmp" "$target"; then
+  destination_error
+  exit 1
+fi
 trap 'rm -rf "$work_dir"' EXIT
 
 echo "installed acRelay $VERSION at $target"

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -169,10 +170,108 @@ func TestReviewProfileSchemasAreValidJSON(t *testing.T) {
 		if !json.Valid([]byte(schema)) {
 			t.Fatalf("%s schema is not valid JSON", name)
 		}
+		var parsed any
+		if err := json.Unmarshal([]byte(schema), &parsed); err != nil {
+			t.Fatalf("parse %s schema: %v", name, err)
+		}
+		assertStrictObjectRequirements(t, name, parsed)
 	}
 	if ProfileVersion != "review-profile v0.2" || StoreVersion != "store-md v0.9" {
 		t.Fatalf("unexpected format contract: %s / %s", ProfileVersion, StoreVersion)
 	}
+}
+
+func assertStrictObjectRequirements(t *testing.T, path string, value any) {
+	t.Helper()
+	switch node := value.(type) {
+	case []any:
+		for i, child := range node {
+			assertStrictObjectRequirements(t, fmt.Sprintf("%s[%d]", path, i), child)
+		}
+	case map[string]any:
+		if node["type"] == "object" {
+			properties, _ := node["properties"].(map[string]any)
+			if len(properties) > 0 {
+				if additional, ok := node["additionalProperties"].(bool); !ok || additional {
+					t.Fatalf("%s object must set additionalProperties=false", path)
+				}
+				required, ok := node["required"].([]any)
+				if !ok {
+					t.Fatalf("%s object properties require an explicit required array", path)
+				}
+				requiredKeys := make(map[string]bool, len(required))
+				for _, raw := range required {
+					key, ok := raw.(string)
+					if !ok {
+						t.Fatalf("%s required entry is not a string: %v", path, raw)
+					}
+					requiredKeys[key] = true
+				}
+				if len(requiredKeys) != len(properties) {
+					t.Fatalf("%s strict schema requires every property: properties=%v required=%v",
+						path, properties, requiredKeys)
+				}
+				for key := range properties {
+					if !requiredKeys[key] {
+						t.Fatalf("%s property %q is missing from required", path, key)
+					}
+				}
+			}
+		}
+		for key, child := range node {
+			assertStrictObjectRequirements(t, path+"."+key, child)
+		}
+	}
+}
+
+func TestReviewEvidenceSchemaKeepsLocationVariants(t *testing.T) {
+	var evidence map[string]any
+	if err := json.Unmarshal([]byte(reviewEvidenceSchema), &evidence); err != nil {
+		t.Fatal(err)
+	}
+	properties := evidence["properties"].(map[string]any)
+	location := properties["location"].(map[string]any)
+	variants := location["anyOf"].([]any)
+	want := map[string][]string{
+		"text-lines":   {"end", "kind", "start"},
+		"opaque":       {"kind"},
+		"empty-member": {"kind"},
+	}
+	if len(variants) != len(want) {
+		t.Fatalf("location variants=%d want=%d", len(variants), len(want))
+	}
+	for _, raw := range variants {
+		variant := raw.(map[string]any)
+		variantProperties := variant["properties"].(map[string]any)
+		kindSchema := variantProperties["kind"].(map[string]any)
+		enum := kindSchema["enum"].([]any)
+		if len(enum) != 1 {
+			t.Fatalf("location kind enum must select one variant: %v", enum)
+		}
+		kind := enum[0].(string)
+		required := variant["required"].([]any)
+		got := make([]string, 0, len(required))
+		for _, item := range required {
+			got = append(got, item.(string))
+		}
+		sort.Strings(got)
+		if fmt.Sprint(got) != fmt.Sprint(want[kind]) {
+			t.Fatalf("%s required=%v want=%v", kind, got, want[kind])
+		}
+	}
+	required := evidence["required"].([]any)
+	if !slicesContainString(required, "excerpt") {
+		t.Fatal("strict evidence schema must require excerpt; non-text variants use an empty string")
+	}
+}
+
+func slicesContainString(values []any, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestReviewEvidenceMismatchNeedsInput(t *testing.T) {
@@ -199,7 +298,7 @@ func TestOpaqueEvidenceDowngradeIsExplicit(t *testing.T) {
 		"verdict": "approve",
 		"examined": []any{map[string]any{
 			"id": "E1", "member": "opaque.bin", "location": map[string]any{"kind": "opaque"},
-			"claim": "examined opaque member",
+			"excerpt": "", "claim": "examined opaque member",
 		}},
 		"findings": []any{}, "approval_requests": []any{},
 	}}
@@ -245,7 +344,7 @@ func TestEmptyMemberEvidenceIsExplicitReviewerDeclaration(t *testing.T) {
 		"verdict": "approve",
 		"examined": []any{map[string]any{
 			"id": "E1", "member": "empty.txt", "location": map[string]any{"kind": "empty-member"},
-			"claim": "examined the empty member",
+			"excerpt": "", "claim": "examined the empty member",
 		}},
 		"findings": []any{}, "approval_requests": []any{},
 	}}

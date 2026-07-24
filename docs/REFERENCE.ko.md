@@ -195,6 +195,11 @@ Derived profile은 `cross-vendor-external`, `same-vendor-external`,
 어떤 profile에서도 사용하지 않습니다. Separate context 선언은
 `declared-not-verified`로만 표시합니다.
 
+`briefing`과 `status`는 facet과 source를 함께 표시합니다. `briefing`은
+`same-vendor-review`, `topology-undeclared`, `reviewer-session-resumed`를
+각각 별도 caution identifier로 표시해 correlated blind spot, 선언되지 않은
+topology와 fresh context가 아닌 resumed/carried session을 숨기지 않습니다.
+
 `external-cli` surface만 지원합니다. Driver host의 own subagent result를
 ingest하는 `host-subagent`는 typed ingress가 없으므로 명시적으로 unsupported이며
 다른 topology로 fallback하지 않습니다.
@@ -233,6 +238,9 @@ Explicit files 또는 local subtree는 `subject-spec v0.1` JSON과
   "exclude": ["internal/testdata/generated"]
 }
 ```
+
+`file` kind는 `members` 하나, `files`는 하나 이상의 explicit member를
+요구합니다. `subtree`는 authoritative checkpoint마다 member를 다시 계산합니다.
 
 모든 member는 resolved root 안의 readable regular file이어야 합니다. Broken
 link, root escape, unsupported type, unreadable member, zero-member selection은
@@ -331,6 +339,11 @@ Readiness는 `ready`, `ready-with-cautions`, `blocked`, `terminal`입니다.
 `briefing`은 owner approval, acknowledgment, Close authority 또는 persisted
 state를 만들지 않습니다. 실제 `close`는 canonical lock 안에서 target revision과
 closure gate를 다시 확인합니다.
+
+`-check` 없이 business state를 정상적으로 render하면 exit 0입니다. `-check`를
+사용하면 stable exit classification은 `0=ready`, `3=ready-with-cautions`,
+`4=blocked`, `5=terminal`이며 parse, I/O 또는 canonical integrity failure는
+exit 1을 유지합니다.
 
 Projection에는 raw prompt, raw reviewer output, native handle, absolute/private
 path, owner verbatim과 raw error를 포함하지 않습니다.

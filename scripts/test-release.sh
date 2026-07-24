@@ -71,4 +71,18 @@ if ACRELAY_INSTALL_TESTING=1 ACRELAY_TEST_UNAME_S=Linux ACRELAY_TEST_UNAME_M=x86
 fi
 grep -F "only for macOS Apple Silicon" "$test_root/platform.err" >/dev/null
 
+# An unwritable destination fails closed with a stable next action.
+readonly_bin="$test_root/readonly-bin"
+mkdir -p "$readonly_bin"
+chmod 0555 "$readonly_bin"
+if ACRELAY_INSTALL_TESTING=1 ACRELAY_RELEASE_BASE_URL="$base_url" \
+  "$repo_root/scripts/install.sh" --bin-dir "$readonly_bin" >"$test_root/permission.log" 2>&1; then
+  chmod 0755 "$readonly_bin"
+  echo "installer wrote to an unwritable destination" >&2
+  exit 1
+fi
+chmod 0755 "$readonly_bin"
+grep -F "choose a writable --bin-dir or fix the directory permissions" "$test_root/permission.log" >/dev/null
+[[ ! -e "$readonly_bin/acrelay" ]]
+
 echo "release packaging and installer tests passed"
