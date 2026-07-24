@@ -36,6 +36,22 @@ const reviewLocationSchema = `{"anyOf":[{"type":"object","properties":{"kind":{"
 
 const reviewEvidenceSchema = `{"type":"object","properties":{"id":{"type":"string"},"member":{"type":"string"},"location":` + reviewLocationSchema + `,"excerpt":{"type":"string"},"claim":{"type":"string"}},"required":["id","member","location","excerpt","claim"],"additionalProperties":false}`
 
+// reviewerEvidenceProtocol explains the semantic constraints that JSON Schema
+// cannot express: finding references must resolve to locally declared evidence
+// IDs, and text excerpts must match the complete declared line range. Review
+// and confirmation prompts share this single source so their evidence contract
+// cannot drift.
+func reviewerEvidenceProtocol() string {
+	return fmt.Sprintf(`Evidence output protocol (mandatory; the relay validates this after schema validation):
+- Give every examined[] item a short unique local id such as E1 or E2.
+- For a UTF-8 text member, use location.kind "text-lines" only. Set start and end to the exact examined line range, and copy the complete text from every line in that range into excerpt joined by newline. Do not abbreviate, summarize, omit lines, or use ellipses.
+- Keep each text excerpt within %d lines and %d bytes. Use multiple examined[] items when needed.
+- Use location.kind "opaque" only for a binary or otherwise non-text member, and set excerpt to the exact empty string.
+- Use location.kind "empty-member" only for a zero-byte member, and set excerpt to the exact empty string.
+- Every findings[].evidence entry must be exactly one examined[].id. Never put prose, line descriptions, paths, digests, claims, or excerpts in findings[].evidence.`,
+		review.MaxEvidenceLines, review.MaxEvidenceBytes)
+}
+
 // ReviewSchema is review-profile v0.2. Reviewer fields are evidence inputs;
 // stable IDs, content-match assurance, and blocking are minted by the relay.
 const ReviewSchema = `{"type":"object","properties":{"verdict":{"type":"string","enum":["approve","changes-requested"]},"examined":{"type":"array","minItems":1,"items":` + reviewEvidenceSchema + `},"findings":{"type":"array","items":{"type":"object","properties":{"summary":{"type":"string"},"reviewer_severity":{"type":"string","enum":["critical","high","medium","low"]},"evidence":{"type":"array","minItems":1,"items":{"type":"string"}},"recommendation":{"type":"string"}},"required":["summary","reviewer_severity","evidence","recommendation"],"additionalProperties":false}},"approval_requests":{"type":"array","items":{"type":"object","properties":{"type":{"type":"string"},"scope":{"type":"string"},"reason":{"type":"string"},"options":{"type":"array","minItems":1,"items":{"type":"object","properties":{"id":{"type":"string"},"description":{"type":"string"}},"required":["id","description"],"additionalProperties":false}}},"required":["type","scope","reason","options"],"additionalProperties":false}}},"required":["verdict","examined","findings","approval_requests"],"additionalProperties":false}`
@@ -764,6 +780,8 @@ func subjectPrompt(st *State, prompt string) string {
 	}
 	b.WriteString("\n")
 	b.WriteString(prompt)
+	b.WriteString("\n\n")
+	b.WriteString(reviewerEvidenceProtocol())
 	return b.String()
 }
 

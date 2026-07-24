@@ -286,6 +286,67 @@ func TestReviewEvidenceMismatchNeedsInput(t *testing.T) {
 		t.Fatalf("mismatched excerpt must fail evidence validation: outcome=%s evidence=%+v governance=%s",
 			outcome, st.Evidence, st.Governance)
 	}
+	if !strings.Contains(strings.Join(st.Rounds[0].ValidationErrors, ";"), "excerpt-mismatch") {
+		t.Fatalf("abbreviated or non-exact text must retain its typed diagnostic: %+v", st.Rounds[0])
+	}
+}
+
+func TestReviewEvidenceProtocolViolationsNeedInput(t *testing.T) {
+	result := changesRequested("unsafe rollout")
+	anchor := result.Structured["examined"].([]any)[0].(map[string]any)
+	anchor["location"] = map[string]any{"kind": "opaque"}
+	anchor["excerpt"] = "sha256=digest-is-not-an-opaque-excerpt"
+	finding := result.Structured["findings"].([]any)[0].(map[string]any)
+	finding["evidence"] = []any{"Line 1 describes the risk instead of referencing E1."}
+
+	s, _, _ := newSession(t, []adapter.FakeResult{result})
+	st, outcome, err := s.Review(context.Background(), "review", adapter.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome != review.OutcomeNeedsInput || len(st.Evidence) != 0 || len(st.Findings) != 0 {
+		t.Fatalf("semantic protocol violations must fail closed: outcome=%s evidence=%+v findings=%+v",
+			outcome, st.Evidence, st.Findings)
+	}
+	diagnostics := strings.Join(st.Rounds[0].ValidationErrors, ";")
+	for _, want := range []string{
+		"examined-0-opaque-excerpt-forbidden",
+		"finding-0-unknown-evidence-ref",
+	} {
+		if !strings.Contains(diagnostics, want) {
+			t.Fatalf("semantic protocol diagnostic %q missing from %q", want, diagnostics)
+		}
+	}
+}
+
+func TestReviewAndConfirmationPromptsShareEvidenceProtocol(t *testing.T) {
+	s, _, _ := newSession(t, nil)
+	st, err := LoadState(s.Canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protocol := reviewerEvidenceProtocol()
+	for name, prompt := range map[string]string{
+		"review":       subjectPrompt(st, "Review the subject."),
+		"confirmation": subjectPrompt(st, "Confirm whether the submitted finding is fixed."),
+	} {
+		if strings.Count(prompt, protocol) != 1 {
+			t.Fatalf("%s prompt must contain the shared evidence protocol exactly once", name)
+		}
+		for _, want := range []string{
+			`UTF-8 text member`,
+			`location.kind "text-lines" only`,
+			`Do not abbreviate, summarize, omit lines, or use ellipses`,
+			fmt.Sprintf(`within %d lines and %d bytes`, review.MaxEvidenceLines, review.MaxEvidenceBytes),
+			`location.kind "opaque" only`,
+			`location.kind "empty-member" only`,
+			`Every findings[].evidence entry must be exactly one examined[].id`,
+		} {
+			if !strings.Contains(prompt, want) {
+				t.Fatalf("%s prompt missing evidence instruction %q:\n%s", name, want, prompt)
+			}
+		}
+	}
 }
 
 func TestOpaqueEvidenceDowngradeIsExplicit(t *testing.T) {
