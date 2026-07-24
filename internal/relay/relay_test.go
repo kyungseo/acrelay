@@ -349,6 +349,61 @@ func TestReviewAndConfirmationPromptsShareEvidenceProtocol(t *testing.T) {
 	}
 }
 
+func TestReviewPromptOwnsApprovalRequestProtocol(t *testing.T) {
+	s, _, _ := newSession(t, nil)
+	st, err := LoadState(s.Canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protocol := reviewerApprovalProtocol()
+	gotReview := reviewPrompt(st, "Review the subject.")
+	gotConfirmation := subjectPrompt(st, "Confirm whether the submitted finding is fixed.")
+	if strings.Count(gotReview, protocol) != 1 {
+		t.Fatalf("review prompt must contain the approval-request protocol exactly once:\n%s", gotReview)
+	}
+	if strings.Contains(gotConfirmation, protocol) {
+		t.Fatalf("confirmation prompt must not contain the review-only approval-request protocol:\n%s", gotConfirmation)
+	}
+	for _, want := range []string{
+		`^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)+$`,
+		`"review.owner-decision", not "owner-decision"`,
+		`scope and reason to non-empty strings`,
+		`unique non-empty id`,
+	} {
+		if !strings.Contains(gotReview, want) {
+			t.Fatalf("review prompt missing approval-request instruction %q:\n%s", want, gotReview)
+		}
+	}
+}
+
+func TestApprovalRequestTypeGuidanceMatchesValidator(t *testing.T) {
+	request := func(typeName string) map[string]any {
+		return map[string]any{
+			"type": typeName, "scope": "select replay semantics", "reason": "owner decision required",
+			"options": []any{
+				map[string]any{"id": "strict", "description": "fail on an absent key"},
+			},
+		}
+	}
+	result := func(typeName string) map[string]any {
+		return map[string]any{
+			"verdict": "approve",
+			"examined": []any{
+				evidence("target.go", `func greet() string { return "hello" }`),
+			},
+			"findings":          []any{},
+			"approval_requests": []any{request(typeName)},
+		}
+	}
+
+	if _, errs := review.DecodeResult(result("owner-decision")); !strings.Contains(strings.Join(errs, "\n"), "approval-request-0-type-scope-or-reason-invalid") {
+		t.Fatalf("live failure shape must remain invalid, got errors: %v", errs)
+	}
+	if _, errs := review.DecodeResult(result("review.owner-decision")); len(errs) != 0 {
+		t.Fatalf("documented namespaced type must be valid, got errors: %v", errs)
+	}
+}
+
 func TestOpaqueEvidenceDowngradeIsExplicit(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "opaque.bin")

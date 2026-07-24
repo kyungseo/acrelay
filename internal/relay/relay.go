@@ -52,6 +52,17 @@ func reviewerEvidenceProtocol() string {
 		review.MaxEvidenceLines, review.MaxEvidenceBytes)
 }
 
+// reviewerApprovalProtocol explains review-only approval-request constraints
+// that JSON Schema cannot fully express. Confirmation output has no
+// approval_requests field, so this protocol must not enter confirmation prompts.
+func reviewerApprovalProtocol() string {
+	return `Approval-request output protocol (mandatory when approval_requests is non-empty; the relay validates this after schema validation):
+- Return an approval request only when an owner decision is actually required. Otherwise return an empty approval_requests array.
+- Set approval_requests[].type to a lowercase dotted namespaced identifier matching ^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)+$. For example, use "review.owner-decision", not "owner-decision".
+- Set scope and reason to non-empty strings.
+- Give every request at least one option. Every option must have a unique non-empty id and a non-empty description.`
+}
+
 // ReviewSchema is review-profile v0.2. Reviewer fields are evidence inputs;
 // stable IDs, content-match assurance, and blocking are minted by the relay.
 const ReviewSchema = `{"type":"object","properties":{"verdict":{"type":"string","enum":["approve","changes-requested"]},"examined":{"type":"array","minItems":1,"items":` + reviewEvidenceSchema + `},"findings":{"type":"array","items":{"type":"object","properties":{"summary":{"type":"string"},"reviewer_severity":{"type":"string","enum":["critical","high","medium","low"]},"evidence":{"type":"array","minItems":1,"items":{"type":"string"}},"recommendation":{"type":"string"}},"required":["summary","reviewer_severity","evidence","recommendation"],"additionalProperties":false}},"approval_requests":{"type":"array","items":{"type":"object","properties":{"type":{"type":"string"},"scope":{"type":"string"},"reason":{"type":"string"},"options":{"type":"array","minItems":1,"items":{"type":"object","properties":{"id":{"type":"string"},"description":{"type":"string"}},"required":["id","description"],"additionalProperties":false}}},"required":["type","scope","reason","options"],"additionalProperties":false}}},"required":["verdict","examined","findings","approval_requests"],"additionalProperties":false}`
@@ -785,6 +796,10 @@ func subjectPrompt(st *State, prompt string) string {
 	return b.String()
 }
 
+func reviewPrompt(st *State, prompt string) string {
+	return subjectPrompt(st, prompt) + "\n\n" + reviewerApprovalProtocol()
+}
+
 func subjectMember(snapshot subject.Snapshot, logical string) (subject.Member, bool) {
 	for _, member := range snapshot.Members {
 		if member.LogicalPath == logical {
@@ -1063,7 +1078,7 @@ func (s *Session) Review(ctx context.Context, prompt string, req adapter.Request
 	}
 	req.SubjectRoot = st.Subject.ResolvedRoot
 	req.TrustPolicy = st.TrustPolicy
-	req.Prompt = subjectPrompt(st, prompt)
+	req.Prompt = reviewPrompt(st, prompt)
 	req.SchemaJSON = ReviewSchema
 	// The dispatch session-attempt fact, fixed before Prepare (R1-CX-F1): the
 	// recorded mode must not depend on whether the result happened to return
