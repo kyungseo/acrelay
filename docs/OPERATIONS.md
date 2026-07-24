@@ -2,32 +2,31 @@
 
 **English** · [한국어](./OPERATIONS.ko.md)
 
-This guide explains how to install, update, remove, and recover the initial
-unsigned `v0.1.0-alpha.1` release. Its only prebuilt binary is for macOS Apple
-Silicon (`darwin/arm64`). That is the first release boundary, not the intended
-end of platform support: Linux and Windows core runtime lanes are already
-verified, and platform-specific Claude Code/Codex review validation is planned
-as the next support-expansion step. Required patches will be published only
-after that evidence is reviewed. Intel Mac has no prebuilt binary or verified
-live-review combination in this release.
+This guide explains how to install, update, remove, and recover the
+`v0.1.0-alpha.1` **Public Validation Preview**. It is **Experimental**, and
+broader validation is still **pending**.
 
-The commands below work only after the exact release tag and files have been
-published. If they are unavailable, stop. Do not substitute an unpinned branch
-or a `latest` download.
+Its only prebuilt binary is for macOS Apple Silicon (`darwin/arm64`). That is
+the first release boundary, not the intended end of platform support: Linux
+and Windows core runtime lanes are already verified, and platform-specific
+Claude Code/Codex review validation is planned as the next support-expansion
+step. Required patches will be published only after that evidence is reviewed.
+Intel Mac has no prebuilt binary or verified live-review combination in this
+release.
 
 ## Choose An Install Path
 
 | Option | When to use it | Important limit |
 | --- | --- | --- |
 | One-command installer | Fastest path to the published binary | The binary archive is checksum-verified, but the installer is not inspected before execution |
-| Tagged installer | Install the published binary in your user account | Unsigned; the checksum detects changed bytes but does not prove who published them |
+| Tagged installer | Install the published binary in your user account | Not Developer ID signed or notarized; the checksum detects changed bytes but does not prove who published them |
 | Download, read, then run | Inspect the installer before executing it | Installs the same binary and uses the same checksum |
 | Pinned `go install` | Build from source with an existing Go toolchain | Go may download the required toolchain and module data, depending on local settings |
 
 The installer does not install the optional
 [Skillstead acRelay Skill](https://github.com/kyungseo/skillstead/tree/main/skills/acrelay).
-That natural-language front door is an unpublished Alpha preview until its
-separate validation is complete.
+That natural-language front door is also part of the Public Validation Preview:
+Experimental, validation pending, and not a general `Supported` claim.
 
 ## One-Command Installer
 
@@ -105,8 +104,8 @@ not acceptable in the current environment.
 This path verifies module content through the user’s configured Go module
 proxy/checksum policy. It does not use the GitHub Release archive.
 
-Building successfully on another platform does not make its Claude Code or
-Codex reviewer path supported. acRelay still requires recorded
+Building successfully on another platform does not enable its Claude Code or
+Codex reviewer path. acRelay still requires recorded
 `vendor + version + GOOS + GOARCH` evidence before dispatch.
 
 ## Verify
@@ -134,15 +133,16 @@ manual GitHub Actions workflow, run against an already-approved exact tag,
 produces release files intended for publication. Files created by the local
 packaging script are test fixtures, not publication sources.
 
-## Unsigned macOS Boundary
+## macOS Signing And Gatekeeper Boundary
 
-The initial release is not signed or notarized. Browser/Finder downloads may
-show Gatekeeper warnings or refuse execution. Do not generalize one successful
-terminal installation into a warning-free guarantee.
+The initial release is not Developer ID signed or notarized. Browser/Finder
+downloads may show Gatekeeper warnings or refuse execution. Do not generalize
+one successful terminal installation into a warning-free guarantee.
 
-The supported claim is limited to the exact path observed during release
-validation. If execution is blocked, stop and report the observed Gatekeeper
-message and file attributes; do not recommend disabling Gatekeeper globally.
+The current evidence is limited to the exact paths observed during release
+validation; it is not a general `Supported` claim. If execution is blocked,
+stop and report the observed Gatekeeper message and file attributes. Do not
+recommend disabling Gatekeeper globally or assume the dialog's exact wording.
 
 ## Update
 

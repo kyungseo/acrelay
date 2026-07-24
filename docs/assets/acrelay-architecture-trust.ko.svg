@@ -2,7 +2,7 @@
   role="img" aria-labelledby="diagram-title diagram-desc"
   style="font-family:Pretendard,'Apple SD Gothic Neo','Malgun Gothic','Noto Sans KR',sans-serif">
   <title id="diagram-title">acRelay가 review를 중계하는 방식</title>
-  <desc id="diagram-desc">Owner는 전송을 확인하고 review 종료를 결정합니다. Driver agent는 변경을 작성하고 finding에 대응합니다. acRelay는 확인된 review 정보만 Claude Code 또는 Codex reviewer CLI로 보낸 뒤 finding, owner 결정과 복구 정보를 비공개 로컬 기록에 남깁니다.</desc>
+  <desc id="diagram-desc">Owner는 전송을 확인하고 review 종료를 결정합니다. Driver agent는 변경을 작성하고 finding에 대응합니다. acRelay는 확인된 review 정보만 Claude Code 또는 Codex reviewer CLI로 보낸 뒤 finding, owner 결정과 복구 정보를 사용자 컴퓨터의 기록에 남깁니다.</desc>
 
   <style>
     svg {
@@ -239,10 +239,10 @@
   <text x="501" y="600" class="card-title green-ink" dominant-baseline="central">로컬 review 기록</text>
   <text x="501" y="630" class="card-body muted" dominant-baseline="central">finding + owner 결정 · journal + quarantine</text>
   <text x="501" y="653" class="caption muted" dominant-baseline="central">provider의 session과 설정은 acRelay 권한 밖에 남습니다</text>
-  <rect x="822" y="581" width="130" height="30" rx="15" fill="var(--green-soft)"
+  <rect x="812" y="581" width="150" height="30" rx="15" fill="var(--green-soft)"
     stroke="var(--green)" stroke-width="1"/>
   <text x="887" y="596" class="green-ink" font-size="12" font-weight="760"
-    text-anchor="middle" dominant-baseline="central">비공개 로컬</text>
+    text-anchor="middle" dominant-baseline="central">내 컴퓨터에 보관</text>
 
   <!-- Footer guardrails -->
   <rect x="52" y="760" width="1496" height="92" rx="18" fill="var(--footer)"

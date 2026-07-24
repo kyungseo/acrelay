@@ -2,41 +2,51 @@
 
 [English](./README.md) · **한국어**
 
-계획, 문서 또는 구현 결과에 다른 관점의 검토가 필요할 때 acRelay로 one-shot
-red-team을 시작할 수 있습니다. 작업 중인 agent가 별도의 Claude Code 또는 Codex
-CLI에 파일 하나나 지정한 파일 묶음을 검토하게 합니다. acRelay는 검토한 revision,
-finding, 처리 결과와 owner의 최종 결정을 하나의 비공개 로컬 기록에 남깁니다.
+계획이나 구현 결과를 다른 coding agent와 함께 검토하면 방향을 더 정교하게
+다듬고, 숨은 결함을 찾고, 최종 결과의 품질을 높일 수 있습니다. acRelay는 필요한
+순간에 이런 review 회차를 쉽게 시작하도록 돕습니다. 작업 중인 agent가 별도의
+Claude Code 또는 Codex CLI에 파일 하나나 지정한 파일 묶음을 검토하게 합니다.
 
-변경을 작성하는 agent가 **driver**이고, 중요한 승인과 review 종료를 결정하는
-사람이 **owner**입니다. acRelay는 코드를 merge하지 않으며, 실행 결과가 불확실한
-review를 자동으로 다시 시도하거나 review를 스스로 종료하지 않습니다.
+검토한 revision, finding, 처리 결과와 owner의 최종 결정은 공유·동기화 폴더가
+아닌 사용자 컴퓨터의 기록 하나에 함께 남습니다.
+
+변경을 작성하는 agent가 **driver**이고, 최종 승인과 review 종료를 결정하는
+사람이 **owner**입니다. acRelay는 review를 정리하고 기록하지만 owner를 대신해
+결정하지 않습니다.
+
+## 시작 전 준비
+
+이 preview는 Codex App, Codex CLI 또는 Claude Code로 파일 작업을 하는 사용자를
+대상으로 합니다. Review는 Claude Code CLI나 Codex CLI를 통해 실행하므로 둘 중
+하나는 미리 설치하고 로그인해 정상 실행되는 상태여야 합니다. Codex App은
+driver가 될 수 있지만 reviewer는 CLI에서 실행됩니다.
+
+여기서 **App**은 데스크톱 화면, **CLI**는 Terminal에서 실행하는 command를
+뜻합니다. acRelay Skill과 engine은 reviewer 도구를 대신 설치하거나 로그인하지
+않습니다.
 
 ## acRelay를 만든 이유
 
-acRelay는 실제 계획과 구현을 만들면서 Claude Code와 Codex 사이에 red-team 회차를
-반복 운영한 경험에서 시작했습니다. 다른 agent가 놓친 부분을 찾아 계획과 결과를
-보강하는 경우가 많았지만, 매 요청과 결과를 사람이 옮기는 작업까지 계속하고
-싶지는 않았습니다.
+acRelay는 한 도구에서 계획이나 구현을 작성한 뒤, owner가 결정하기 전에 다른
+도구에 반대 관점의 검토를 요청하던 작업 방식에서 시작했습니다. Review 자체는
+유용했지만, 요청과 결과를 옮기는 과정이 불편했습니다.
 
-Cross-agent review는 유용하지만 수동 relay는 금방 반복 작업이 됩니다. 매 회차마다
-review 요청을 reviewer에게 복사하고, 결과를 다시 driver에게 복사해야 합니다.
-3회차를 진행하면 최대 6번을 복사·붙여넣어야 하고, 어느 revision을 검토했는지와
-어떤 finding이 남았는지도 사용자가 직접 관리해야 합니다.
+매 회차마다 review 요청을 reviewer에게 복사하고, 결과를 다시 driver에게
+복사해야 했습니다. 3회차를 진행하면 최대 6번을 복사·붙여넣어야 하고, 어느
+revision을 검토했는지와 어떤 finding이 남았는지도 사용자가 직접 관리해야
+했습니다.
 
 | 수동 relay | acRelay 사용 |
 | --- | --- |
 | Agent 사이에서 매 요청과 결과를 복사 | 로컬 binary나 acRelay Skill로 relay 시작 |
-| 회차, revision과 finding을 직접 관리 | 하나의 비공개 review 기록에 함께 보관 |
+| 회차, revision과 finding을 직접 관리 | 사용자 컴퓨터의 review 기록 하나에 함께 보관 |
 | 두 agent가 끝났는지 대화로 판단 | 종료 준비 요약을 확인하고 owner가 최종 결정 |
 
-여기서 **one-shot**은 owner가 범위가 정해진 review objective 하나를 필요할 때
-직접 시작한다는 뜻입니다. “prompt 한 번”이나 “회차 한 번”이라는 뜻은 아닙니다.
-Objective별 formal round는 1–5회이며 기본값은 3회입니다. 제한된 회차는 끝없는
-논쟁을 막고 reviewer token과 model 비용을 사용자가 통제하도록 돕습니다. 회차가
-길어지면 피로, 반복 prompt와 context drift가 쌓여 새로운 검토 없이 승인 쪽으로
-기울 수 있습니다. 5회차에 도달하면 현재 objective에 formal review 회차를 더
-추가할 수 없습니다. 종료할지 새 objective를 의도적으로 시작할지는 owner가
-결정합니다.
+Review objective별 formal round는 1–5회이며 기본값은 3회입니다. 제한된 회차는
+끝없는 논쟁을 막고 reviewer token과 model 비용을 사용자가 통제하도록 돕습니다.
+회차가 길어지면 피로, 반복 prompt와 context drift가 쌓여 새로운 검토 없이 승인
+쪽으로 기울 수 있습니다. 5회차에 도달하면 종료할지 새 objective를 의도적으로
+시작할지 owner가 결정합니다.
 
 사용하는 방법은 단순하지만 내부 계약까지 단순한 것은 아닙니다. Reviewer가
 “괜찮다”고 답했다는 이유만으로 끝내지 않고, 검토한 revision, finding, 응답,
@@ -53,24 +63,34 @@ Reviewer CLI는 provider network를 사용하고 model token을 소비할 수 �
 “로컬 기록”은 acRelay의 review 이력이 로컬에 남는다는 뜻이지 reviewer model이
 로컬에서 실행된다는 뜻은 아닙니다.
 
-가장 자연스러운 구성은 Codex App, Claude Code CLI 또는 Codex CLI가 driver로서
-acRelay Skill과 binary를 호출하고, Claude Code CLI나 Codex CLI가 reviewer를
-맡는 방식입니다. 한 agent 생태계를 주로 쓰는 사용자도 지원하는 same-vendor 별도
-CLI session을 사용할 수 있으며, acRelay는 두 context에 같은 맹점이 있을 수
-있다는 caution을 기록합니다. Host-native subagent 결과를 직접 받는 기능은 이번
-release에서 지원하지 않으며 다른 경로로 조용히 우회하지 않습니다.
+## Driver와 reviewer 선택
 
-[![Driver, 비공개 기록, owner와 reviewer service 사이에서 acRelay가 review를 전달하는 방식](./docs/assets/acrelay-architecture-trust.ko@2x.png)](./docs/assets/acrelay-architecture-trust.ko.svg)
+| 사용 방식 | Driver | Reviewer |
+| --- | --- | --- |
+| Codex App에서 작업 | Codex App | Claude Code CLI 또는 Codex CLI |
+| Claude Code에서 작업 | Claude Code CLI | Codex CLI 또는 별도의 Claude Code CLI session |
+| Claude Code만 사용 | Claude Code CLI | 별도의 Claude Code CLI session |
+| Codex만 사용 | Codex CLI | 별도의 Codex CLI session |
 
-## 현재 Alpha와 platform 지원 확대
+다른 도구를 reviewer로 쓰면 driver가 놓친 가정을 다른 관점에서 검토할 수
+있습니다. Codex나 Claude Code 중 하나만 사용하더라도 같은 도구의 별도 CLI
+session을 reviewer로 둘 수 있지만, driver와 reviewer가 같은 맹점을 공유할 수
+있습니다. 이 preview는 CLI reviewer를 사용하며, driver 도구가 만든 내장
+subagent 결과를 직접 받지는 않습니다.
 
-첫 Alpha는 내려받을 수 있는 파일과 live review 검증 범위를 의도적으로 좁게
-시작합니다.
+[![Driver, 사용자 컴퓨터의 기록, owner와 reviewer service 사이에서 acRelay가 review를 전달하는 방식](./docs/assets/acrelay-architecture-trust.ko@2x.png)](./docs/assets/acrelay-architecture-trust.ko.svg)
+
+## Public Validation Preview와 platform 지원 확대
+
+`v0.1.0-alpha.1`은 **Public Validation Preview**입니다. 아직
+**Experimental** 단계이고 더 넓은 검증은 **Validation pending**이며, 일반적인
+`Supported` 상태를 주장하지 않습니다. 내려받을 수 있는 파일과 live review 검증
+범위는 의도적으로 좁게 시작합니다.
 
 - 내려받아 설치할 수 있는 binary: **macOS Apple Silicon (`darwin/arm64`)** 전용
 - Reviewer: 실제로 검증한 reviewer version과 운영체제 조합의 Claude Code CLI와
   Codex CLI
-- Release: signing과 notarization을 하지 않은 `v0.1.0-alpha.1`
+- Release: Developer ID signing과 notarization을 하지 않은 `v0.1.0-alpha.1`
 - Review 방식: review마다 reviewer 1개, 정해진 회차 제한, 모든 finding에 대한
   driver의 처리 결정과 owner의 최종 종료 결정
 
@@ -81,16 +101,15 @@ release할 예정입니다. 그전까지 `v0.1.0-alpha.1`은 검증하지 않은
 reviewer 조합에서 review를 보내기 전에 중단합니다. Intel Mac은 이번 release에서
 내려받을 수 있는 artifact와 검증된 live-review 조합이 없습니다.
 
-별도의 process나 vendor를 사용했다는 사실만으로 판단의 독립성이 증명되지는
-않습니다.
-
 ## 설치
 
-다음 명령을 사용하려면 `v0.1.0-alpha.1` tag와 release asset이 게시돼 있어야
-합니다. 둘 중 하나라도 없다면 unpinned branch나 `latest` download로 바꾸지 말고
-중단하세요.
+정확한 `v0.1.0-alpha.1` preview를 설치합니다. Installer는 unpinned branch나
+`latest` download로 바꾸지 않습니다.
 
 ### 한 줄로 binary 설치
+
+macOS에서 Terminal을 열고 `uname -m`을 실행하세요. 결과가 `arm64`일 때만 아래
+미리 build한 binary installer를 사용합니다.
 
 Installer는 정확한 tag에 고정돼 있으며, 내려받은 binary archive를 실행하기 전에
 release checksum과 대조합니다.
@@ -132,7 +151,7 @@ Source install에는 [`go.mod`](./go.mod)에 선언된 Go toolchain이 필요합
 acrelay version
 ```
 
-PATH 설정, update, binary 제거, unsigned download 동작과 복구 절차는
+PATH 설정, update, binary 제거, macOS signing·Gatekeeper 동작과 복구 절차는
 [설치와 운영](./docs/OPERATIONS.ko.md)을 참고하세요.
 
 ## 자연어로 사용하려면 acRelay Skill 추가
@@ -141,11 +160,14 @@ Engine은 단독으로 완전하게 사용할 수 있지만, 일반 사용자가
 외울 필요는 없습니다. Optional
 [Skillstead의 acRelay Skill](https://github.com/kyungseo/skillstead/tree/main/skills/acrelay)을
 설치하면 “Claude에게 이 계획을 red-team해 달라” 같은 자연어 요청을 같은
-binary-enforced workflow로 바꿔 줍니다.
+workflow로 바꿉니다. Skill은 요청을 acRelay 단계로 옮기고, engine은 파일 확인,
+reviewer 실행과 review 기록을 담당합니다. Skill만으로는 review를 실행할 수
+없으므로 둘 다 설치합니다.
 
-이 Skill은 Alpha preview이며 Claude Code와 Codex 별도 검증을 완료하는 중입니다.
-Engine을 설치하거나 update하거나 대체하지 않습니다. Engine을 먼저 설치한 뒤,
-preview를 평가하려면 Skill 폴더 전체를 복사하세요.
+이 Skill은 **Public Validation Preview**입니다. 아직 **Experimental** 단계이고,
+더 넓은 환경의 검증은 **Validation pending**이며, 일반적인 `Supported` 상태를
+주장하지 않습니다. Engine을 설치하거나 update하거나 대체하지 않습니다. Engine을
+먼저 설치한 뒤 Skill 폴더 전체를 복사하세요.
 
 ### Claude Code
 
@@ -163,22 +185,26 @@ mkdir -p "$HOME/.agents/skills"
 cp -R /tmp/skillstead/skills/acrelay "$HOME/.agents/skills/"
 ```
 
-아직 공개하지 않은 preview를 의도적으로 평가할 때만 default branch를 사용하세요.
-검증된 release tag가 생기면 해당 tag에 고정해서 설치해야 합니다. 프로젝트별 설치
-경로, update, 제거와 현재 검증 상태는
+이 preview는 Skillstead의 default branch에서 설치하며 `v0.8.0` Skillstead tag에는
+포함되지 않습니다. 별도로 검증한 release tag가 생기면 이 경로를 대체할
+예정입니다. 프로젝트별 설치 경로, update, 제거와 현재 검증 상태는
 [Skill 안내](https://github.com/kyungseo/skillstead/blob/main/skills/acrelay/README.ko.md)와
 [Skillstead 설치 안내](https://github.com/kyungseo/skillstead/blob/main/docs/INSTALL.ko.md)를
 참고하세요.
 
 요청 예시:
 
-> acRelay로 Claude가 이 계획을 red-team하게 해줘. Review 기록은 비공개로
-> 보관하고, 최대 3회차 안에서 진행한 뒤 owner가 결정할 내용만 보여줘.
+> acRelay로 Claude에게 이 계획을 비판적으로 검토해 달라고 해줘. 마지막에 내가
+> 결정해야 할 내용만 정리해줘.
+
+별도로 지정하지 않으면 최대 3회차로 진행합니다. 필요하면 1~5회 안에서 원하는
+제한을 요청할 수 있습니다.
 
 ## 직접 CLI 사용: 첫 Review
 
-공유·동기화 폴더와 repository 밖에 비공개 디렉터리를 만듭니다. acRelay는 review
-이력의 기준이 되는 Markdown 파일을 **canonical record**라고 부릅니다.
+공유·동기화하지 않고 repository에도 포함하지 않을 사용자 컴퓨터의 디렉터리를
+만듭니다. acRelay는 review 이력의 기준이 되는 Markdown 파일을
+**canonical record**라고 부릅니다.
 
 ```sh
 mkdir -p "$HOME/.acrelay/reviews"

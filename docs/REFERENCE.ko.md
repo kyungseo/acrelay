@@ -50,10 +50,12 @@ migration하지 않습니다.
 
 ## Canonical record는 비공개로 보관합니다
 
-Canonical Markdown은 raw reviewer output과 provenance를 보존합니다.
-공유·동기화·publish 경계 밖의 private local storage에 두세요. `init`은 `.git`
-ancestor 또는 runtime이 검증한 sync-root signal을 발견하면 fail-closed합니다.
-탐지는 완전하지 않으므로 warning이 없다는 사실은 안전성 proof가 아닙니다.
+Canonical Markdown은 raw reviewer output과 provenance를 보존합니다. 사용자
+컴퓨터에서도 공유·동기화·publish하지 않는 위치에 두세요.
+
+`init`은 `.git` ancestor 또는 runtime이 검증한 sync-root signal을 발견하면
+fail-closed합니다. 탐지는 완전하지 않으므로 warning이 없다는 사실은 안전성
+proof가 아닙니다.
 
 위험한 위치를 사용해야 한다면 `-allow-unsafe-location`,
 `-approval-actor`, `-unsafe-location-reason`을 같은 `init`에서 지정해야 합니다.
@@ -156,22 +158,23 @@ interrupt는 Job Object를 즉시 종료하며 SIGTERM과 같은 graceful stage�
 없습니다. Parent가 SIGKILL로 종료되면 cleanup을 수행할 수 없으므로 journal이
 recovery authority로 남습니다.
 
-## Platform 지원 범위
+## Platform 근거와 dispatch 범위
 
-Platform support는 하나의 “Windows supported” 같은 문장이 아니라 surface와
-lane별로 기록합니다.
+근거는 surface와 기록된 lane별로 표시하며, 여러 lane을 합쳐 넓은 platform
+claim으로 만들지 않습니다.
 
 - macOS arm64: core runtime과 기록된 exact vendor tuple의 real-vendor dispatch
   검증. Initial release의 유일한 distributed functional artifact
-- Linux amd64: hosted CI core runtime 검증. Real-vendor dispatch unsupported
+- Linux amd64: hosted CI core runtime 검증. Real-vendor dispatch 비활성
 - Windows Server x64: hosted CI core runtime 검증. Real-vendor dispatch
-  unsupported
-- Windows 11 ARM64: owner-operated UTM에서 deterministic core runtime 검증.
+  비활성
+- Windows 11 ARM64: owner-operated VM에서 deterministic core runtime 검증.
   Race와 real-vendor dispatch는 claim하지 않음
 
 검증하지 않은 `vendor + version + GOOS + GOARCH` 조합의 real-vendor dispatch는
-fail-closed합니다. Platform lane을 합쳐 더 넓은 support로 표현하지 않습니다.
-어느 platform에서도 power-loss durability를 claim하지 않습니다.
+fail-closed합니다. 검증한 darwin/arm64 tuple만 dispatch가 활성화됩니다. 이는
+일반적인 `Supported` 상태가 아니며, 어느 platform에서도 power-loss durability를
+claim하지 않습니다.
 
 이는 release 근거의 현재 경계이지 Apple Silicon만 계속 지원하겠다는 결정이
 아닙니다. Linux와 Windows reviewer 검증은 다음 지원 확대 단계로 계획하고

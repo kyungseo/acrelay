@@ -28,9 +28,9 @@ driver ──finding 처리──> review 기록 <──승인/종료── owne
 
 1. **Review할 파일:** acRelay는 정확한 파일 목록을 기록하고 중요한 동작 전에
    다시 확인합니다. Reviewer에게 repository 전체를 변경할 권한을 주지 않습니다.
-2. **비공개 로컬 기록:** canonical review 기록, 복구 journal, quarantine data,
-   session 식별자와 비공개 working directory는 운영 데이터입니다. 공개 보고서가
-   아닙니다.
+2. **사용자 컴퓨터의 비공개 기록:** canonical review 기록, 복구 journal,
+   quarantine data, session 식별자와 working directory는 운영 데이터입니다.
+   공유·동기화·publish하는 위치 밖에 보관합니다.
 3. **Reviewer에게 보내는 데이터:** 선택한 reviewer service는 파일 내용, 해석된
    경로와 metadata를 처리할 수 있습니다. Owner의 확인은 이 전송을 허용할 뿐,
    reviewer를 로컬 또는 격리된 환경으로 만들지는 않습니다.
@@ -44,7 +44,7 @@ driver ──finding 처리──> review 기록 <──승인/종료── owne
 | Review | 확인한 발췌문, finding, driver 응답과 approval 기록을 저장 | 이해도나 정확성의 증명 |
 | Relay | Reviewer 실행을 준비·전송·수집·복구 | 결과가 불확실한 실행의 자동 재시도 |
 | Store | 비공개 canonical record를 읽고 원자적으로 교체 | 인증 또는 변조 방지 저장소 |
-| Adapter | 지원하는 reviewer version을 호출하고 session을 재개 | Reviewer 독립성 |
+| Adapter | 검증된 reviewer version을 호출하고 session을 재개 | Reviewer 독립성 |
 | Briefing | Review가 종료 가능한지 읽기 전용으로 요약 | 승인 또는 상태 변경 |
 | Cleanup | 승인된 특정 acRelay session data만 제거 | Raw canonical 또는 vendor 소유 data 삭제 |
 

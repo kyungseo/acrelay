@@ -6,7 +6,10 @@ This file records changes that matter to acRelay users. The project is in
 Alpha, so commands and file formats may change between prereleases. Once a tag
 is published, however, it is never reused or rewritten.
 
-## v0.1.0-alpha.1 — First public Alpha
+## v0.1.0-alpha.1 — First Public Validation Preview
+
+This release is **Experimental** and broader validation is still **pending**.
+It does not claim general `Supported` status.
 
 ### Included
 
@@ -22,8 +25,9 @@ is published, however, it is never reused or rewritten.
   session data
 - Platform-specific core test evidence, with live reviewer use restricted to
   verified macOS Apple Silicon combinations
-- Unsigned `darwin/arm64` release archive, checksum-verifying installer, pinned
-  `go install`, and recorded build provenance
+- A `darwin/arm64` release archive that is not Developer ID signed or notarized,
+  plus a checksum-verifying installer, pinned `go install`, and recorded build
+  provenance
 
 ### Known limitations
 
@@ -31,10 +35,10 @@ is published, however, it is never reused or rewritten.
   Codex review support still awaits the planned platform-specific validation
   and any resulting patches. Intel Mac has no artifact or verified reviewer
   combination in this release.
-- The release is unsigned and not notarized.
+- The release is not Developer ID signed or notarized.
 - There is no redacted export, hosted service, daemon, automatic merge, or
   automatic retry after ambiguous execution.
 - A separate reviewer process and recorded excerpts do not prove independence,
   completeness, correctness, or understanding.
-- The optional Skillstead package will remain unpublished until its separate
-  validation is complete.
+- The optional Skillstead package is available from Skillstead's default branch
+  as part of the same preview. It is not included in the `v0.8.0` tag.

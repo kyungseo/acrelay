@@ -2,48 +2,59 @@
 
 **English** · [한국어](./README.ko.md)
 
-acRelay starts a one-shot red-team review when a plan, document, or
-implementation deserves a second opinion. The coding agent doing the work asks
-a separate Claude Code or Codex CLI to challenge a file or a defined set of
-files. acRelay keeps the reviewed revision, findings, responses, and final
-owner decision together in a private local record.
+Reviewing a plan or implementation with another coding agent can sharpen the
+direction, uncover hidden defects, and raise the quality of the final result.
+acRelay makes those review rounds easy to start whenever they are useful. The
+agent doing the work asks a separate Claude Code or Codex CLI to review one
+file or a defined set of files.
 
-The agent making the change remains the **driver**. A person remains the
-**owner** and decides approvals and when the review is finished. acRelay never
-merges code, retries a review whose result is uncertain, or marks a review
-finished on its own.
+acRelay keeps the reviewed revision, findings, responses, and final owner
+decision together in a record on your computer, outside shared or synced
+folders.
+
+The agent making the change is the **driver**. A person is the **owner**, makes
+the final approval, and decides when the review is finished. acRelay organizes
+and records the review; it does not make those decisions for the owner.
+
+## Before You Start
+
+This preview is for people who already work with Codex App, Codex CLI, or
+Claude Code. A review runs through Claude Code CLI or Codex CLI, so at least
+one of those reviewer CLIs must already be installed, signed in, and working.
+Codex App can drive the work, but the reviewer still runs through a CLI.
+
+Here, **App** means the desktop interface and **CLI** means a command that runs
+in Terminal. The acRelay Skill and engine do not install or sign in to those
+reviewer tools.
 
 ## Why acRelay
 
-acRelay grew out of repeatedly running red-team rounds between Claude Code and
-Codex while developing real plans and implementations. A second agent often
-surfaced gaps and made the result stronger, but moving every request and result
-by hand became the part nobody wanted to keep doing.
+acRelay grew out of a working habit: after drafting a plan or implementation
+in one tool, we asked the other to challenge it before the owner decided. The
+reviews were useful. The handoff was the weak point.
 
-Cross-agent review is useful, but a manual relay gets repetitive. For every
-round, someone copies the request to the reviewer and copies the result back to
-the driver. Three rounds can mean six copy-and-paste handoffs, while the user
-also has to remember which revision was reviewed and which findings remain
-open.
+For every round, someone had to copy the request to the reviewer and copy the
+result back to the driver. Three rounds could mean six copy-and-paste handoffs,
+while the user also had to remember which revision was reviewed and which
+findings remained open.
 
 | Manual relay | With acRelay |
 | --- | --- |
 | Copy each request and result between agents | Start the relay through the local binary or acRelay Skill |
-| Track rounds, revisions, and findings by hand | Keep them together in one private review record |
+| Track rounds, revisions, and findings by hand | Keep them together in one review record on your computer |
 | Decide informally when the agents are done | Show a closeout summary and leave the final decision to the owner |
 
-Here, **one-shot** means the owner deliberately starts one bounded review
-objective. It does not mean “one prompt” or “one round.” An objective may use
-1–5 formal rounds; the default is 3. The limit prevents an open-ended argument
-and helps the user control reviewer token and model costs. Long review loops
-also accumulate fatigue, repeated prompts, and context drift that can push a
-reviewer toward approval without adding useful scrutiny. At five rounds,
-the current objective cannot add another formal review round; the owner decides
-whether to close it or deliberately start a new objective.
+Each review objective is bounded to 1–5 formal rounds; the default is 3. The
+limit prevents an open-ended argument and helps the user control reviewer
+token and model costs. Long review loops also accumulate fatigue, repeated
+prompts, and context drift that can push a reviewer toward approval without
+adding useful scrutiny. At five rounds, the owner decides whether to close the
+objective or deliberately start a new one.
 
-The surface is intentionally simple. Underneath, the engine keeps the reviewed
-revision, findings, responses, recovery state, round limit, and owner authority
-separate rather than treating a reviewer’s “looks good” as completion.
+The workflow is intentionally simple to use. Underneath, the engine keeps the
+reviewed revision, findings, responses, recovery state, round limit, and owner
+authority separate rather than treating a reviewer’s “looks good” as
+completion.
 
 ## One Executable, No acRelay Daemon
 
@@ -56,24 +67,34 @@ The reviewer CLI may use its provider’s network and consume model tokens.
 “Local record” means acRelay keeps its review history locally; it does not mean
 the reviewer model runs locally.
 
-The typical setup is a Codex App, Claude Code CLI, or Codex CLI driver calling
-the acRelay Skill and binary, with Claude Code CLI or Codex CLI as the reviewer.
-A user who mainly works with one agent ecosystem can use a supported
-same-vendor separate CLI session; acRelay records the shared-blind-spot
-caution. Host-native subagent result ingestion is not supported in this
-release and never silently falls back to another path.
+## Choose A Driver And Reviewer
 
-[![How acRelay moves a review between the driver, private record, owner, and reviewer service](./docs/assets/acrelay-architecture-trust@2x.png)](./docs/assets/acrelay-architecture-trust.svg)
+| How you work | Driver | Reviewer |
+| --- | --- | --- |
+| Drive from Codex App | Codex App | Claude Code CLI or Codex CLI |
+| Drive from Claude Code | Claude Code CLI | Codex CLI or a separate Claude Code CLI session |
+| Use only Claude Code | Claude Code CLI | A separate Claude Code CLI session |
+| Use only Codex | Codex CLI | A separate Codex CLI session |
 
-## Current Alpha And Platform Expansion
+A different tool can challenge assumptions that the driver may not notice. If
+you use only Codex or only Claude Code, you can still run a review through a
+separate CLI session of the same tool, but the driver and reviewer may share
+blind spots. This preview uses a CLI reviewer; it does not directly accept a
+result produced by the driver tool's built-in subagent.
 
-The first Alpha has a deliberately narrow download and live-review evidence
-scope:
+[![How acRelay moves a review between the driver, the record on your computer, the owner, and the reviewer service](./docs/assets/acrelay-architecture-trust@2x.png)](./docs/assets/acrelay-architecture-trust.svg)
+
+## Public Validation Preview And Platform Expansion
+
+`v0.1.0-alpha.1` is a **Public Validation Preview**. It is
+**Experimental**, broader validation is still **pending**, and it does not
+claim general `Supported` status. The download and live-review evidence scope
+is deliberately narrow:
 
 - downloadable binary: **macOS Apple Silicon (`darwin/arm64`)** only
 - reviewers: Claude Code CLI and Codex CLI, but only for combinations of
   reviewer version and operating system that were tested explicitly
-- release: unsigned and not notarized, version `v0.1.0-alpha.1`
+- release: not Developer ID signed or notarized, version `v0.1.0-alpha.1`
 - review model: one reviewer for each review, a fixed round limit, a recorded
   driver response to every finding, and a final decision by the owner
 
@@ -86,15 +107,15 @@ Until then,
 reviewer combination. Intel Mac does not have a downloadable artifact or
 verified live-review combination in this release.
 
-A separate process or vendor does not by itself prove independent judgment.
-
 ## Install
 
-These commands require the published `v0.1.0-alpha.1` tag and release assets.
-If either is unavailable, stop rather than substituting an unpinned branch or
-`latest` download.
+Install the exact `v0.1.0-alpha.1` preview. The installer never substitutes an
+unpinned branch or a `latest` download.
 
 ### One-command binary install
+
+On macOS, open Terminal and run `uname -m`. Continue with this prebuilt
+installer only when the result is `arm64`.
 
 The installer is pinned to the exact tag and verifies the downloaded binary
 archive against the release checksum before executing it:
@@ -139,7 +160,7 @@ acrelay version
 ```
 
 See [Installation and operations](./docs/OPERATIONS.md) for PATH setup,
-updates, binary removal, unsigned-download behavior, and recovery.
+updates, binary removal, macOS signing and Gatekeeper behavior, and recovery.
 
 ## Prefer Natural Language? Add The acRelay Skill
 
@@ -147,12 +168,14 @@ The engine is complete on its own, but most users should not need to remember
 its low-level commands. The optional
 [acRelay Skill in Skillstead](https://github.com/kyungseo/skillstead/tree/main/skills/acrelay)
 turns requests such as “have Claude red-team this plan” into the same
-binary-enforced workflow.
+workflow. The Skill translates the request into acRelay steps; the engine
+checks the files, starts the reviewer, and records the review. The Skill cannot
+run a review by itself, so install both.
 
-The Skill is an Alpha preview and is still completing its separate
-Claude Code and Codex validation. It never installs, upgrades, or replaces the
-engine. After installing the engine, preview the Skill by copying its complete
-folder:
+The Skill is part of the **Public Validation Preview**. It is
+**Experimental**, its broader validation is still **pending**, and it does not
+claim general `Supported` status yet. It never installs, upgrades, or replaces
+the engine. After installing the engine, copy the complete Skill folder:
 
 ### Claude Code
 
@@ -170,22 +193,25 @@ mkdir -p "$HOME/.agents/skills"
 cp -R /tmp/skillstead/skills/acrelay "$HOME/.agents/skills/"
 ```
 
-Use the default branch only while intentionally evaluating the unpublished
-preview. Once the Skill has a verified release tag, pin that tag instead.
+This preview is intentionally installed from Skillstead's default branch and
+is not part of the `v0.8.0` Skillstead tag. A separately verified release tag
+will replace this path later.
 See the [Skill guide](https://github.com/kyungseo/skillstead/blob/main/skills/acrelay/README.md)
 and [Skillstead installation guide](https://github.com/kyungseo/skillstead/blob/main/docs/INSTALL.md)
 for project-local paths, updates, removal, and current validation status.
 
 Example request:
 
-> Use acRelay to have Claude red-team this plan. Keep the review record
-> private, use at most three rounds, and show me the owner decisions at the
-> end.
+> Use acRelay to have Claude challenge this plan. Summarize the decisions I
+> need to make at the end.
+
+If you do not specify a limit, acRelay allows up to three review rounds. You
+may request any limit from one to five.
 
 ## Direct CLI: First Review
 
-Create a private directory outside shared, synced, or repository paths. acRelay
-calls the Markdown file that holds the official review history the
+Create a directory on your computer that is not shared, synced, or inside the
+repository. The Markdown file that holds the official review history is the
 **canonical record**:
 
 ```sh

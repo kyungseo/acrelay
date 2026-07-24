@@ -29,9 +29,9 @@ The diagram separates three boundaries:
 1. **Files under review.** acRelay records the exact file list and checks it
    again before important actions. The reviewer does not receive a general role
    to change the repository.
-2. **Private local records.** The canonical review record, recovery journal,
-   quarantine data, session identifiers, and private working directory are
-   operational data. They are not public reports.
+2. **Private records on your computer.** The canonical review record, recovery
+   journal, quarantine data, session identifiers, and working directory are
+   operational data. Keep them outside shared, synced, or published locations.
 3. **Data sent to the reviewer.** The selected reviewer service may process the
    file content, resolved paths, and metadata. Owner acknowledgment allows that
    transfer; it does not make the reviewer local or isolated.
@@ -45,7 +45,7 @@ The diagram separates three boundaries:
 | Review | Stores examined excerpts, findings, driver responses, and approval records | Proof of understanding or correctness |
 | Relay | Prepares, sends, captures, and reconciles a reviewer run | Automatic retry when the result is uncertain |
 | Store | Reads and atomically replaces the private canonical record | Authentication or tamper-proof storage |
-| Adapter | Calls a supported reviewer version and resumes its session | Reviewer independence |
+| Adapter | Calls a verified reviewer version and resumes its session | Reviewer independence |
 | Briefing | Summarizes whether the review appears ready to close | Approval or a state change |
 | Cleanup | Removes only the specifically authorized acRelay session artifacts | Deleting the raw canonical or vendor-owned state |
 

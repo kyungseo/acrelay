@@ -2,31 +2,31 @@
 
 [English](./OPERATIONS.md) · **한국어**
 
-이 문서는 signing하지 않은 첫 `v0.1.0-alpha.1` release의 설치, update, 제거와
-복구 방법을 설명합니다. 미리 build해 제공하는 binary는 macOS Apple
-Silicon(`darwin/arm64`)용 하나입니다. 이는 첫 release의 범위이지 최종 platform
-지원 범위가 아닙니다. Linux와 Windows core runtime lane은 이미 검증했으며,
-platform별 Claude Code·Codex review 검증은 다음 지원 확대 단계로 계획하고
-있습니다. 필요한 patch는 그 근거를 검토한 뒤 release합니다. Intel Mac은 이번
-release에서 미리 build한 binary와 검증된 live-review 조합이 없습니다.
+이 문서는 `v0.1.0-alpha.1` **Public Validation Preview**의 설치, update, 제거와
+복구 방법을 설명합니다. 아직 **Experimental** 단계이며, 더 넓은 환경의 검증은
+**Validation pending**입니다.
 
-아래 명령은 정확한 release tag와 파일이 게시된 뒤에만 동작합니다. 아직 게시되지
-않았다면 중단하세요. 고정되지 않은 branch나 `latest` download로 바꾸면 안
-됩니다.
+미리 build해 제공하는 binary는 macOS Apple Silicon(`darwin/arm64`)용 하나입니다.
+이는 첫 release의 범위이지 최종 platform 지원 범위가 아닙니다. Linux와 Windows
+core runtime lane은 이미 검증했으며, platform별 Claude Code·Codex review 검증은
+다음 지원 확대 단계로 계획하고 있습니다. 필요한 patch는 그 근거를 검토한 뒤
+release합니다. Intel Mac은 이번 release에서 미리 build한 binary와 검증된
+live-review 조합이 없습니다.
 
 ## 설치 경로 선택
 
 | 방법 | 적합한 경우 | 알아둘 제한 |
 | --- | --- | --- |
 | 한 줄 installer | 공개된 binary를 가장 빠르게 설치 | Binary archive의 checksum은 확인하지만 installer를 실행 전에 읽지는 않음 |
-| Tag에 고정된 installer | 공개된 binary를 사용자 계정에 설치 | Signing되지 않음. Checksum은 파일이 바뀌었는지 확인하지만 누가 게시했는지는 증명하지 않음 |
+| Tag에 고정된 installer | 공개된 binary를 사용자 계정에 설치 | Developer ID signing이나 notarization을 하지 않음. Checksum은 파일이 바뀌었는지 확인하지만 누가 게시했는지는 증명하지 않음 |
 | 내려받아 읽은 뒤 실행 | Installer 내용을 직접 확인하고 실행 | 같은 binary를 설치하고 같은 checksum을 사용 |
 | 고정 version의 `go install` | 기존 Go toolchain으로 source에서 build | 로컬 설정에 따라 필요한 toolchain과 module data를 내려받을 수 있음 |
 
 Installer는 optional
 [Skillstead acRelay Skill](https://github.com/kyungseo/skillstead/tree/main/skills/acrelay)을
-설치하지 않습니다. 자연어 진입점인 이 Skill은 별도 검증이 끝날 때까지 공개하지
-않은 Alpha preview입니다.
+설치하지 않습니다. 이 자연어 진입점도 Public Validation Preview에 포함됩니다.
+아직 Experimental이고 Validation pending이며, 일반적인 `Supported` 상태를
+주장하지 않습니다.
 
 ## 한 줄 installer
 
@@ -103,7 +103,7 @@ automatic toolchain selection이 켜져 있으면 `go` command가 해당 toolcha
 확인하며 GitHub Release archive는 사용하지 않습니다.
 
 다른 platform에서 build에 성공했다는 사실만으로 그 platform의 Claude Code 또는
-Codex reviewer 경로가 지원되지는 않습니다. Dispatch 전에는 계속
+Codex reviewer 경로가 활성화되지는 않습니다. Dispatch 전에는 계속
 `vendor + version + GOOS + GOARCH` 조합의 기록된 근거가 필요합니다.
 
 ## 설치 확인
@@ -132,16 +132,17 @@ file은 이미 승인된 정확한 tag를 대상으로 수동 실행한 GitHub A
 만듭니다. Local packaging script가 만든 파일은 test fixture이며 게시용 source가
 아닙니다.
 
-## Signing하지 않은 macOS release의 한계
+## macOS signing과 Gatekeeper의 한계
 
-첫 release는 signing하거나 notarize하지 않습니다. Browser나 Finder로 내려받은
-파일은 Gatekeeper warning이 나타나거나 실행이 차단될 수 있습니다. Terminal에서
-한 번 성공했다는 사실만으로 모든 환경에서 warning 없이 실행된다고 보장하지
-않습니다.
+첫 release는 Developer ID signing이나 notarization을 하지 않습니다. Browser나
+Finder로 내려받은 파일은 Gatekeeper warning이 나타나거나 실행이 차단될 수
+있습니다. Terminal에서 한 번 성공했다는 사실만으로 모든 환경에서 warning 없이
+실행된다고 보장하지 않습니다.
 
-지원한다는 설명은 release validation에서 직접 확인한 설치 경로에 한정됩니다.
-실행이 막히면 Gatekeeper message와 file attribute를 기록하고 중단하세요.
-Gatekeeper를 전역으로 끄면 안 됩니다.
+현재 근거는 release validation에서 직접 확인한 설치 경로에 한정되며, 일반적인
+`Supported` 상태를 뜻하지 않습니다. 실행이 막히면 Gatekeeper message와 file
+attribute를 기록하고 중단하세요. Gatekeeper를 전역으로 끄거나 dialog의 정확한
+문구를 추정하면 안 됩니다.
 
 ## 업데이트
 

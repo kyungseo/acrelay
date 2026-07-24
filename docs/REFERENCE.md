@@ -53,13 +53,15 @@ machine-readable form.
 ## Keep The Canonical Record Private
 
 The canonical Markdown record preserves raw reviewer output including
-provenance. Keep it in private local storage outside any shared, synced, or
-published boundary. `init` fails closed when it finds a `.git` ancestor or a
-supported, verified sync-root signal. Detection is intentionally incomplete:
-no warning is not proof that a location is safe. A one-shot override requires
-`-allow-unsafe-location`, the existing `-approval-actor`, and a non-empty
-`-unsafe-location-reason`; the actor, detected signal, and rationale are
-written to that canonical and do not become a reusable policy.
+provenance. Keep it on your computer, outside shared, synced, or published
+locations.
+
+`init` fails closed when it finds a `.git` ancestor or a verified sync-root
+signal. Detection is intentionally incomplete: no warning is not proof that a
+location is safe. A one-shot override requires `-allow-unsafe-location`, the
+existing `-approval-actor`, and a non-empty `-unsafe-location-reason`. The
+actor, detected signal, and rationale are written to that canonical and do not
+become a reusable policy.
 The v1 sync signal set is limited to existing OneDrive roots declared by the
 platform `OneDrive`, `OneDriveCommercial`, or `OneDriveConsumer` environment
 variables and the existing macOS iCloud Drive root. Dropbox, Google Drive,
@@ -222,10 +224,10 @@ authoritative recovery path. The POSIX pid-reuse window around group kill
 and the deterministic suite's inability to observe real vendor error
 phrasing are documented residual risks.
 
-## Platform Support
+## Platform Evidence And Dispatch Boundary
 
-Support is stated per surface and per recorded lane — never as a single
-"Windows supported" claim, and lanes are never aggregated.
+Evidence is stated per surface and per recorded lane. It is never aggregated
+into a broad platform claim.
 
 - macOS arm64: core runtime verified (local + hosted CI lane green);
   real-vendor dispatch verified on the recorded local darwin/arm64 vendor
@@ -233,20 +235,20 @@ Support is stated per surface and per recorded lane — never as a single
   File and parent-directory sync remain best-effort power-loss hardening; no
   power-loss durability claim is made on any platform.
 - Linux amd64: core runtime verified (GitHub-hosted CI lane green, race
-  included). Real vendor dispatch stays unsupported pending a platform-
-  specific restriction spike.
+  included). Real vendor dispatch stays disabled pending a platform-specific
+  restriction spike.
 - Windows Server x64: core runtime verified (GitHub-hosted `windows-latest`
-  lane green, race included). Real vendor dispatch stays unsupported pending
+  lane green, race included). Real vendor dispatch stays disabled pending
   a platform-specific restriction spike.
-- Windows 11 ARM64: core runtime verified on an owner-operated UTM guest
+- Windows 11 ARM64: core runtime verified in an owner-operated VM
   (guest-local NTFS, standard user, deterministic suite and Windows
   capability fixtures; no race claim on this lane). Real vendor dispatch
-  stays unsupported pending a platform-specific restriction spike.
+  stays disabled pending a platform-specific restriction spike.
 
 Real-vendor dispatch for Linux, Windows, and any vendor+version+GOOS+GOARCH
-tuple without recorded restriction evidence is fail-closed; only the verified
-darwin/arm64 tuples are supported. Lane evidence is never aggregated across
-platforms.
+tuple without recorded restriction evidence is fail-closed. Only the verified
+darwin/arm64 tuples are dispatch-enabled. This is not a general `Supported`
+claim, and lane evidence is never aggregated across platforms.
 
 This is a release-evidence boundary, not a decision to remain Apple Silicon
 only. Linux and Windows reviewer validation is planned as the next
@@ -294,10 +296,11 @@ asserted by any profile — a declared separation only ever projects
 render the facets with their sources, and the briefing adds cautions for
 `same-vendor-review` (correlated blind spots survive a separate session),
 `topology-undeclared`, and `reviewer-session-resumed` (a resumed or carried
-session is not a fresh review context). A single-agent user can therefore run
-a same-vendor separate reviewer without a second vendor account, with the
-same-vendor relation, the declared-not-verified separation state, and the
-correlated-blind-spot caution stated in the output rather than hidden.
+session is not a fresh review context). If you use only Codex or only Claude
+Code, a separate CLI session of the same tool can therefore act as reviewer
+without a second vendor account. The output states the same-vendor relation,
+the declared-not-verified separation, and the correlated-blind-spot caution
+instead of hiding them.
 
 `-execution-surface host-subagent` (a reviewer running as the driver's own
 host-orchestrated subagent) is explicitly unsupported and fails closed with
@@ -565,7 +568,7 @@ it. Evidence excerpts are also omitted by default. `content-match` still means
 only that the reviewer returned matching bytes, not understanding or
 completeness.
 
-Briefing output is private local material, not a redacted export. The DTO does
+Briefing output is private material on your computer, not a redacted export. The DTO does
 not contain raw reviewer blocks, session/native handles, subject or resolved
 root paths, resolved member paths, evidence excerpts, owner response verbatim,
 durable-anchor values, or raw error strings. It may include structured review,
