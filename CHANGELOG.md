@@ -8,7 +8,8 @@ is published, however, it is never reused or rewritten.
 
 ## v0.1.0-alpha.2 — First Public Validation Preview
 
-This release is **Experimental** and broader validation is still **pending**.
+This release is **Experimental** and broader validation is still
+**Validation pending**.
 It does not claim general `Supported` status.
 
 ### Included
@@ -41,5 +42,6 @@ It does not claim general `Supported` status.
   automatic retry after ambiguous execution.
 - A separate reviewer process and recorded excerpts do not prove independence,
   completeness, correctness, or understanding.
-- The optional Skillstead package is available from Skillstead's default branch
-  as part of the same preview. It is not included in the `v0.8.0` tag.
+- The optional official acRelay Skill is included in this repository's release
+  source tree and versioned with the engine. It remains part of the same
+  **Experimental**, **Validation pending** preview.

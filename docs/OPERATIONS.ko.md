@@ -23,11 +23,10 @@ Intel Mac도 이번 release에서 미리 build한 binary와 검증된 live-revie
 | 내려받아 읽은 뒤 실행 | Installer 내용을 직접 확인하고 실행 | 같은 binary를 설치하고 같은 checksum을 사용 |
 | 고정 version의 `go install` | 기존 Go toolchain으로 source에서 build | 로컬 설정에 따라 필요한 toolchain과 module data를 내려받을 수 있음 |
 
-Installer는 optional
-[Skillstead acRelay Skill](https://github.com/kyungseo/skillstead/tree/main/skills/acrelay)을
-설치하지 않습니다. 이 자연어 진입점도 Public Validation Preview에 포함됩니다.
-아직 Experimental이고 Validation pending이며, 일반적인 `Supported` 상태를
-주장하지 않습니다.
+Installer는 optional [acRelay Skill](../skills/acrelay/README.ko.md)을 설치하지
+않습니다. 이 repository가 engine과 자연어 진입점의 canonical source입니다.
+Skill도 Public Validation Preview에 포함되며, 아직 Experimental이고 Validation
+pending이며 일반적인 `Supported` 상태를 주장하지 않습니다.
 
 ## 한 줄 installer
 

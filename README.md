@@ -16,7 +16,7 @@ The agent making the change is the **driver**. A person is the **owner**, makes
 the final approval, and decides when the review is finished. acRelay organizes
 and records the review; it does not make those decisions for the owner.
 
-[![A user asks Codex to bring Claude into a bounded acRelay review; Claude exits after the round, and the user decides what changes](./docs/assets/acrelay-review-flow@2x.png)](./docs/assets/acrelay-review-flow.svg)
+[![A user asks Codex to bring Claude into a bounded acRelay review; Claude exits after the round, and the user decides what changes](./skills/acrelay/assets/acrelay-review-flow@2x.png)](./skills/acrelay/assets/acrelay-review-flow.svg)
 
 ## Before You Start
 
@@ -89,7 +89,7 @@ result produced by the driver tool's built-in subagent.
 ## Public Validation Preview And Platform Expansion
 
 `v0.1.0-alpha.2` is a **Public Validation Preview**. It is
-**Experimental**, broader validation is still **pending**, and it does not
+**Experimental**, broader validation is still **Validation pending**, and it does not
 claim general `Supported` status. The download and live-review evidence scope
 is deliberately narrow:
 
@@ -166,40 +166,41 @@ updates, binary removal, macOS signing and Gatekeeper behavior, and recovery.
 ## Prefer Natural Language? Add The acRelay Skill
 
 The engine is complete on its own, but most users should not need to remember
-its low-level commands. The optional
-[acRelay Skill in Skillstead](https://github.com/kyungseo/skillstead/tree/main/skills/acrelay)
-turns requests such as “have Claude red-team this plan” into the same
-workflow. The Skill translates the request into acRelay steps; the engine
-checks the files, starts the reviewer, and records the review. The Skill cannot
-run a review by itself, so install both.
+its low-level commands. This repository is the canonical source for both the
+engine and the optional [acRelay Skill](./skills/acrelay). The Skill turns
+requests such as “have Claude red-team this plan” into the same workflow. It
+translates the request into acRelay steps; the engine checks the files, starts
+the reviewer, and records the review. The Skill cannot run a review by itself,
+so install both.
 
 The Skill is part of the **Public Validation Preview**. It is
-**Experimental**, its broader validation is still **pending**, and it does not
+**Experimental**, its broader validation is still **Validation pending**, and it does not
 claim general `Supported` status yet. It never installs, upgrades, or replaces
-the engine. After installing the engine, copy the complete Skill folder:
+the engine. After installing the engine, copy the complete Skill folder from
+the exact `v0.1.0-alpha.2` tag:
+
+```sh
+git clone --depth 1 --branch v0.1.0-alpha.2 https://github.com/kyungseo/acrelay.git /tmp/acrelay-v0.1.0-alpha.2
+```
 
 ### Claude Code
 
 ```sh
-git clone --depth 1 https://github.com/kyungseo/skillstead.git /tmp/skillstead
 mkdir -p "$HOME/.claude/skills"
-cp -R /tmp/skillstead/skills/acrelay "$HOME/.claude/skills/"
+cp -R /tmp/acrelay-v0.1.0-alpha.2/skills/acrelay "$HOME/.claude/skills/"
 ```
 
 ### Codex
 
 ```sh
-git clone --depth 1 https://github.com/kyungseo/skillstead.git /tmp/skillstead
 mkdir -p "$HOME/.agents/skills"
-cp -R /tmp/skillstead/skills/acrelay "$HOME/.agents/skills/"
+cp -R /tmp/acrelay-v0.1.0-alpha.2/skills/acrelay "$HOME/.agents/skills/"
 ```
 
-This preview is intentionally installed from Skillstead's default branch and
-is not part of the `v0.8.0` Skillstead tag. A separately verified release tag
-will replace this path later.
-See the [Skill guide](https://github.com/kyungseo/skillstead/blob/main/skills/acrelay/README.md)
-and [Skillstead installation guide](https://github.com/kyungseo/skillstead/blob/main/docs/INSTALL.md)
-for project-local paths, updates, removal, and current validation status.
+For a project-local install, copy the folder to `.claude/skills/acrelay` or
+`.agents/skills/acrelay` instead. Restart the agent host if it does not
+recognize the newly copied Skill. See the [Skill guide](./skills/acrelay/README.md)
+for Windows PowerShell installation, updates, removal, and the current validation boundary.
 
 Example request:
 
@@ -296,11 +297,11 @@ or their providers.
 - [Behavioral and CLI reference](./docs/REFERENCE.md)
 - [Installation, update, removal, and release recovery](./docs/OPERATIONS.md)
 - [Release history](./CHANGELOG.md)
-- [Natural-language acRelay Skill](https://github.com/kyungseo/skillstead/tree/main/skills/acrelay)
-- [Skillstead installation guide](https://github.com/kyungseo/skillstead/blob/main/docs/INSTALL.md)
+- [Natural-language acRelay Skill](./skills/acrelay/README.md)
 
-The Skill is the easier front door; this repository remains the authority for
-engine behavior, evidence, privacy, recovery, and platform support.
+The Skill is the easier front door; this repository is the authority for the
+official Skill and for engine behavior, evidence, privacy, recovery, and
+platform support.
 
 ## License
 

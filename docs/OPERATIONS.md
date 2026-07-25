@@ -4,7 +4,7 @@
 
 This guide explains how to install, update, remove, and recover the
 `v0.1.0-alpha.2` **Public Validation Preview**. It is **Experimental**, and
-broader validation is still **pending**.
+its broader validation status is **Validation pending**.
 
 Its only prebuilt binary is for macOS Apple Silicon (`darwin/arm64`). Windows
 is the next platform-support target: its core runtime lane is already verified,
@@ -24,9 +24,10 @@ binary or verified live-review combination in this release.
 | Pinned `go install` | Build from source with an existing Go toolchain | Go may download the required toolchain and module data, depending on local settings |
 
 The installer does not install the optional
-[Skillstead acRelay Skill](https://github.com/kyungseo/skillstead/tree/main/skills/acrelay).
-That natural-language front door is also part of the Public Validation Preview:
-Experimental, validation pending, and not a general `Supported` claim.
+[acRelay Skill](../skills/acrelay/README.md). This repository is the canonical
+source for both the engine and that natural-language front door. The Skill is
+also part of the Public Validation Preview: Experimental, validation pending,
+and not a general `Supported` claim.
 
 ## One-Command Installer
 

@@ -14,7 +14,7 @@ Claude Code 또는 Codex CLI에 파일 하나나 지정한 파일 묶음을 검�
 사람이 **owner**입니다. acRelay는 review를 정리하고 기록하지만 owner를 대신해
 결정하지 않습니다.
 
-[![사용자가 Codex에게 Claude를 제한된 acRelay review에 참여시키도록 요청하고, Claude는 회차 뒤 종료되며, 사용자가 변경 여부를 결정하는 흐름](./docs/assets/acrelay-review-flow.ko@2x.png)](./docs/assets/acrelay-review-flow.ko.svg)
+[![사용자가 Codex에게 Claude를 제한된 acRelay review에 참여시키도록 요청하고, Claude는 회차 뒤 종료되며, 사용자가 변경 여부를 결정하는 흐름](./skills/acrelay/assets/acrelay-review-flow.ko@2x.png)](./skills/acrelay/assets/acrelay-review-flow.ko.svg)
 
 ## 시작 전 준비
 
@@ -159,40 +159,40 @@ PATH 설정, update, binary 제거, macOS signing·Gatekeeper 동작과 복구 �
 ## 자연어로 사용하려면 acRelay Skill 추가
 
 Engine은 단독으로 완전하게 사용할 수 있지만, 일반 사용자가 낮은 수준의 command를
-외울 필요는 없습니다. Optional
-[Skillstead의 acRelay Skill](https://github.com/kyungseo/skillstead/tree/main/skills/acrelay)을
-설치하면 “Claude에게 이 계획을 red-team해 달라” 같은 자연어 요청을 같은
-workflow로 바꿉니다. Skill은 요청을 acRelay 단계로 옮기고, engine은 파일 확인,
-reviewer 실행과 review 기록을 담당합니다. Skill만으로는 review를 실행할 수
-없으므로 둘 다 설치합니다.
+외울 필요는 없습니다. 이 repository는 engine과 optional
+[acRelay Skill](./skills/acrelay)의 canonical source입니다. Skill은 “Claude에게
+이 계획을 red-team해 달라” 같은 자연어 요청을 같은 workflow로 옮깁니다. 요청을
+acRelay 단계로 바꾸는 일은 Skill이, 파일 확인·reviewer 실행·review 기록은
+engine이 담당합니다. Skill만으로는 review를 실행할 수 없으므로 둘 다
+설치합니다.
 
 이 Skill은 **Public Validation Preview**입니다. 아직 **Experimental** 단계이고,
 더 넓은 환경의 검증은 **Validation pending**이며, 일반적인 `Supported` 상태를
 주장하지 않습니다. Engine을 설치하거나 update하거나 대체하지 않습니다. Engine을
-먼저 설치한 뒤 Skill 폴더 전체를 복사하세요.
+먼저 설치한 뒤 exact `v0.1.0-alpha.2` tag에서 Skill 폴더 전체를 복사하세요.
+
+```sh
+git clone --depth 1 --branch v0.1.0-alpha.2 https://github.com/kyungseo/acrelay.git /tmp/acrelay-v0.1.0-alpha.2
+```
 
 ### Claude Code
 
 ```sh
-git clone --depth 1 https://github.com/kyungseo/skillstead.git /tmp/skillstead
 mkdir -p "$HOME/.claude/skills"
-cp -R /tmp/skillstead/skills/acrelay "$HOME/.claude/skills/"
+cp -R /tmp/acrelay-v0.1.0-alpha.2/skills/acrelay "$HOME/.claude/skills/"
 ```
 
 ### Codex
 
 ```sh
-git clone --depth 1 https://github.com/kyungseo/skillstead.git /tmp/skillstead
 mkdir -p "$HOME/.agents/skills"
-cp -R /tmp/skillstead/skills/acrelay "$HOME/.agents/skills/"
+cp -R /tmp/acrelay-v0.1.0-alpha.2/skills/acrelay "$HOME/.agents/skills/"
 ```
 
-이 preview는 Skillstead의 default branch에서 설치하며 `v0.8.0` Skillstead tag에는
-포함되지 않습니다. 별도로 검증한 release tag가 생기면 이 경로를 대체할
-예정입니다. 프로젝트별 설치 경로, update, 제거와 현재 검증 상태는
-[Skill 안내](https://github.com/kyungseo/skillstead/blob/main/skills/acrelay/README.ko.md)와
-[Skillstead 설치 안내](https://github.com/kyungseo/skillstead/blob/main/docs/INSTALL.ko.md)를
-참고하세요.
+특정 repository에서만 사용할 때는 `.claude/skills/acrelay` 또는
+`.agents/skills/acrelay`에 복사하세요. 새 Skill이 보이지 않으면 agent host를
+재시작합니다. Windows PowerShell 설치, Update, 제거와 현재 검증 경계는
+[Skill 안내](./skills/acrelay/README.ko.md)를 참고하세요.
 
 요청 예시:
 
@@ -286,11 +286,10 @@ working directory가 저장됩니다. Binary를 제거해도 이 정보는 삭�
 - [동작 및 CLI reference](./docs/REFERENCE.ko.md)
 - [설치, update, 제거와 release 복구](./docs/OPERATIONS.ko.md)
 - [Release 기록](./CHANGELOG.ko.md)
-- [자연어 acRelay Skill](https://github.com/kyungseo/skillstead/tree/main/skills/acrelay)
-- [Skillstead 설치 안내](https://github.com/kyungseo/skillstead/blob/main/docs/INSTALL.ko.md)
+- [자연어 acRelay Skill](./skills/acrelay/README.ko.md)
 
-Skill은 더 쉬운 진입점이며, engine 동작, evidence, privacy, 복구와 platform
-지원의 기준 문서는 이 repository에 있습니다.
+Skill은 더 쉬운 진입점이며, 이 repository가 official Skill과 engine 동작,
+evidence, privacy, 복구와 platform 지원의 기준입니다.
 
 ## License
 

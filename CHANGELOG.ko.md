@@ -39,5 +39,6 @@ pending**입니다. 일반적인 `Supported` 상태를 주장하지 않습니다
   자동 retry가 없습니다.
 - 별도의 reviewer process와 기록된 발췌문은 독립성, 완전성, 정확성 또는 이해를
   증명하지 않습니다.
-- Optional Skillstead package는 같은 preview의 일부로 Skillstead default
-  branch에서 제공합니다. `v0.8.0` tag에는 포함되지 않습니다.
+- Optional official acRelay Skill은 이 repository의 release source tree에
+  포함하고 engine과 함께 versioning합니다. 같은 Experimental·Validation
+  pending preview 경계를 유지합니다.
