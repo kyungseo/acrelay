@@ -6,7 +6,7 @@
 단계이므로 prerelease 사이에 command와 file format이 달라질 수 있습니다.
 하지만 한 번 게시한 tag는 재사용하거나 rewrite하지 않습니다.
 
-## v0.1.0-alpha.1 — 첫 Public Validation Preview
+## v0.1.0-alpha.2 — 첫 Public Validation Preview
 
 이번 release는 **Experimental** 단계이며 더 넓은 환경의 검증은 **Validation
 pending**입니다. 일반적인 `Supported` 상태를 주장하지 않습니다.
@@ -29,10 +29,11 @@ pending**입니다. 일반적인 `Supported` 상태를 주장하지 않습니다
 
 ### 현재 제한
 
-- Linux와 Windows core runtime lane은 검증했지만, live Claude Code·Codex
-  review 지원은 계획된 platform별 검증과 그 결과에 따른 patch 이후에
-  결정합니다. Intel Mac은 이번 release에 artifact와 검증된 reviewer 조합이
-  없습니다.
+- 다음 platform 지원 대상은 Windows입니다. Windows core runtime lane은
+  검증했으며, live Claude Code·Codex review 지원은 platform별 검증과 그 결과에
+  따른 patch 이후에 결정합니다. Linux는 core CI를 유지하지만 artifact와
+  live-review 지원 계획이 없습니다. Intel Mac도 이번 release에 artifact와
+  검증된 reviewer 조합이 없습니다.
 - Release는 Developer ID signing 또는 notarization을 하지 않습니다.
 - Redacted export, hosted service, daemon, automatic merge 또는 불명확한 실행의
   자동 retry가 없습니다.

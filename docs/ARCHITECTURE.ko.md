@@ -80,12 +80,13 @@ byte와 일치한다는 사실만 확인합니다. Reviewer가 전체 변경을 
 
 ## 현재 platform 경계와 지원 확대
 
-처음 제공하는 downloadable binary는 `darwin/arm64` 전용입니다. Linux와 Windows
-CI에서는 core 동작을 이미 테스트하지만, 아직 해당 운영체제의 live Claude
-Code·Codex review 근거로 사용하지는 않습니다. Platform별 reviewer 검증은 다음
-지원 확대 단계로 계획하고 있으며, 필요한 patch는 그 결과에 따라 제공합니다.
-조합을 검증하기 전까지는 review 회차를 사용하기 전에 중단합니다. Intel Mac은
-이번 release에서 배포 binary와 검증된 live-review 조합이 없습니다.
+처음 제공하는 downloadable binary는 `darwin/arm64` 전용입니다. 다음 platform
+지원 대상은 Windows입니다. Windows CI는 core 동작을 이미 테스트하며,
+platform별 Claude Code·Codex review 근거는 아직 검증 중입니다. Linux core
+동작은 CI에서 계속 확인하지만, 이번 preview에는 Linux artifact와 live-review
+지원 계획이 없습니다. 조합을 검증하기 전까지는 review 회차를 사용하기 전에
+중단합니다. Intel Mac은 이번 release에서 배포 binary와 검증된 live-review
+조합이 없습니다.
 
 정확한 platform, restriction, journal, evidence와 cleanup 계약은
 [동작 reference](./REFERENCE.ko.md)를 참고하세요.

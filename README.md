@@ -16,6 +16,8 @@ The agent making the change is the **driver**. A person is the **owner**, makes
 the final approval, and decides when the review is finished. acRelay organizes
 and records the review; it does not make those decisions for the owner.
 
+[![A user asks Codex to bring Claude into a bounded acRelay review; Claude exits after the round, and the user decides what changes](./docs/assets/acrelay-review-flow@2x.png)](./docs/assets/acrelay-review-flow.svg)
+
 ## Before You Start
 
 This preview is for people who already work with Codex App, Codex CLI, or
@@ -86,7 +88,7 @@ result produced by the driver tool's built-in subagent.
 
 ## Public Validation Preview And Platform Expansion
 
-`v0.1.0-alpha.1` is a **Public Validation Preview**. It is
+`v0.1.0-alpha.2` is a **Public Validation Preview**. It is
 **Experimental**, broader validation is still **pending**, and it does not
 claim general `Supported` status. The download and live-review evidence scope
 is deliberately narrow:
@@ -94,22 +96,21 @@ is deliberately narrow:
 - downloadable binary: **macOS Apple Silicon (`darwin/arm64`)** only
 - reviewers: Claude Code CLI and Codex CLI, but only for combinations of
   reviewer version and operating system that were tested explicitly
-- release: not Developer ID signed or notarized, version `v0.1.0-alpha.1`
+- release: not Developer ID signed or notarized, version `v0.1.0-alpha.2`
 - review model: one reviewer for each review, a fixed round limit, a recorded
   driver response to every finding, and a final decision by the owner
 
-Linux and Windows are the next platform-support targets. The core runtime
-already passes recorded test lanes on both platforms. Platform-specific
-Claude Code and Codex review validation is the next support-expansion step,
-and any required patches will be released after that evidence is reviewed.
-Until then,
-`v0.1.0-alpha.1` stops before sending a review from an unverified platform and
-reviewer combination. Intel Mac does not have a downloadable artifact or
-verified live-review combination in this release.
+Windows is the next platform-support target. Its core runtime already passes
+recorded test lanes; platform-specific Claude Code and Codex review validation
+comes next, followed by any patches that evidence requires. Linux core runtime
+CI remains part of the source test matrix, but this preview does not provide a
+Linux artifact or live-review support. Until a combination is verified,
+`v0.1.0-alpha.2` stops before sending a review. Intel Mac likewise has no
+downloadable artifact or verified live-review combination in this release.
 
 ## Install
 
-Install the exact `v0.1.0-alpha.1` preview. The installer never substitutes an
+Install the exact `v0.1.0-alpha.2` preview. The installer never substitutes an
 unpinned branch or a `latest` download.
 
 ### One-command binary install
@@ -121,7 +122,7 @@ The installer is pinned to the exact tag and verifies the downloaded binary
 archive against the release checksum before executing it:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.1/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.2/scripts/install.sh | bash
 ```
 
 Piping a script to `bash` is convenient but does not let you inspect the
@@ -134,7 +135,7 @@ The installer is pinned to one release and never resolves `latest`. Review it
 before running:
 
 ```sh
-curl -fLO https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.1/scripts/install.sh
+curl -fLO https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.2/scripts/install.sh
 less install.sh
 bash install.sh
 ```
@@ -146,7 +147,7 @@ installed version without `--replace`.
 ### Go install
 
 ```sh
-go install github.com/kyungseo/acrelay/cmd/acrelay@v0.1.0-alpha.1
+go install github.com/kyungseo/acrelay/cmd/acrelay@v0.1.0-alpha.2
 ```
 
 This source-install path requires the Go toolchain declared in

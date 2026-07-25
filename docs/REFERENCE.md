@@ -2,7 +2,7 @@
 
 **English** · [한국어](./REFERENCE.ko.md)
 
-This is the detailed reference for the acRelay `v0.1.0-alpha.1` behavioral
+This is the detailed reference for the acRelay `v0.1.0-alpha.2` behavioral
 contract. Start with the [root README](../README.md) for installation and the
 shortest review path.
 
@@ -251,11 +251,12 @@ darwin/arm64 tuples are dispatch-enabled. This is not a general `Supported`
 claim, and lane evidence is never aggregated across platforms.
 
 This is a release-evidence boundary, not a decision to remain Apple Silicon
-only. Linux and Windows reviewer validation is planned as the next
-support-expansion step. Any platform patch and support claim follows reviewed
-restriction evidence; no date or warning-free path is promised in advance.
-Intel Mac currently has neither a distributed artifact nor verified
-real-review evidence.
+only. Windows reviewer validation is the next support-expansion step. Any
+Windows platform patch and support claim follows reviewed restriction
+evidence; no date or warning-free path is promised in advance. Linux retains
+its core CI lane and fail-closed dispatch boundary, but has no current artifact
+or live-review support plan. Intel Mac likewise has neither a distributed
+artifact nor verified real-review evidence.
 
 Platform behavior differences are recorded, not equalized: Windows
 cancellation is an immediate Job Object termination (no SIGTERM-like graceful
