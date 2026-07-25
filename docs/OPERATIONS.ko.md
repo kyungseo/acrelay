@@ -2,16 +2,17 @@
 
 [English](./OPERATIONS.md) · **한국어**
 
-이 문서는 `v0.1.0-alpha.1` **Public Validation Preview**의 설치, update, 제거와
+이 문서는 `v0.1.0-alpha.2` **Public Validation Preview**의 설치, update, 제거와
 복구 방법을 설명합니다. 아직 **Experimental** 단계이며, 더 넓은 환경의 검증은
 **Validation pending**입니다.
 
 미리 build해 제공하는 binary는 macOS Apple Silicon(`darwin/arm64`)용 하나입니다.
-이는 첫 release의 범위이지 최종 platform 지원 범위가 아닙니다. Linux와 Windows
-core runtime lane은 이미 검증했으며, platform별 Claude Code·Codex review 검증은
-다음 지원 확대 단계로 계획하고 있습니다. 필요한 patch는 그 근거를 검토한 뒤
-release합니다. Intel Mac은 이번 release에서 미리 build한 binary와 검증된
-live-review 조합이 없습니다.
+다음 platform 지원 대상은 Windows입니다. Windows core runtime lane은 이미
+검증했으며, 다음 단계에서 Claude Code·Codex review를 검증합니다. 필요한 patch는
+그 근거를 검토한 뒤 release합니다. Linux core runtime CI는 source test matrix에
+유지하지만, 이번 preview에는 Linux artifact와 live-review 지원이 없습니다.
+Intel Mac도 이번 release에서 미리 build한 binary와 검증된 live-review 조합이
+없습니다.
 
 ## 설치 경로 선택
 
@@ -22,19 +23,18 @@ live-review 조합이 없습니다.
 | 내려받아 읽은 뒤 실행 | Installer 내용을 직접 확인하고 실행 | 같은 binary를 설치하고 같은 checksum을 사용 |
 | 고정 version의 `go install` | 기존 Go toolchain으로 source에서 build | 로컬 설정에 따라 필요한 toolchain과 module data를 내려받을 수 있음 |
 
-Installer는 optional
-[Skillstead acRelay Skill](https://github.com/kyungseo/skillstead/tree/main/skills/acrelay)을
-설치하지 않습니다. 이 자연어 진입점도 Public Validation Preview에 포함됩니다.
-아직 Experimental이고 Validation pending이며, 일반적인 `Supported` 상태를
-주장하지 않습니다.
+Installer는 optional [acRelay Skill](../skills/acrelay/README.ko.md)을 설치하지
+않습니다. 이 repository가 engine과 자연어 진입점의 canonical source입니다.
+Skill도 Public Validation Preview에 포함되며, 아직 Experimental이고 Validation
+pending이며 일반적인 `Supported` 상태를 주장하지 않습니다.
 
 ## 한 줄 installer
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.1/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.2/scripts/install.sh | bash
 ```
 
-Script는 `v0.1.0-alpha.1`에 고정돼 있고, 내려받은 binary archive를 실행하기 전에
+Script는 `v0.1.0-alpha.2`에 고정돼 있고, 내려받은 binary archive를 실행하기 전에
 release checksum과 대조합니다. Script를 `bash`로 바로 보내면 installer 자체를
 실행 전에 읽을 수는 없습니다. 이 차이가 중요하면 아래의 tag 고정·사전 확인
 경로를 사용하세요.
@@ -44,24 +44,24 @@ release checksum과 대조합니다. Script를 `bash`로 바로 보내면 instal
 정확한 release tag에서 script를 내려받아 내용을 확인한 뒤 실행합니다.
 
 ```sh
-curl -fLO https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.1/scripts/install.sh
+curl -fLO https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.2/scripts/install.sh
 less install.sh
 bash install.sh
 ```
 
-Script가 설치할 version은 `v0.1.0-alpha.1`로 고정되어 있습니다. `latest`를
+Script가 설치할 version은 `v0.1.0-alpha.2`로 고정되어 있습니다. `latest`를
 조회하거나 임의의 version을 입력받지 않습니다. 다음 파일을 내려받습니다.
 
 ```text
-acrelay_0.1.0-alpha.1_darwin_arm64.tar.gz
-acrelay_0.1.0-alpha.1_checksums.txt
+acrelay_0.1.0-alpha.2_darwin_arm64.tar.gz
+acrelay_0.1.0-alpha.2_checksums.txt
 ```
 
 Archive의 SHA-256 값이 공개된 checksum 항목과 정확히 일치하는지 확인한 뒤에만
 압축을 풀고 binary를 실행합니다. Archive에는 최상위 directory 하나가 있습니다.
 
 ```text
-acrelay_0.1.0-alpha.1_darwin_arm64/
+acrelay_0.1.0-alpha.2_darwin_arm64/
 ├── acrelay
 ├── LICENSE
 └── README.md
@@ -91,7 +91,7 @@ Installer가 semantic version을 비교해 어느 쪽이 최신인지 판단하�
 ## 고정 version으로 Go install
 
 ```sh
-go install github.com/kyungseo/acrelay/cmd/acrelay@v0.1.0-alpha.1
+go install github.com/kyungseo/acrelay/cmd/acrelay@v0.1.0-alpha.2
 ```
 
 Module의 `go` directive에 필요한 toolchain version이 선언되어 있습니다. Go의
@@ -116,14 +116,14 @@ acrelay version --short
 이번 release의 short output은 다음과 같아야 합니다.
 
 ```text
-v0.1.0-alpha.1
+v0.1.0-alpha.2
 ```
 
 Release file이 어떤 source와 환경에서 만들어졌는지 확인할 수 있도록 다음 파일도
 게시합니다.
 
 ```text
-acrelay_0.1.0-alpha.1_provenance.json
+acrelay_0.1.0-alpha.2_provenance.json
 ```
 
 이 파일에는 source commit, build 환경, Go version, target `GOOS/GOARCH`, CGO
@@ -188,7 +188,7 @@ Raw canonical record는 owner가 계속 보관합니다. acRelay는 reviewer ven
 
 Maintainer용 release workflow는 다음 순서를 따릅니다.
 
-1. Exact approved tag `v0.1.0-alpha.1`을 요구합니다.
+1. Exact approved tag `v0.1.0-alpha.2`을 요구합니다.
 2. Tag가 checkout commit을 가리키는지 확인합니다.
 3. `darwin/arm64` builder와 정확한 Go toolchain을 확인합니다.
 4. Deterministic/race test, vet, build와 module verification을 실행합니다.

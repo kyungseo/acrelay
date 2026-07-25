@@ -6,9 +6,10 @@ This file records changes that matter to acRelay users. The project is in
 Alpha, so commands and file formats may change between prereleases. Once a tag
 is published, however, it is never reused or rewritten.
 
-## v0.1.0-alpha.1 — First Public Validation Preview
+## v0.1.0-alpha.2 — First Public Validation Preview
 
-This release is **Experimental** and broader validation is still **pending**.
+This release is **Experimental** and broader validation is still
+**Validation pending**.
 It does not claim general `Supported` status.
 
 ### Included
@@ -31,14 +32,16 @@ It does not claim general `Supported` status.
 
 ### Known limitations
 
-- Linux and Windows core runtime lanes are verified, but live Claude Code and
-  Codex review support still awaits the planned platform-specific validation
-  and any resulting patches. Intel Mac has no artifact or verified reviewer
-  combination in this release.
+- Windows is the next platform-support target. Its core runtime lane is
+  verified, while live Claude Code and Codex review support still awaits
+  platform-specific validation and any resulting patches. Linux retains core
+  CI coverage but has no artifact or live-review support plan. Intel Mac has
+  no artifact or verified reviewer combination in this release.
 - The release is not Developer ID signed or notarized.
 - There is no redacted export, hosted service, daemon, automatic merge, or
   automatic retry after ambiguous execution.
 - A separate reviewer process and recorded excerpts do not prove independence,
   completeness, correctness, or understanding.
-- The optional Skillstead package is available from Skillstead's default branch
-  as part of the same preview. It is not included in the `v0.8.0` tag.
+- The optional official acRelay Skill is included in this repository's release
+  source tree and versioned with the engine. It remains part of the same
+  **Experimental**, **Validation pending** preview.

@@ -83,13 +83,13 @@ understood the whole change.
 
 ## Platform Boundary And Expansion
 
-The initial downloadable binary is for `darwin/arm64` only. Linux and Windows
-CI jobs already test core behavior, but those lanes are not yet live Claude
-Code or Codex review evidence. Platform-specific reviewer validation is a
-planned support-expansion step, followed by any patches that evidence requires.
-Until a combination is verified, acRelay stops before using a review round.
-Intel Mac has no distributed binary or verified live-review combination in
-this release.
+The initial downloadable binary is for `darwin/arm64` only. Windows is the
+next platform-support target: its CI job already tests core behavior, while
+platform-specific Claude Code and Codex review evidence is still pending.
+Linux core behavior remains covered by CI, but this preview has no Linux
+artifact or live-review support plan. Until a combination is verified, acRelay
+stops before using a review round. Intel Mac has no distributed binary or
+verified live-review combination in this release.
 
 See the [behavioral reference](./REFERENCE.md) for exact platform,
 restriction, journal, evidence, and cleanup contracts.

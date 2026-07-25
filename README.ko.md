@@ -14,6 +14,8 @@ Claude Code 또는 Codex CLI에 파일 하나나 지정한 파일 묶음을 검�
 사람이 **owner**입니다. acRelay는 review를 정리하고 기록하지만 owner를 대신해
 결정하지 않습니다.
 
+[![사용자가 Codex에게 Claude를 제한된 acRelay review에 참여시키도록 요청하고, Claude는 회차 뒤 종료되며, 사용자가 변경 여부를 결정하는 흐름](./skills/acrelay/assets/acrelay-review-flow.ko@2x.png)](./skills/acrelay/assets/acrelay-review-flow.ko.svg)
+
 ## 시작 전 준비
 
 이 preview는 Codex App, Codex CLI 또는 Claude Code로 파일 작업을 하는 사용자를
@@ -82,7 +84,7 @@ subagent 결과를 직접 받지는 않습니다.
 
 ## Public Validation Preview와 platform 지원 확대
 
-`v0.1.0-alpha.1`은 **Public Validation Preview**입니다. 아직
+`v0.1.0-alpha.2`는 **Public Validation Preview**입니다. 아직
 **Experimental** 단계이고 더 넓은 검증은 **Validation pending**이며, 일반적인
 `Supported` 상태를 주장하지 않습니다. 내려받을 수 있는 파일과 live review 검증
 범위는 의도적으로 좁게 시작합니다.
@@ -90,20 +92,20 @@ subagent 결과를 직접 받지는 않습니다.
 - 내려받아 설치할 수 있는 binary: **macOS Apple Silicon (`darwin/arm64`)** 전용
 - Reviewer: 실제로 검증한 reviewer version과 운영체제 조합의 Claude Code CLI와
   Codex CLI
-- Release: Developer ID signing과 notarization을 하지 않은 `v0.1.0-alpha.1`
+- Release: Developer ID signing과 notarization을 하지 않은 `v0.1.0-alpha.2`
 - Review 방식: review마다 reviewer 1개, 정해진 회차 제한, 모든 finding에 대한
   driver의 처리 결정과 owner의 최종 종료 결정
 
-Linux와 Windows는 다음 platform 지원 대상입니다. Core runtime은 이미 두
-platform의 기록된 test lane을 통과했습니다. 다음 지원 확대 단계에서 platform별
-Claude Code·Codex review를 검증하고, 필요한 patch는 그 근거를 검토한 뒤
-release할 예정입니다. 그전까지 `v0.1.0-alpha.1`은 검증하지 않은 platform과
-reviewer 조합에서 review를 보내기 전에 중단합니다. Intel Mac은 이번 release에서
-내려받을 수 있는 artifact와 검증된 live-review 조합이 없습니다.
+다음 platform 지원 대상은 Windows입니다. Windows core runtime은 기록된 test
+lane을 통과했으며, 다음 단계에서 Claude Code·Codex review를 검증하고 필요한
+patch를 반영합니다. Linux core runtime CI는 source test matrix에 유지하지만,
+이번 preview에는 Linux artifact와 live-review 지원이 없습니다. 조합을 검증하기
+전까지 `v0.1.0-alpha.2`는 review를 보내기 전에 중단합니다. Intel Mac도 이번
+release에서 내려받을 수 있는 artifact와 검증된 live-review 조합이 없습니다.
 
 ## 설치
 
-정확한 `v0.1.0-alpha.1` preview를 설치합니다. Installer는 unpinned branch나
+정확한 `v0.1.0-alpha.2` preview를 설치합니다. Installer는 unpinned branch나
 `latest` download로 바꾸지 않습니다.
 
 ### 한 줄로 binary 설치
@@ -115,7 +117,7 @@ Installer는 정확한 tag에 고정돼 있으며, 내려받은 binary archive�
 release checksum과 대조합니다.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.1/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.2/scripts/install.sh | bash
 ```
 
 Script를 `bash`로 바로 보내면 편리하지만 실행 전에 installer 내용을 읽을 수는
@@ -127,7 +129,7 @@ Installer는 release 하나에 고정되며 `latest`를 조회하지 않습니�
 내용을 검토하세요.
 
 ```sh
-curl -fLO https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.1/scripts/install.sh
+curl -fLO https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.2/scripts/install.sh
 less install.sh
 bash install.sh
 ```
@@ -139,7 +141,7 @@ archive의 checksum을 확인하기 전에는 archive 안의 binary를 실행하
 ### Go install
 
 ```sh
-go install github.com/kyungseo/acrelay/cmd/acrelay@v0.1.0-alpha.1
+go install github.com/kyungseo/acrelay/cmd/acrelay@v0.1.0-alpha.2
 ```
 
 Source install에는 [`go.mod`](./go.mod)에 선언된 Go toolchain이 필요합니다.
@@ -157,40 +159,40 @@ PATH 설정, update, binary 제거, macOS signing·Gatekeeper 동작과 복구 �
 ## 자연어로 사용하려면 acRelay Skill 추가
 
 Engine은 단독으로 완전하게 사용할 수 있지만, 일반 사용자가 낮은 수준의 command를
-외울 필요는 없습니다. Optional
-[Skillstead의 acRelay Skill](https://github.com/kyungseo/skillstead/tree/main/skills/acrelay)을
-설치하면 “Claude에게 이 계획을 red-team해 달라” 같은 자연어 요청을 같은
-workflow로 바꿉니다. Skill은 요청을 acRelay 단계로 옮기고, engine은 파일 확인,
-reviewer 실행과 review 기록을 담당합니다. Skill만으로는 review를 실행할 수
-없으므로 둘 다 설치합니다.
+외울 필요는 없습니다. 이 repository는 engine과 optional
+[acRelay Skill](./skills/acrelay)의 canonical source입니다. Skill은 “Claude에게
+이 계획을 red-team해 달라” 같은 자연어 요청을 같은 workflow로 옮깁니다. 요청을
+acRelay 단계로 바꾸는 일은 Skill이, 파일 확인·reviewer 실행·review 기록은
+engine이 담당합니다. Skill만으로는 review를 실행할 수 없으므로 둘 다
+설치합니다.
 
 이 Skill은 **Public Validation Preview**입니다. 아직 **Experimental** 단계이고,
 더 넓은 환경의 검증은 **Validation pending**이며, 일반적인 `Supported` 상태를
 주장하지 않습니다. Engine을 설치하거나 update하거나 대체하지 않습니다. Engine을
-먼저 설치한 뒤 Skill 폴더 전체를 복사하세요.
+먼저 설치한 뒤 exact `v0.1.0-alpha.2` tag에서 Skill 폴더 전체를 복사하세요.
+
+```sh
+git clone --depth 1 --branch v0.1.0-alpha.2 https://github.com/kyungseo/acrelay.git /tmp/acrelay-v0.1.0-alpha.2
+```
 
 ### Claude Code
 
 ```sh
-git clone --depth 1 https://github.com/kyungseo/skillstead.git /tmp/skillstead
 mkdir -p "$HOME/.claude/skills"
-cp -R /tmp/skillstead/skills/acrelay "$HOME/.claude/skills/"
+cp -R /tmp/acrelay-v0.1.0-alpha.2/skills/acrelay "$HOME/.claude/skills/"
 ```
 
 ### Codex
 
 ```sh
-git clone --depth 1 https://github.com/kyungseo/skillstead.git /tmp/skillstead
 mkdir -p "$HOME/.agents/skills"
-cp -R /tmp/skillstead/skills/acrelay "$HOME/.agents/skills/"
+cp -R /tmp/acrelay-v0.1.0-alpha.2/skills/acrelay "$HOME/.agents/skills/"
 ```
 
-이 preview는 Skillstead의 default branch에서 설치하며 `v0.8.0` Skillstead tag에는
-포함되지 않습니다. 별도로 검증한 release tag가 생기면 이 경로를 대체할
-예정입니다. 프로젝트별 설치 경로, update, 제거와 현재 검증 상태는
-[Skill 안내](https://github.com/kyungseo/skillstead/blob/main/skills/acrelay/README.ko.md)와
-[Skillstead 설치 안내](https://github.com/kyungseo/skillstead/blob/main/docs/INSTALL.ko.md)를
-참고하세요.
+특정 repository에서만 사용할 때는 `.claude/skills/acrelay` 또는
+`.agents/skills/acrelay`에 복사하세요. 새 Skill이 보이지 않으면 agent host를
+재시작합니다. Windows PowerShell 설치, Update, 제거와 현재 검증 경계는
+[Skill 안내](./skills/acrelay/README.ko.md)를 참고하세요.
 
 요청 예시:
 
@@ -284,11 +286,10 @@ working directory가 저장됩니다. Binary를 제거해도 이 정보는 삭�
 - [동작 및 CLI reference](./docs/REFERENCE.ko.md)
 - [설치, update, 제거와 release 복구](./docs/OPERATIONS.ko.md)
 - [Release 기록](./CHANGELOG.ko.md)
-- [자연어 acRelay Skill](https://github.com/kyungseo/skillstead/tree/main/skills/acrelay)
-- [Skillstead 설치 안내](https://github.com/kyungseo/skillstead/blob/main/docs/INSTALL.ko.md)
+- [자연어 acRelay Skill](./skills/acrelay/README.ko.md)
 
-Skill은 더 쉬운 진입점이며, engine 동작, evidence, privacy, 복구와 platform
-지원의 기준 문서는 이 repository에 있습니다.
+Skill은 더 쉬운 진입점이며, 이 repository가 official Skill과 engine 동작,
+evidence, privacy, 복구와 platform 지원의 기준입니다.
 
 ## License
 

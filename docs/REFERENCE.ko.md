@@ -2,7 +2,7 @@
 
 [English](./REFERENCE.md) · **한국어**
 
-이 문서는 acRelay `v0.1.0-alpha.1`의 상세 동작 계약을 설명합니다. 설치와 가장
+이 문서는 acRelay `v0.1.0-alpha.2`의 상세 동작 계약을 설명합니다. 설치와 가장
 짧은 review 흐름은 [root README](../README.ko.md)에서 시작하세요.
 
 ## 이 문서를 읽기 전에
@@ -177,10 +177,11 @@ fail-closed합니다. 검증한 darwin/arm64 tuple만 dispatch가 활성화됩�
 claim하지 않습니다.
 
 이는 release 근거의 현재 경계이지 Apple Silicon만 계속 지원하겠다는 결정이
-아닙니다. Linux와 Windows reviewer 검증은 다음 지원 확대 단계로 계획하고
-있습니다. Platform patch와 지원 문구는 restriction 근거를 검토한 뒤 제공하며,
-검증 전에 일정이나 경고 없는 실행을 약속하지 않습니다. Intel Mac은 현재 배포
-artifact와 검증된 real-review 근거가 모두 없습니다.
+아닙니다. 다음 지원 확대 단계는 Windows reviewer 검증입니다. Windows platform
+patch와 지원 문구는 restriction 근거를 검토한 뒤 제공하며, 검증 전에 일정이나
+경고 없는 실행을 약속하지 않습니다. Linux는 core CI lane과 fail-closed dispatch
+경계를 유지하지만, 현재 artifact와 live-review 지원 계획은 없습니다. Intel
+Mac도 현재 배포 artifact와 검증된 real-review 근거가 모두 없습니다.
 
 ## Reviewer 구성과 독립성 claim
 
