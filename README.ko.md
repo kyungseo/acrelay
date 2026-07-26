@@ -1,5 +1,7 @@
 # acRelay
 
+제한된 cross-agent review를 위한 Agent Collaboration Relay입니다.
+
 [English](./README.md) · **한국어**
 
 계획이나 구현 결과를 다른 coding agent와 함께 검토하면 방향을 더 정교하게
