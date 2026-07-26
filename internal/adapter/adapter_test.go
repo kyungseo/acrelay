@@ -116,6 +116,59 @@ func TestTrustPolicyApprovalContract(t *testing.T) {
 	}
 }
 
+func TestReviewAccessProfilesAndResearchApproval(t *testing.T) {
+	if _, err := NewTrustPolicyForReview("owner", true, false, ReviewProfileResearch, false); err == nil ||
+		!strings.Contains(err.Error(), ResearchEgressApprovalID) {
+		t.Fatalf("research profile without research egress approval must fail: %v", err)
+	}
+	research, err := NewTrustPolicyForReview("owner", true, false, ReviewProfileResearch, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if research.EffectiveReviewProfile() != ReviewProfileResearch ||
+		!strings.Contains(research.ProfileID, "/research/") {
+		t.Fatalf("research profile identity mismatch: %+v", research)
+	}
+	contextual, err := NewTrustPolicyForReview("owner", true, false, ReviewProfileContextual, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contextual.EffectiveReviewProfile() != ReviewProfileContextual ||
+		contextual.ProfileID == research.ProfileID {
+		t.Fatalf("contextual profile identity mismatch: %+v", contextual)
+	}
+	contained := approvedTestRequest(t, Request{SchemaJSON: `{"type":"object"}`})
+	contained.ContextRoots = []string{t.TempDir()}
+	if err := (ClaudeAdapter{}).Preflight(contained); err == nil ||
+		!strings.Contains(err.Error(), "contained") {
+		t.Fatalf("contained profile must reject auxiliary context: %v", err)
+	}
+}
+
+func TestCodexSkillDisableConfigCoversLegacyAndCurrentUserRoots(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	for _, skillPath := range []string{
+		filepath.Join(home, ".agents", "skills", "current", "SKILL.md"),
+		filepath.Join(home, ".codex", "skills", "legacy", "SKILL.md"),
+		filepath.Join(home, ".codex", "skills", ".system", "bundled", "SKILL.md"),
+	} {
+		if err := os.MkdirAll(filepath.Dir(skillPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(skillPath, []byte("# test"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	config := codexSkillDisableConfig()
+	for _, want := range []string{".agents", ".codex", ".system", "enabled=false"} {
+		if !strings.Contains(config, want) {
+			t.Fatalf("Skill disable config %q missing %q", config, want)
+		}
+	}
+}
+
 func TestPrepareExecutionRootModes(t *testing.T) {
 	subjectRoot := filepath.Join(t.TempDir(), "subject")
 	if err := os.MkdirAll(subjectRoot, 0o700); err != nil {
@@ -402,28 +455,37 @@ func TestHandleCleanupCrashWindowConverges(t *testing.T) {
 	}
 }
 
-func TestParseClaudeEnvelope(t *testing.T) {
+func TestParseClaudeStream(t *testing.T) {
 	clean := `{"type":"result","subtype":"success","is_error":false,"result":"OK","session_id":"s1","structured_output":{"verdict":"approve","findings":["f"]},"modelUsage":{"claude-haiku-4-5-20251001":{}}}`
-	env, diag, err := parseClaudeEnvelope([]byte(clean))
+	env, diag, err := parseClaudeStream([]byte(clean))
 	if err != nil || diag != "" || env.SessionID != "s1" {
-		t.Fatalf("clean envelope: env=%v diag=%q err=%v", env, diag, err)
+		t.Fatalf("clean stream: env=%v diag=%q err=%v", env, diag, err)
 	}
-	// warning prefix → explicit diagnostic, envelope still parsed
-	prefixed := "Warning: something\n" + clean
-	env, diag, err = parseClaudeEnvelope([]byte(prefixed))
+	streamed := strings.Join([]string{
+		`{"type":"system","subtype":"init","session_id":"s1"}`,
+		`{"type":"assistant","message":{"content":[]}}`,
+		clean,
+	}, "\n")
+	env, diag, err = parseClaudeStream([]byte(streamed))
+	if err != nil || diag != "" || env.SessionID != "s1" {
+		t.Fatalf("event stream: env=%v diag=%q err=%v", env, diag, err)
+	}
+	// warning prefix → explicit diagnostic, terminal event still parsed
+	prefixed := "Warning: something\n" + streamed
+	env, diag, err = parseClaudeStream([]byte(prefixed))
 	if err != nil || diag == "" {
-		t.Fatalf("prefixed envelope must parse with diagnostic: diag=%q err=%v", diag, err)
+		t.Fatalf("prefixed stream must parse with diagnostic: diag=%q err=%v", diag, err)
 	}
 	if env.Structured["verdict"] != "approve" {
 		t.Fatal("structured_output lost")
 	}
 	// garbage fails closed
-	if _, _, err := parseClaudeEnvelope([]byte("no json here")); err == nil {
+	if _, _, err := parseClaudeStream([]byte("no json here")); err == nil {
 		t.Fatal("non-JSON stdout must fail closed")
 	}
-	// truncated/malformed JSON after prefix fails closed
-	if _, _, err := parseClaudeEnvelope([]byte("Warning\n{\"type\":")); err == nil {
-		t.Fatal("malformed envelope must fail closed")
+	// malformed JSON after the first event fails closed
+	if _, _, err := parseClaudeStream([]byte("{\"type\":\"system\"}\nnot-json")); err == nil {
+		t.Fatal("malformed event must fail closed")
 	}
 }
 
@@ -563,7 +625,7 @@ func TestRestrictedAdapterCommandSurfaceInitialAndResume(t *testing.T) {
 			name: "claude",
 			script: `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi
-if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--output-format stream-json --verbose --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
 exit 99
 `,
 			make: func() Adapter { return ClaudeAdapter{} },
@@ -604,6 +666,10 @@ exit 99
 				}
 				if hasArgSequence(p.args, "--dangerously-bypass-approvals-and-sandbox") {
 					t.Fatalf("Codex unrestricted fallback leaked into argv: %q", p.args)
+				}
+				if config := codexSkillDisableConfig(); config != "" &&
+					!hasArgSequence(p.args, "-c", config) {
+					t.Fatalf("Codex local Skill disable override missing: %q", p.args)
 				}
 				if hasArgSequence(p.args, "resume", "native-session-fixture") != resume {
 					t.Fatalf("Codex resume argv mismatch: resume=%v args=%q", resume, p.args)
@@ -676,6 +742,73 @@ exit 99
 			}
 		})
 	}
+}
+
+func TestResearchProfileExposesOnlyBoundedWebTools(t *testing.T) {
+	researchPolicy, err := NewTrustPolicyForReview("test-owner", true, false, ReviewProfileResearch, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("claude", func(t *testing.T) {
+		dir, _ := installAdapterCLI(t, "claude", `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "2.1.220 (Claude Code)"; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--output-format stream-json --verbose --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
+exit 99
+`)
+		subjectRoot := filepath.Join(dir, "subject")
+		contextRoot := filepath.Join(dir, "context")
+		if err := os.MkdirAll(subjectRoot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(contextRoot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		prepared, err := (ClaudeAdapter{}).Prepare(context.Background(), Request{
+			Prompt: "review", SchemaJSON: `{"type":"object"}`, SubjectRoot: subjectRoot,
+			ContextRoots: []string{contextRoot}, TrustPolicy: researchPolicy,
+		}, &HandleStore{Path: filepath.Join(dir, "handles.json")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer prepared.Close()
+		args := prepared.(*preparedClaude).args
+		if !hasArgSequence(args, "--tools", "Read,Glob,Grep,WebSearch,WebFetch") ||
+			!hasArgSequence(args, "--add-dir", subjectRoot, contextRoot) {
+			t.Fatalf("research Claude argv is not bounded to declared local and web tools: %q", args)
+		}
+		if strings.Contains(strings.Join(args, " "), "Bash") {
+			t.Fatalf("research profile must not enable command network or Bash: %q", args)
+		}
+	})
+	t.Run("codex", func(t *testing.T) {
+		dir, _ := installAdapterCLI(t, "codex", `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
+if [ "$1" = "doctor" ]; then echo '{}'; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--search'; exit 0; fi
+if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config --ignore-rules --strict-config --sandbox --skip-git-repo-check'; exit 0; fi
+if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
+exit 99
+`)
+		subjectRoot := filepath.Join(dir, "subject")
+		if err := os.MkdirAll(subjectRoot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		prepared, err := (CodexAdapter{}).Prepare(context.Background(), Request{
+			Prompt: "review", SchemaJSON: `{"type":"object"}`, SubjectRoot: subjectRoot,
+			TrustPolicy: researchPolicy,
+		}, &HandleStore{Path: filepath.Join(dir, "handles.json")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer prepared.Close()
+		args := prepared.(*preparedCodex).args
+		if len(args) < 2 || args[0] != "--search" || args[1] != "exec" {
+			t.Fatalf("research Codex must enable only the native live-search surface: %q", args)
+		}
+		if !hasArgSequence(args, "--sandbox", "read-only") {
+			t.Fatalf("research Codex must retain the read-only command sandbox: %q", args)
+		}
+	})
 }
 
 func TestRequiredCapabilityDriftBlocksBeforeDispatch(t *testing.T) {
@@ -798,7 +931,7 @@ func TestAdvisoryProbePassDoesNotMaskActualCommandFailure(t *testing.T) {
 			name: "claude",
 			script: `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi
-if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--output-format stream-json --verbose --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
 echo 'unknown option --json-schema' >&2
 exit 2
 `,
@@ -848,7 +981,7 @@ func TestMissingOrMalformedStructuredOutputFailsAfterStart(t *testing.T) {
 			name: "claude",
 			script: `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi
-if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--output-format stream-json --verbose --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
 echo '{"type":"result","subtype":"success","is_error":false,"session_id":"session-no-output","modelUsage":{"claude-default":{}}}'
 `,
 			adapter: ClaudeAdapter{},
@@ -926,7 +1059,7 @@ printf '%s\n' '{"type":"turn.completed"}'
 			script: `#!/bin/sh
 echo "$@" >> "$ACRELAY_TEST_LOG"
 if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi
-if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--output-format stream-json --verbose --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"11111111-2222-3333-4444-555555555555","structured_output":{"verdict":"approve","findings":[]},"modelUsage":{"claude-test":{}}}'
 `,
 			make: func() Adapter { return ClaudeAdapter{} },
@@ -1371,7 +1504,7 @@ func TestTerminationClassificationAgainstRealChildren(t *testing.T) {
 		skipWithoutPOSIXSignalDeath(t)
 		res, err := run(t, "claude", `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi
-if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--output-format stream-json --verbose --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
 kill -KILL $$
 `, false)
 		if err == nil || !res.Termination.Ambiguous ||
@@ -1387,7 +1520,7 @@ kill -KILL $$
 	t.Run("claude clean exit without terminal contract is FAILED missing-terminal", func(t *testing.T) {
 		res, err := run(t, "claude", `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi
-if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--output-format stream-json --verbose --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
 exit 0
 `, false)
 		if err == nil || res.Termination.Ambiguous ||
@@ -1430,7 +1563,7 @@ exit 0
 	t.Run("claude resume-not-found envelope classifies resume-handle-invalid", func(t *testing.T) {
 		res, err := run(t, "claude", `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi
-if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--output-format stream-json --verbose --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
 printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"No conversation found with session ID","session_id":"11111111-2222-3333-4444-555555555555"}'
 exit 1
 `, true)
@@ -1520,7 +1653,7 @@ if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
 printf '%s\n' '{"type":"thread.started","thread_id":"thread-fixture-1"}'
 `
 	claudeHead := `if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi
-if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--output-format stream-json --verbose --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
 `
 
 	// 1. partial malformed JSONL + external signal → UNKNOWN (no terminal marker).

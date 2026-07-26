@@ -2,7 +2,7 @@
 
 [English](./REFERENCE.md) · **한국어**
 
-이 문서는 acRelay `v0.1.0-alpha.3`의 상세 동작 계약을 설명합니다. 설치와 가장
+이 문서는 acRelay `v0.1.0-alpha.4`의 상세 동작 계약을 설명합니다. 설치와 가장
 짧은 review 흐름은 [root README](../README.ko.md)에서 시작하세요.
 
 ## 이 문서를 읽기 전에
@@ -38,12 +38,12 @@ Command name, state value와 format identifier는 machine-readable 원문을 그
   resolved member manifest
 - `internal/relay`: prepare, snapshot, durable journal, child start/capture,
   transaction-tagged canonical append를 수행하는 one-shot review flow
-- `cmd/acrelay`: `init`, `review`, `confirm`, `disposition`,
+- `cmd/acrelay`: `init`, `review`, `confirm`, `driver-response`, `disposition`,
   `request-approval`, `respond-approval`, `withdraw-approval`, `advance`,
   `close`, `terminate`, `reconcile`, `abandon-transaction`, `cleanup`,
   `status`, `briefing`, `version`
 
-현재 format은 `store-md v0.9`, `review-profile v0.2`,
+현재 format은 `store-md v0.10`, `review-profile v0.2`,
 `dispatch-journal v0.1`, `briefing-output v0.2`, handle store v2입니다.
 이 format들은 exact cutover이며 지원하지 않는 이전 format을 자동으로
 migration하지 않습니다.
@@ -147,8 +147,11 @@ Journal이 pending인 동안 같은 canonical은 `reconcile`과 owner/arbiter가
 transaction ledger에 가집니다. Cause code는 허용된 source(`observed`,
 `vendor-declared`, `inferred`)와 결속됩니다. Typed cause에는 raw vendor text를
 넣지 않으며 `status`는 allowlisted phrase만 표시합니다. 현재 adapter는
-owner-remediation category를 직접 관측할 typed vendor field가 없으므로 text를
-근거 없이 quota/auth/network로 추측하지 않습니다.
+owner-remediation category를 직접 관측할 typed vendor field가 없습니다.
+Alpha.4는 대소문자와 무관하게 exact `ENOTFOUND` signature만 inferred
+`vendor.network`로 분류하고, 나머지는 unstructured text로 추측하지 않습니다.
+이미 시작한 attempt는 소비되며, 이 분류는 자동 retry나 timeout 증가를
+허용하지 않습니다. DNS resolution 문제는 timeout을 늘려 해결되지 않습니다.
 
 Native resume handle은 child start 전에 vendor-safe format인지 검사합니다.
 Malformed handle은 attempt를 소비하지 않고 fail-closed합니다. Child start 뒤
@@ -259,6 +262,37 @@ selector를 다시 resolve하고 모든 member를 hash합니다. 이는 checkpoi
 Git staged patch, commit, range, branch selector는 이번 version에서 지원하지
 않습니다.
 
+### Review access profile과 broad-scope 동의
+
+`-review-profile`은 objective 동안 바뀌지 않습니다.
+
+- `contained`가 기본값이며 authoritative subject만 허용합니다.
+- `contextual`은 `-context-spec`이 필요하고, revision을 확인한 exact local
+  manifest를 non-authoritative context로 허용합니다.
+- `research`는 같은 optional context와 최신 사실 확인용 reviewer web
+  search/fetch를 허용합니다. `-ack-vendor-egress`와 별도로
+  `-ack-research-egress`가 필요합니다.
+
+Research가 일반적인 network-capable command surface를 추가하지는 않습니다.
+Claude는 `Read,Glob,Grep,WebSearch,WebFetch`로 제한되고, Codex는 `exec`
+read-only를 유지하면서 bounded search surface만 사용합니다. Reviewer는
+research finding에 exact source URL과 확인 날짜를 남겨야 합니다. 이 값은
+reviewer-declared이며 subject에 결속된 `examined` anchor를 대신하지 않습니다.
+
+Codex의 `--ignore-user-config`만으로는 Skill discovery가 꺼지지 않습니다.
+Adapter는 dispatch 전에 문서화된 standalone local Skill root를 열거하고 symlink
+target을 포함한 per-Skill `enabled=false` override를 전달합니다. 따라서 reviewer가
+acRelay나 발견한 다른 standalone Skill을 재귀 호출하지 않습니다. 이는 OS-level
+read isolation claim이 아니며, 문서화한 root 밖 vendor/system behavior는 계속
+convention-only read-scope residual입니다.
+
+Context descriptor는 `-context-spec`을 통해 같은 `subject-spec v0.1` schema를
+사용합니다. Subject와 context manifest는 dispatch와 confirmation 전에 다시
+resolve하며, context가 바뀌면 fail-closed합니다. 둘의 합계가 8개 member 또는
+128 KiB를 초과하면 broad scope이며 `-ack-broad-scope`가 필요합니다. 그렇지
+않으면 canonical을 만들기 전에 `init`이 중단됩니다. 이는 consent guard이지 더
+작은 review가 빠르거나 저렴하다는 보장은 아닙니다.
+
 ## Review input의 신뢰 경계
 
 Objective는 첫 vendor dispatch 전에 immutable trust policy를 저장합니다.
@@ -266,9 +300,11 @@ Objective는 첫 vendor dispatch 전에 immutable trust policy를 저장합니�
 gate이지 isolation, authentication, RBAC 또는 Close authority가 아닙니다.
 
 기본 reviewer cwd는 subject 밖의 owner-only neutral directory입니다. Claude는
-명시적인 subject read scope와 제한된 tool set으로, Codex는 user configuration과
-rules를 무시하고 read-only sandbox로 실행됩니다. Initial review, resume,
-confirmation은 같은 objective trust profile과 handle-bound cwd를 사용합니다.
+safe mode, 명시한 root, project MCP/config hook 없음과 선택한 profile이 허용한
+tool set으로 실행됩니다. Codex는 user configuration과 rules를 무시하고
+read-only sandbox를 사용하며, `research`만 bounded search surface를 엽니다.
+Initial review, resume, confirmation은 같은 objective trust profile과
+handle-bound cwd를 사용합니다.
 
 In-target cwd는 명시적으로 unsafe한 mode입니다. `init`에서
 `-allow-in-target-workdir`를 승인해야 하며 cwd는 subject root 안에 있어야
@@ -284,8 +320,8 @@ drift는 fail-closed하며 unrestricted fallback은 없습니다.
 제공해야 합니다.
 
 - `content-match`: raw source range와 excerpt가 exact match
-- `content-match-normalized`: raw match가 실패하고 CRLF→LF normalization 뒤
-  같은 1-based range가 match
+- `content-match-normalized`: raw match가 실패하고 CRLF→LF 또는 final LF의
+  synthetic empty-line boundary normalization 뒤 같은 1-based range가 match
 - `reviewer-declared`: opaque/empty target 등 content match를 만들 수 없는
   경우 reviewer가 명시
 - `synthetic-sampled`: test-only fixture에서만 사용하는 synthetic assurance
@@ -306,6 +342,33 @@ acrelay disposition \
   -rationale "The evidence is valid." \
   -follow-up "Apply the fix and advance the target."
 ```
+
+전체 응답은 strict JSON batch 하나로 기록하는 방식을 권장합니다.
+
+```json
+{
+  "dispositions": [
+    {
+      "finding_id": "R0-F1",
+      "decision": "revise",
+      "rationale": "The evidence is valid.",
+      "follow_up": "Apply the fix and advance the target.",
+      "approval_request_id": ""
+    }
+  ]
+}
+```
+
+```sh
+acrelay driver-response \
+  -canonical review.md \
+  -response-file driver-response.json
+```
+
+각 항목의 다섯 field는 모두 필수입니다. Engine은 batch 전체를 먼저 검증한 뒤
+canonical mutation 하나로 기록합니다. Finding·approval reference가 잘못됐거나
+중복 finding 또는 malformed item이 있으면 어떤 finding도 바뀌지 않습니다.
+단일 finding용 `disposition` command도 계속 사용할 수 있습니다.
 
 Review-time approval request는 stable ID, type, scope, reason, options와 status를
 가지는 open-ended record입니다. Owner response는 actor, exact verbatim,
@@ -364,6 +427,13 @@ Pure preflight failure는 bound를 결속하지 않습니다. 같은 값 또는 
 ```
 acrelay review -canonical review.md -reviewer claude -prompt-file packet.md -round-bound 5
 ```
+
+`review`는 `-finding-appetite`(`1..20`, 기본 `8`)와
+`-startup-timeout`, `-idle-timeout`, `-hard-cap` duration override도
+받습니다. Finding appetite는 중복 finding을 합치라는 요청이지 critical/high를
+생략할 권한이 아닙니다. Claude와 Codex는 structured event 뒤 제한된
+`activity-observed` progress만 표시하며, raw reviewer output, prompt, path와
+internal identifier는 progress UI로 내보내지 않습니다.
 
 이 제한은 `review → 수정 → 재검토` 전체에 적용됩니다. 예를 들어 `1`을 선택하면
 `R0` 검토 한 번만 가능하고 재검토 회차는 없습니다. Child를 시작하지 못한 것이

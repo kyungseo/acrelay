@@ -49,7 +49,7 @@ func TestRealCLIParentSignalRecordsUnknown(t *testing.T) {
 	}
 	claude := `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi
-if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--output-format stream-json --verbose --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
 touch "` + filepath.Join(dir, "child-started") + `"
 sleep 60
 `

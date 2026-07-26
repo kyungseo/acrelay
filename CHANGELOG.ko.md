@@ -6,6 +6,32 @@
 단계이므로 prerelease 사이에 command와 file format이 달라질 수 있습니다.
 하지만 한 번 게시한 tag는 재사용하거나 rewrite하지 않습니다.
 
+## v0.1.0-alpha.4 — 첫 사용 신뢰성과 제한된 research
+
+- Claude의 불투명한 one-shot output을 structured event stream으로 바꿨습니다.
+  Startup, idle, hard-cap supervision이 실제 activity를 관측하며 제한된 progress
+  message만 표시합니다.
+- Codex reviewer invocation에서 발견한 standalone Skill을 비활성화하고 bounded
+  evidence ID와 recommendation을 직접 반환해 host가 help를 probe하거나 raw
+  canonical을 다시 읽지 않아도 되게 했습니다.
+- Immutable `contained`, `contextual`, `research` review profile을 추가했습니다.
+  Exact auxiliary context는 revision을 확인하고, research는 별도 egress 동의를
+  요구하며, command 실행은 계속 read-only입니다.
+- Canonical format을 `store-md v0.10`으로 cutover했습니다. Alpha.3 canonical은
+  matching binary를 사용하거나 Alpha.4 objective를 새로 시작해야 합니다.
+- Subject와 context 합계가 8개 member 또는 128 KiB를 넘으면 token·시간·context
+  위험을 사용자가 명시적으로 수락하기 전 dispatch를 중단합니다. 기본적으로
+  actionable finding은 8개로 합치되 critical/high finding은 생략하지 않습니다.
+- Exact `ENOTFOUND` signature를 inferred DNS/network failure로 분류하지만 자동
+  retry하지 않습니다. 실제 false mismatch를 일으킨 안전한
+  trailing-empty-line evidence boundary만 허용합니다.
+- Atomic JSON driver response를 추가했습니다. Disposition 하나가 잘못되면 전체
+  batch가 바뀌지 않습니다.
+- Checksum을 검증한 release archive에 exact official Skill을 포함했습니다.
+  고정 installer는 Codex, Claude Code 또는 양쪽에 Skill을 설치하고, 로컬 차이를
+  보호하며, 같은 engine version을 먼저 설치한 뒤 Skill만 추가하는 경로도
+  지원합니다.
+
 ## v0.1.0-alpha.3 — Runtime 호환성과 간결한 Skill UX
 
 - 검증된 `darwin/arm64`에서 제한 실행에 필요한 option이 유지되는 경우 Claude

@@ -56,7 +56,8 @@ const (
 	AssuranceContentMatchNormalized = "content-match-normalized"
 	AssuranceReviewerDeclared       = "reviewer-declared"
 
-	NormalizationCRLFToLF = "crlf-to-lf"
+	NormalizationCRLFToLF          = "crlf-to-lf"
+	NormalizationTrailingEmptyLine = "trailing-empty-line"
 
 	ApprovalOpen      = "open"
 	ApprovalResolved  = "resolved"
@@ -120,6 +121,20 @@ type DispositionInput struct {
 	Rationale         string      `json:"rationale"`
 	FollowUp          string      `json:"follow_up,omitempty"`
 	ApprovalRequestID string      `json:"approval_request_id,omitempty"`
+}
+
+// DriverResponseInput is the exact atomic batch accepted by the CLI. It keeps
+// host Skills from probing command help or guessing one mutation at a time.
+type DriverResponseInput struct {
+	Dispositions []DriverDispositionInput `json:"dispositions"`
+}
+
+type DriverDispositionInput struct {
+	FindingID         string      `json:"finding_id"`
+	Decision          Disposition `json:"decision"`
+	Rationale         string      `json:"rationale"`
+	FollowUp          string      `json:"follow_up"`
+	ApprovalRequestID string      `json:"approval_request_id"`
 }
 
 type ReviewResult struct {
@@ -465,8 +480,10 @@ func ValidateCanonical(anchors []EvidenceAnchor, findings []Finding, requests []
 		if a.Assurance == AssuranceContentMatch && a.Normalization != "" {
 			return fmt.Errorf("exact content-match anchor %s unexpectedly declares normalization: fail-closed", a.ID)
 		}
-		if a.Assurance == AssuranceContentMatchNormalized && a.Normalization != NormalizationCRLFToLF {
-			return fmt.Errorf("normalized content-match anchor %s lacks the CRLF normalization fact: fail-closed", a.ID)
+		if a.Assurance == AssuranceContentMatchNormalized &&
+			a.Normalization != NormalizationCRLFToLF &&
+			a.Normalization != NormalizationTrailingEmptyLine {
+			return fmt.Errorf("normalized content-match anchor %s has unsupported normalization %q: fail-closed", a.ID, a.Normalization)
 		}
 		if a.Assurance == AssuranceReviewerDeclared &&
 			((a.LocationKind != "opaque" && a.LocationKind != "empty-member") ||

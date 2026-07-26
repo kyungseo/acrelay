@@ -5,32 +5,57 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/acrelay-release-test.XXXXXX")
 trap 'rm -rf "$test_root"' EXIT
 
-version="v0.1.0-alpha.3"
+version="v0.1.0-alpha.4"
 dist="$test_root/dist"
 bin_dir="$test_root/bin"
 "$repo_root/scripts/package-release.sh" "$version" "$dist"
 
-archive="$dist/acrelay_0.1.0-alpha.3_darwin_arm64.tar.gz"
-provenance="$dist/acrelay_0.1.0-alpha.3_provenance.json"
-checksums="$dist/acrelay_0.1.0-alpha.3_checksums.txt"
+archive="$dist/acrelay_0.1.0-alpha.4_darwin_arm64.tar.gz"
+provenance="$dist/acrelay_0.1.0-alpha.4_provenance.json"
+checksums="$dist/acrelay_0.1.0-alpha.4_checksums.txt"
 for path in "$archive" "$provenance" "$checksums"; do
   [[ -f "$path" ]] || { echo "missing release output: $path" >&2; exit 1; }
 done
 
-tar -tzf "$archive" | grep -Fx "acrelay_0.1.0-alpha.3_darwin_arm64/acrelay" >/dev/null
-tar -tzf "$archive" | grep -Fx "acrelay_0.1.0-alpha.3_darwin_arm64/LICENSE" >/dev/null
-tar -tzf "$archive" | grep -Fx "acrelay_0.1.0-alpha.3_darwin_arm64/README.md" >/dev/null
+tar -tzf "$archive" | grep -Fx "acrelay_0.1.0-alpha.4_darwin_arm64/acrelay" >/dev/null
+tar -tzf "$archive" | grep -Fx "acrelay_0.1.0-alpha.4_darwin_arm64/LICENSE" >/dev/null
+tar -tzf "$archive" | grep -Fx "acrelay_0.1.0-alpha.4_darwin_arm64/README.md" >/dev/null
+tar -tzf "$archive" | grep -Fx "acrelay_0.1.0-alpha.4_darwin_arm64/skills/acrelay/SKILL.md" >/dev/null
 
 base_url="file://$dist"
+test_home="$test_root/home"
+mkdir -p "$test_home"
 ACRELAY_INSTALL_TESTING=1 \
 ACRELAY_RELEASE_BASE_URL="$base_url" \
+HOME="$test_home" \
   "$repo_root/scripts/install.sh" --bin-dir "$bin_dir"
 [[ "$("$bin_dir/acrelay" version --short)" == "$version" ]]
 
-# Same-version installation is idempotent.
+# A user may add both Skills after installing the same engine version.
 ACRELAY_INSTALL_TESTING=1 \
 ACRELAY_RELEASE_BASE_URL="$base_url" \
-  "$repo_root/scripts/install.sh" --bin-dir "$bin_dir"
+HOME="$test_home" \
+  "$repo_root/scripts/install.sh" --bin-dir "$bin_dir" --skill-host both
+[[ -f "$test_home/.agents/skills/acrelay/SKILL.md" ]]
+[[ -f "$test_home/.claude/skills/acrelay/SKILL.md" ]]
+
+# Same-version engine+Skill installation is idempotent.
+ACRELAY_INSTALL_TESTING=1 \
+ACRELAY_RELEASE_BASE_URL="$base_url" \
+HOME="$test_home" \
+  "$repo_root/scripts/install.sh" --bin-dir "$bin_dir" --skill-host both
+
+# A locally modified Skill is never overwritten without explicit replacement.
+printf '\nlocal edit\n' >>"$test_home/.agents/skills/acrelay/SKILL.md"
+if ACRELAY_INSTALL_TESTING=1 ACRELAY_RELEASE_BASE_URL="$base_url" HOME="$test_home" \
+  "$repo_root/scripts/install.sh" --bin-dir "$bin_dir" --skill-host codex 2>"$test_root/skill-version.err"; then
+  echo "installer replaced a modified Skill without --replace" >&2
+  exit 1
+fi
+grep -F "differs from the $version Skill" "$test_root/skill-version.err" >/dev/null
+ACRELAY_INSTALL_TESTING=1 ACRELAY_RELEASE_BASE_URL="$base_url" HOME="$test_home" \
+  "$repo_root/scripts/install.sh" --bin-dir "$bin_dir" --skill-host codex --replace
+! grep -F "local edit" "$test_home/.agents/skills/acrelay/SKILL.md" >/dev/null
 
 # A different executable is not replaced without explicit owner intent.
 cat >"$bin_dir/acrelay" <<'EOF'
@@ -48,6 +73,7 @@ grep -F "reports 'v9.9.9', target is $version" "$test_root/version.err" >/dev/nu
 
 ACRELAY_INSTALL_TESTING=1 \
 ACRELAY_RELEASE_BASE_URL="$base_url" \
+HOME="$test_home" \
   "$repo_root/scripts/install.sh" --bin-dir "$bin_dir" --replace
 [[ "$("$bin_dir/acrelay" version --short)" == "$version" ]]
 

@@ -11,11 +11,9 @@ import (
 	"time"
 )
 
-// ClaudeAdapter binds the Claude Code CLI (`claude -p`) in final-envelope
-// mode. There is no observable output before the terminal envelope, so both
-// startup and idle timers are unsupported in this mode and declared so —
-// only the hard-cap bounds the invocation (DR-811 §7, amended 2026-07-18:
-// the final-envelope exception covers startup as well as idle).
+// ClaudeAdapter binds the Claude Code CLI (`claude -p`) in stream-json mode.
+// Complete JSONL events drive the same startup and idle watchdog used by the
+// Codex adapter; only a terminal result envelope can complete the invocation.
 type ClaudeAdapter struct{}
 
 func (ClaudeAdapter) Vendor() string { return "claude" }
@@ -23,7 +21,7 @@ func (ClaudeAdapter) Vendor() string { return "claude" }
 func (ClaudeAdapter) Capability() Capability {
 	return Capability{
 		Vendor:              "claude",
-		ContractVersion:     "claude-final-envelope-v1",
+		ContractVersion:     "claude-stream-json-v1",
 		KnownGoodCLIVersion: "2.1.217",
 		// 2026-07-22 restriction spike ran on darwin/arm64 (FEAT-20260722-002).
 		KnownGoodPlatforms: []string{"darwin/arm64"},
@@ -31,8 +29,8 @@ func (ClaudeAdapter) Capability() Capability {
 		SchemaFlag:         "--json-schema",
 		SupportsResume:     true,
 		ModelObservation:   ObsVerified, // resolved model observable via modelUsage
-		ProgressEvents:     true,        // stream-json surface exists; v1 dispatch uses final envelope
-		IdleTimeoutMode:    "unsupported",
+		ProgressEvents:     true,
+		IdleTimeoutMode:    "event-stream",
 	}
 }
 
@@ -54,22 +52,44 @@ type claudeEnvelope struct {
 	ModelUsage map[string]json.RawMessage `json:"modelUsage"`
 }
 
-// parseClaudeEnvelope parses stdout. A non-JSON prefix (e.g. CLI warnings)
-// is surfaced as an explicit diagnostic, never silently skipped; the raw
-// bytes stay intact for the canonical record either way.
-func parseClaudeEnvelope(stdout []byte) (*claudeEnvelope, string, error) {
-	var env claudeEnvelope
-	if err := json.Unmarshal(stdout, &env); err == nil {
-		return &env, "", nil
+// parseClaudeStream parses the complete JSONL stream and returns its terminal
+// result envelope. A non-JSON prefix before the first event is retained as a
+// diagnostic; malformed data after streaming begins fails closed.
+func parseClaudeStream(stdout []byte) (*claudeEnvelope, string, error) {
+	lines := bytes.Split(stdout, []byte{'\n'})
+	var terminal *claudeEnvelope
+	prefixBytes := 0
+	seenEvent := false
+	for _, raw := range lines {
+		line := bytes.TrimSpace(raw)
+		if len(line) == 0 {
+			continue
+		}
+		var env claudeEnvelope
+		if err := json.Unmarshal(line, &env); err != nil {
+			if !seenEvent {
+				prefixBytes += len(raw)
+				continue
+			}
+			return nil, "", fmt.Errorf("claude stream contains malformed JSON after events began: %w", err)
+		}
+		seenEvent = true
+		if env.Type == "result" {
+			copy := env
+			terminal = &copy
+		}
 	}
-	i := bytes.IndexByte(stdout, '{')
-	if i < 0 {
-		return nil, "", fmt.Errorf("claude stdout contains no JSON envelope: fail-closed")
+	if terminal == nil {
+		if !seenEvent {
+			return nil, "", fmt.Errorf("claude stdout contains no JSON event: fail-closed")
+		}
+		return nil, "", fmt.Errorf("claude stream contains no terminal result envelope: fail-closed")
 	}
-	if err := json.Unmarshal(stdout[i:], &env); err != nil {
-		return nil, "", fmt.Errorf("claude envelope malformed after %d-byte prefix: %w", i, err)
+	diagnostic := ""
+	if prefixBytes > 0 {
+		diagnostic = fmt.Sprintf("non-JSON prefix %d bytes before event stream", prefixBytes)
 	}
-	return &env, fmt.Sprintf("non-JSON prefix %d bytes before envelope", i), nil
+	return terminal, diagnostic, nil
 }
 
 // detectClaudeVersion parses `claude --version` ("2.1.217 (Claude Code)")
@@ -84,7 +104,16 @@ func detectClaudeVersion(ctx context.Context) (string, string, error) {
 
 func probeClaudeCapabilities(ctx context.Context) (string, string) {
 	out, truncated, err := runBoundedProbe(ctx, 15*time.Second, "claude", "--help")
-	return assessHelpProbe(out, truncated, err, "--output-format", "--json-schema", "--resume", "--safe-mode", "--add-dir", "--tools", "--permission-mode", "--system-prompt")
+	return assessHelpProbe(out, truncated, err, "--output-format", "stream-json", "--verbose", "--json-schema", "--resume", "--safe-mode", "--add-dir", "--tools", "--permission-mode", "--system-prompt")
+}
+
+func inferredNetworkFailure(parts ...string) bool {
+	for _, part := range parts {
+		if strings.Contains(strings.ToUpper(part), "ENOTFOUND") {
+			return true
+		}
+	}
+	return false
 }
 
 type preparedClaude struct {
@@ -159,16 +188,24 @@ func (a ClaudeAdapter) Prepare(ctx context.Context, req Request, handles *Handle
 		"-p",
 		"--safe-mode",
 		"--add-dir", req.SubjectRoot,
+	}
+	args = append(args, req.ContextRoots...)
+	tools := "Read,Glob,Grep"
+	if normalizedReviewProfile(req.TrustPolicy.ReviewProfile) == ReviewProfileResearch {
+		tools = "Read,Glob,Grep,WebSearch,WebFetch"
+	}
+	args = append(args,
 		"--no-chrome",
 		"--disable-slash-commands",
 		"--strict-mcp-config",
 		"--mcp-config", `{"mcpServers":{}}`,
-		"--tools", "Read,Glob,Grep",
+		"--tools", tools,
 		"--permission-mode", "dontAsk",
-		"--system-prompt", ReviewerTrustSystemPrompt,
-		"--output-format", "json",
+		"--system-prompt", reviewerTrustSystemPrompt(req.TrustPolicy, len(req.ContextRoots) > 0),
+		"--output-format", "stream-json",
+		"--verbose",
 		"--json-schema", req.SchemaJSON,
-	}
+	)
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
 	}
@@ -187,13 +224,17 @@ func (a ClaudeAdapter) Prepare(ctx context.Context, req Request, handles *Handle
 
 func (p *preparedClaude) Dispatch(ctx context.Context) (*Result, error) {
 	req, handles := p.req, p.handles
-	tctx, cancel := context.WithTimeout(ctx, p.timeouts.HardCap)
-	defer cancel()
+	hctx, hcancel := context.WithTimeout(ctx, p.timeouts.HardCap)
+	defer hcancel()
+	tctx, tcancel := context.WithCancelCause(hctx)
+	defer tcancel(nil)
 	cmd := newGroupCmd(tctx, p.timeouts.Grace, "claude", p.args...)
 	cmd.Dir = req.WorkingDir
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	stdout := newWatchdogBuffer(req.Progress)
+	var stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = stdout, &stderr
 	cmd.Stdin = bytes.NewReader([]byte(req.Prompt))
+	go superviseTimeouts(tctx, tcancel, stdout.activity, p.timeouts)
 	runErr := runWithProgress(cmd, req.Progress)
 
 	res := &Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: exitCode(cmd),
@@ -206,13 +247,21 @@ func (p *preparedClaude) Dispatch(ctx context.Context) (*Result, error) {
 	// completed vendor result is never discarded because the invocation was
 	// cut afterwards. Only when no terminal envelope exists do the
 	// ambiguity/transport rows apply.
-	env, diag, perr := parseClaudeEnvelope(stdout.Bytes())
+	env, diag, perr := parseClaudeStream(stdout.Bytes())
 	if perr != nil || env.Type != "result" {
-		switch {
-		case errors.Is(context.Cause(tctx), ErrParentSignal):
+		switch cause := context.Cause(tctx); {
+		case errors.Is(cause, ErrStartupTimeout):
+			res.TimedOut, res.TimeoutKind = true, TimeoutStartup
+			res.Termination.Cause = observedCause(CauseTimeoutStartup)
+			return res, fmt.Errorf("startup timeout after %v: FAILED(timeout:startup), no automatic retry", p.timeouts.Startup)
+		case errors.Is(cause, ErrIdleTimeout):
+			res.TimedOut, res.TimeoutKind = true, TimeoutIdle
+			res.Termination.Cause = observedCause(CauseTimeoutIdle)
+			return res, fmt.Errorf("idle timeout after %v of stream silence: FAILED(timeout:idle), no automatic retry", p.timeouts.Idle)
+		case errors.Is(cause, ErrParentSignal):
 			res.Termination = Termination{Ambiguous: true, Cause: observedCause(CauseCanceledParentSignal)}
 			return res, fmt.Errorf("parent signal canceled the dispatch before terminal output: execution UNKNOWN, no automatic retry")
-		case tctx.Err() == context.DeadlineExceeded:
+		case hctx.Err() == context.DeadlineExceeded:
 			res.TimedOut, res.TimeoutKind = true, TimeoutHardCap
 			res.Termination = Termination{Ambiguous: true, Cause: observedCause(CauseTimeoutHardCap)}
 			return res, fmt.Errorf("hard-cap timeout: execution UNKNOWN, re-dispatch forbidden")
@@ -220,7 +269,11 @@ func (p *preparedClaude) Dispatch(ctx context.Context) (*Result, error) {
 			res.Termination = Termination{Ambiguous: true, Cause: observedCause(CauseTerminatedSignal)}
 			return res, fmt.Errorf("claude process terminated by signal before terminal output: execution UNKNOWN, no automatic retry")
 		case perr != nil && len(bytes.TrimSpace(stdout.Bytes())) == 0:
-			res.Termination.Cause = observedCause(CauseMissingTerminal)
+			if inferredNetworkFailure(stderr.String()) {
+				res.Termination.Cause = &FailureCause{Code: CauseVendorNetwork, Source: CauseSourceInferred}
+			} else {
+				res.Termination.Cause = observedCause(CauseMissingTerminal)
+			}
 			return res, fmt.Errorf("dispatch capture failed (runErr=%v): FAILED, no automatic retry: %w", runErr, perr)
 		case perr != nil:
 			res.Termination.Cause = observedCause(CauseMalformedTerminal)
@@ -243,6 +296,8 @@ func (p *preparedClaude) Dispatch(ctx context.Context) (*Result, error) {
 		cause := &FailureCause{Code: CauseVendorErrorEnvelope, Source: CauseSourceVendorDeclared}
 		if req.ResumeRef != "" && strings.Contains(env.Result, "No conversation found") {
 			cause = &FailureCause{Code: CauseResumeHandleInvalid, Source: CauseSourceInferred}
+		} else if inferredNetworkFailure(env.Result, stderr.String()) {
+			cause = &FailureCause{Code: CauseVendorNetwork, Source: CauseSourceInferred}
 		}
 		res.Termination.Cause = cause
 		return res, fmt.Errorf("claude reported error in envelope (exit=%d): FAILED", res.ExitCode)

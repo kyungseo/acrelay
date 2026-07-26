@@ -21,16 +21,17 @@ and records the review; it does not make those decisions for the owner.
 ## Quick Start
 
 On macOS, open Terminal and confirm that `uname -m` prints `arm64`. Then install
-and verify the exact preview:
+the exact engine and Skill for the host you use:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.3/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.4/scripts/install.sh |
+  bash -s -- --skill-host codex
 ~/.local/bin/acrelay version
 ```
 
-Add the optional [acRelay Skill](#prefer-natural-language-add-the-acrelay-skill),
-restart Codex App, Codex CLI, or Claude Code if the Skill is not discovered,
-and ask:
+Use `claude` instead of `codex`, or `both`, with `--skill-host`. Start a fresh
+Codex App, Codex CLI, or Claude Code session so the newly installed Skill is
+discovered, then ask:
 
 > Use acRelay to have Claude challenge this plan. Summarize the decisions I
 > need to make at the end.
@@ -115,7 +116,7 @@ reviewer session; the same-vendor path on a Codex host remains unverified.
 
 ## Public Validation Preview And Platform Expansion
 
-`v0.1.0-alpha.3` is a **Public Validation Preview**. It is
+`v0.1.0-alpha.4` is a **Public Validation Preview**. It is
 **Experimental**, broader validation is still **Validation pending**, and it does not
 claim general `Supported` status. The download and live-review evidence scope
 is deliberately narrow:
@@ -123,7 +124,7 @@ is deliberately narrow:
 - downloadable binary: **macOS Apple Silicon (`darwin/arm64`)** only
 - reviewers: Claude Code CLI and Codex CLI, but only for combinations of
   reviewer version and operating system that were tested explicitly
-- release: not Developer ID signed or notarized, version `v0.1.0-alpha.3`
+- release: not Developer ID signed or notarized, version `v0.1.0-alpha.4`
 - review model: one reviewer for each review, a fixed round limit, a recorded
   driver response to every finding, and a final decision by the owner
 
@@ -132,15 +133,15 @@ recorded test lanes; platform-specific Claude Code and Codex review validation
 comes next, followed by any patches that evidence requires. Linux core runtime
 CI remains part of the source test matrix, but this preview does not provide a
 Linux artifact or live-review support. Until a combination is verified,
-`v0.1.0-alpha.3` stops before sending a review. Intel Mac likewise has no
+`v0.1.0-alpha.4` stops before sending a review. Intel Mac likewise has no
 downloadable artifact or verified live-review combination in this release.
 
 ## Install
 
-Install the exact `v0.1.0-alpha.3` preview. The installer never substitutes an
+Install the exact `v0.1.0-alpha.4` preview. The installer never substitutes an
 unpinned branch or a `latest` download.
 
-### One-command binary install
+### One-command engine and Skill install
 
 On macOS, open Terminal and run `uname -m`. Continue with this prebuilt
 installer only when the result is `arm64`.
@@ -149,8 +150,13 @@ The installer is pinned to the exact tag and verifies the downloaded binary
 archive against the release checksum before executing it:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.3/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.4/scripts/install.sh |
+  bash -s -- --skill-host codex
 ```
+
+Choose `codex`, `claude`, or `both`. Omit `--skill-host` when you want the
+engine only. The verified archive contains the exact-version official Skill as
+well as the engine.
 
 Piping a script to `bash` is convenient but does not let you inspect the
 installer first. Use the review-first path below when you want to read it
@@ -162,19 +168,19 @@ The installer is pinned to one release and never resolves `latest`. Review it
 before running:
 
 ```sh
-curl -fLO https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.3/scripts/install.sh
+curl -fLO https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.4/scripts/install.sh
 less install.sh
 bash install.sh
 ```
 
 It installs to `~/.local/bin` by default, does not use `sudo`, verifies the
-release archive before executing its binary, and refuses to replace a different
-installed version without `--replace`.
+release archive before executing its binary, and refuses to replace a
+different engine or locally different Skill without `--replace`.
 
 ### Go install
 
 ```sh
-go install github.com/kyungseo/acrelay/cmd/acrelay@v0.1.0-alpha.3
+go install github.com/kyungseo/acrelay/cmd/acrelay@v0.1.0-alpha.4
 ```
 
 This source-install path requires the Go toolchain declared in
@@ -201,33 +207,34 @@ the reviewer, and records the review. The Skill cannot run a review by itself,
 so install both.
 
 The Skill is part of the **Public Validation Preview**. It is
-**Experimental**, its broader validation is still **Validation pending**, and it does not
-claim general `Supported` status yet. It never installs, upgrades, or replaces
-the engine. After installing the engine, copy the complete Skill folder from
-the exact `v0.1.0-alpha.3` tag:
+**Experimental**, its broader validation is still **Validation pending**, and
+it does not claim general `Supported` status yet. The recommended installer
+gets the engine and the exact bundled Skill from the same checksum-verified
+release archive:
 
 ```sh
-git clone --depth 1 --branch v0.1.0-alpha.3 https://github.com/kyungseo/acrelay.git /tmp/acrelay-v0.1.0-alpha.3
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.4/scripts/install.sh |
+  bash -s -- --skill-host both
 ```
 
-### Claude Code
+Use `codex` or `claude` instead of `both` to install for one host. A matching
+installation is idempotent. If an existing engine or Skill differs, the
+installer preserves it and asks you to rerun with `--replace`; this protects
+local Skill edits from silent overwrite.
+
+To install the Skill manually or project-locally, copy the complete folder
+from the exact tag:
 
 ```sh
-mkdir -p "$HOME/.claude/skills"
-cp -R /tmp/acrelay-v0.1.0-alpha.3/skills/acrelay "$HOME/.claude/skills/"
+git clone --depth 1 --branch v0.1.0-alpha.4 https://github.com/kyungseo/acrelay.git /tmp/acrelay-v0.1.0-alpha.4
 ```
 
-### Codex
-
-```sh
-mkdir -p "$HOME/.agents/skills"
-cp -R /tmp/acrelay-v0.1.0-alpha.3/skills/acrelay "$HOME/.agents/skills/"
-```
-
-For a project-local install, copy the folder to `.claude/skills/acrelay` or
-`.agents/skills/acrelay` instead. Restart the agent host if it does not
-recognize the newly copied Skill. See the [Skill guide](./skills/acrelay/README.md)
-for Windows PowerShell installation, updates, removal, and the current validation boundary.
+Copy it to `$HOME/.claude/skills/acrelay`, `$HOME/.agents/skills/acrelay`, or
+the matching project-local directory. Start a fresh agent session after a new
+or updated Skill installation. See the
+[Skill guide](./skills/acrelay/README.md) for exact manual commands, Windows
+PowerShell Skill installation, updates, removal, and the current validation
+boundary.
 
 Example request:
 
@@ -236,6 +243,26 @@ Example request:
 
 If you do not specify a limit, acRelay allows up to three review rounds. You
 may request any limit from one to five.
+
+## Choose How Much The Reviewer May Read
+
+acRelay makes review scope explicit instead of treating repository-wide search
+or live web research as an invisible default:
+
+- `contained` is the default. The reviewer receives only the declared subject.
+- `contextual` adds an exact, revision-checked local context manifest. Context
+  helps interpretation but remains non-authoritative.
+- `research` also permits bounded reviewer web search and fetch for current
+  factual verification. It requires a separate egress acknowledgment. The
+  reviewer must report source URLs and retrieval dates; those declarations do
+  not replace evidence from the review subject.
+
+Command execution remains read-only and does not gain general network access.
+If the combined subject and context exceed 8 members or 128 KiB, initialization
+stops before dispatch until the user narrows the scope or explicitly accepts
+the broader token, time, and context risk. Reviews request at most eight
+actionable findings by default while never allowing critical or high findings
+to be omitted.
 
 ## Direct CLI: First Review
 
@@ -276,9 +303,11 @@ acrelay review \
 ```
 
 The driver then records whether each finding was accepted, revised, defended,
-or needs the owner, together with a reason. The owner answers any approval
-request and runs the final `close` command. To see whether the review is ready
-to close without changing anything, run:
+or needs the owner, together with a reason. `acrelay driver-response` accepts
+one strict JSON file and commits the whole response atomically; one invalid
+item leaves every finding unchanged. The owner answers any approval request
+and runs the final `close` command. To see whether the review is ready to close
+without changing anything, run:
 
 ```sh
 acrelay briefing \

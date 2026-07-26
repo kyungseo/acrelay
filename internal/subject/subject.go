@@ -22,6 +22,11 @@ import (
 const (
 	SpecVersion = "subject-spec v0.1"
 	domainTag   = "acrelay-subject-v1\x00"
+	// BroadScopeMemberThreshold and BroadScopeByteThreshold are conservative
+	// first-use guardrails calibrated against the 2026-07-26 dogfood run:
+	// 9 members / ~177 KiB produced a 16-turn, 10m26s reviewer invocation.
+	BroadScopeMemberThreshold = 8
+	BroadScopeByteThreshold   = 128 * 1024
 )
 
 type Kind string
@@ -64,6 +69,42 @@ type Snapshot struct {
 	ResolvedRoot string   `json:"resolved_root"`
 	Members      []Member `json:"members"`
 	Aggregate    string   `json:"aggregate"`
+}
+
+// ScopeSummary is a bounded pre-dispatch view that contains no member paths or
+// content. Broad is a consent gate, not a claim that a smaller subject is fast.
+type ScopeSummary struct {
+	Members int
+	Bytes   int64
+	Broad   bool
+	Reasons []string
+}
+
+func SummarizeScope(snapshot Snapshot) ScopeSummary {
+	return SummarizeScopes(snapshot)
+}
+
+// SummarizeScopes combines authoritative and auxiliary manifests for one
+// user-visible dispatch appetite check.
+func SummarizeScopes(snapshots ...Snapshot) ScopeSummary {
+	summary := ScopeSummary{}
+	for _, snapshot := range snapshots {
+		summary.Members += len(snapshot.Members)
+		for _, member := range snapshot.Members {
+			summary.Bytes += member.Bytes
+		}
+	}
+	if summary.Members > BroadScopeMemberThreshold {
+		summary.Broad = true
+		summary.Reasons = append(summary.Reasons,
+			fmt.Sprintf("members>%d", BroadScopeMemberThreshold))
+	}
+	if summary.Bytes > BroadScopeByteThreshold {
+		summary.Broad = true
+		summary.Reasons = append(summary.Reasons,
+			fmt.Sprintf("bytes>%d", BroadScopeByteThreshold))
+	}
+	return summary
 }
 
 // SingleFile constructs the legacy -target shorthand as a one-member spec.
@@ -583,5 +624,7 @@ func appendStrings(dst []byte, values []string) []byte {
 
 // Summary returns a stable human-readable selector description.
 func Summary(spec Spec, snapshot Snapshot) string {
-	return fmt.Sprintf("%s root=%s members=%d", spec.Kind, spec.Root, len(snapshot.Members))
+	scope := SummarizeScope(snapshot)
+	return fmt.Sprintf("%s root=%s members=%d bytes=%d broad=%v",
+		spec.Kind, spec.Root, scope.Members, scope.Bytes, scope.Broad)
 }

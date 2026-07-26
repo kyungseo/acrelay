@@ -65,21 +65,25 @@ reviewer는 CLI에서 실행됩니다.
 여기서 **App**은 데스크톱 화면, **CLI**는 Terminal에서 실행하는 command를
 뜻합니다. Skill과 engine은 reviewer 도구를 대신 설치하거나 로그인하지 않습니다.
 
-## Engine 설치
+## Engine과 Skill 설치
 
-Terminal에서 exact `v0.1.0-alpha.3` `acrelay` command를 바로 실행할 수 있어야
+Terminal에서 exact `v0.1.0-alpha.4` `acrelay` command를 바로 실행할 수 있어야
 합니다(`PATH`에 있어야 합니다). 현재 미리 build해 제공하는 binary는 macOS Apple
 Silicon(`darwin/arm64`)용입니다. Terminal에서 `uname -m`을 실행하고 결과가
 `arm64`일 때만 이 installer를 사용하세요. Installer는 `latest`로 바꾸지
 않습니다.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.3/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.4/scripts/install.sh |
+  bash -s -- --skill-host codex
 ```
 
-Installer는 release에 고정돼 있으며 binary archive를 공개 checksum과 대조합니다.
-실행 전에 installer 내용을 확인하거나 고정 version의 `go install`을 사용하려면
-[acRelay 설치 안내](https://github.com/kyungseo/acrelay/blob/v0.1.0-alpha.3/docs/OPERATIONS.ko.md)를
+`--skill-host`에는 `codex` 대신 `claude` 또는 `both`를 선택할 수 있습니다.
+Installer는 release에 고정돼 있으며 engine과 Skill이 함께 담긴 archive를 공개
+checksum과 대조합니다. 로컬 Skill 내용이 다르면 `--replace`를 명시하지 않는 한
+보존합니다. 실행 전에 installer 내용을 확인하거나 고정 version의 `go install`을
+사용하려면
+[acRelay 설치 안내](https://github.com/kyungseo/acrelay/blob/v0.1.0-alpha.4/docs/OPERATIONS.ko.md)를
 따르세요.
 
 다음 platform 지원 대상은 Windows입니다. Windows core runtime lane은 이미
@@ -88,27 +92,27 @@ Installer는 release에 고정돼 있으며 binary archive를 공개 checksum과
 preview에는 Linux artifact와 live-review 지원이 없습니다. 조합을 검증하기
 전까지 engine은 파일을 보내기 전에 중단합니다.
 
-## Skill preview 설치
+## 수동 또는 project-local Skill 설치
 
-Exact acRelay `v0.1.0-alpha.3` tag에서 설치하고, `SKILL.md`만 복사하지 말고
+Exact acRelay `v0.1.0-alpha.4` tag에서 설치하고, `SKILL.md`만 복사하지 말고
 `skills/acrelay` 폴더 전체를 복사합니다.
 
 ```sh
-git clone --depth 1 --branch v0.1.0-alpha.3 https://github.com/kyungseo/acrelay.git /tmp/acrelay-v0.1.0-alpha.3
+git clone --depth 1 --branch v0.1.0-alpha.4 https://github.com/kyungseo/acrelay.git /tmp/acrelay-v0.1.0-alpha.4
 ```
 
 ### Claude Code
 
 ```sh
 mkdir -p "$HOME/.claude/skills"
-cp -R /tmp/acrelay-v0.1.0-alpha.3/skills/acrelay "$HOME/.claude/skills/"
+cp -R /tmp/acrelay-v0.1.0-alpha.4/skills/acrelay "$HOME/.claude/skills/"
 ```
 
 ### Codex
 
 ```sh
 mkdir -p "$HOME/.agents/skills"
-cp -R /tmp/acrelay-v0.1.0-alpha.3/skills/acrelay "$HOME/.agents/skills/"
+cp -R /tmp/acrelay-v0.1.0-alpha.4/skills/acrelay "$HOME/.agents/skills/"
 ```
 
 ### Windows PowerShell
@@ -116,8 +120,8 @@ cp -R /tmp/acrelay-v0.1.0-alpha.3/skills/acrelay "$HOME/.agents/skills/"
 Windows에서는 같은 exact tag를 임시 폴더에 clone합니다.
 
 ```powershell
-$source = Join-Path ([System.IO.Path]::GetTempPath()) "acrelay-v0.1.0-alpha.3"
-git clone --depth 1 --branch v0.1.0-alpha.3 https://github.com/kyungseo/acrelay.git $source
+$source = Join-Path ([System.IO.Path]::GetTempPath()) "acrelay-v0.1.0-alpha.4"
+git clone --depth 1 --branch v0.1.0-alpha.4 https://github.com/kyungseo/acrelay.git $source
 ```
 
 Claude Code에 설치하려면 다음 명령을 사용합니다.
@@ -142,13 +146,14 @@ Copy-Item -Recurse (Join-Path $source "skills/acrelay") $codexSkill
 지원을 주장하지 않습니다.
 
 특정 repository에서만 사용할 때는 `.claude/skills/acrelay` 또는
-`.agents/skills/acrelay`에 복사하세요. 새 Skill이 보이지 않으면 agent host를
-재시작합니다. Update할 때는 다른 exact tag의 폴더 전체로 교체하고, 제거할 때는
-설치된 `acrelay` 폴더만 삭제하세요.
+`.agents/skills/acrelay`에 복사하세요. 새로 설치하거나 update한 뒤에는 현재
+session cache에 의존하지 않도록 agent host의 새 session을 시작합니다.
+Update할 때는 다른 exact tag의 폴더 전체로 교체하고, 제거할 때는 설치된
+`acrelay` 폴더만 삭제하세요.
 
-Skill은 engine을 자동으로 설치하거나 update하지 않습니다. Engine이 없거나
-version이 다르면 이유를 설명하고 중단하며, acRelay를 우회해 reviewer를 직접
-호출하지 않습니다.
+실행 중인 Skill 자체는 engine을 자동으로 설치하거나 update하지 않습니다.
+Engine이 없거나 version이 다르면 이유를 설명하고 중단하며, acRelay를 우회해
+reviewer를 직접 호출하지 않습니다.
 
 ## 요청 예시
 
@@ -173,10 +178,23 @@ acRelay로 Codex에게 이 파일을 검토하게 해줘. 확인한 근거와 �
 acRelay로 현재 구현 결과가 승인된 계획과 맞는지 검토하고, 어긋난 점을 정리해줘.
 ```
 
-acRelay v0.1.0-alpha.3는 파일 하나, 명시한 여러 파일 또는 지정한 subtree를
+acRelay v0.1.0-alpha.4는 파일 하나, 명시한 여러 파일 또는 지정한 subtree를
 받습니다. PR URL, staged patch, commit range 또는 branch comparison을 직접
 선택하는 기능은 아직 없습니다. 원하는 revision을 checkout한 뒤 파일이나 subtree를
 지정하세요.
+
+### Review access 선택
+
+```text
+acRelay research profile로 Claude에게 이 계획의 최신 외부 사실을 확인하게 해줘. Local context는 내가 지정한 파일로만 제한해줘.
+```
+
+`contained`가 기본값이고, `contextual`은 exact non-authoritative local context
+manifest를 추가하며, `research`는 별도 egress 동의와 함께 bounded web
+search/fetch도 허용합니다. Research는 최신 사실 확인이 필요할 때 쓰며 단지
+internet이 있다는 이유로 기본 선택하지 않습니다. Subject와 context 합계가
+8개 file 또는 128 KiB를 넘으면 Skill은 범위를 줄이거나 broad-scope 동의를 한
+번에 묻고, 조용히 dispatch하지 않습니다.
 
 ### Claude Code나 Codex 중 하나만 사용할 때
 
@@ -222,6 +240,7 @@ acRelay v0.1.0-alpha.3는 파일 하나, 명시한 여러 파일 또는 지정�
 - Owner가 누구인지
 - 비공개 Markdown review 기록을 둘 위치
 - Review 내용, 해석된 경로와 metadata를 선택한 reviewer service로 보내도 되는지
+- Exact auxiliary context 또는 최신 외부 research가 필요한지
 - Driver와 reviewer context의 관계
 - 기본 3회차 제한을 사용할지
 

@@ -2,7 +2,7 @@
 
 [English](./OPERATIONS.md) · **한국어**
 
-이 문서는 `v0.1.0-alpha.3` **Public Validation Preview**의 설치, update, 제거와
+이 문서는 `v0.1.0-alpha.4` **Public Validation Preview**의 설치, update, 제거와
 복구 방법을 설명합니다. 아직 **Experimental** 단계이며, 더 넓은 환경의 검증은
 **Validation pending**입니다.
 
@@ -18,23 +18,26 @@ Intel Mac도 이번 release에서 미리 build한 binary와 검증된 live-revie
 
 | 방법 | 적합한 경우 | 알아둘 제한 |
 | --- | --- | --- |
-| 한 줄 installer | 공개된 binary를 가장 빠르게 설치 | Binary archive의 checksum은 확인하지만 installer를 실행 전에 읽지는 않음 |
-| Tag에 고정된 installer | 공개된 binary를 사용자 계정에 설치 | Developer ID signing이나 notarization을 하지 않음. Checksum은 파일이 바뀌었는지 확인하지만 누가 게시했는지는 증명하지 않음 |
+| 한 줄 installer | 공개된 engine과 optional Skill을 가장 빠르게 설치 | Archive checksum은 확인하지만 installer를 실행 전에 읽지는 않음 |
+| Tag에 고정된 installer | 공개된 engine과 optional Skill을 사용자 계정에 설치 | Developer ID signing이나 notarization을 하지 않음. Checksum은 파일이 바뀌었는지 확인하지만 누가 게시했는지는 증명하지 않음 |
 | 내려받아 읽은 뒤 실행 | Installer 내용을 직접 확인하고 실행 | 같은 binary를 설치하고 같은 checksum을 사용 |
 | 고정 version의 `go install` | 기존 Go toolchain으로 source에서 build | 로컬 설정에 따라 필요한 toolchain과 module data를 내려받을 수 있음 |
 
-Installer는 optional [acRelay Skill](../skills/acrelay/README.ko.md)을 설치하지
-않습니다. 이 repository가 engine과 자연어 진입점의 canonical source입니다.
+이 repository가 engine과 optional
+[acRelay Skill](../skills/acrelay/README.ko.md)의 canonical source입니다.
+`--skill-host codex`, `claude` 또는 `both`를 지정하면 같은 검증 archive에 담긴
+exact Skill을 함께 설치합니다. Engine만 설치하려면 option을 생략합니다.
 Skill도 Public Validation Preview에 포함되며, 아직 Experimental이고 Validation
 pending이며 일반적인 `Supported` 상태를 주장하지 않습니다.
 
 ## 한 줄 installer
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.3/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.4/scripts/install.sh |
+  bash -s -- --skill-host both
 ```
 
-Script는 `v0.1.0-alpha.3`에 고정돼 있고, 내려받은 binary archive를 실행하기 전에
+Script는 `v0.1.0-alpha.4`에 고정돼 있고, 내려받은 binary archive를 실행하기 전에
 release checksum과 대조합니다. Script를 `bash`로 바로 보내면 installer 자체를
 실행 전에 읽을 수는 없습니다. 이 차이가 중요하면 아래의 tag 고정·사전 확인
 경로를 사용하세요.
@@ -44,27 +47,29 @@ release checksum과 대조합니다. Script를 `bash`로 바로 보내면 instal
 정확한 release tag에서 script를 내려받아 내용을 확인한 뒤 실행합니다.
 
 ```sh
-curl -fLO https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.3/scripts/install.sh
+curl -fLO https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.4/scripts/install.sh
 less install.sh
 bash install.sh
 ```
 
-Script가 설치할 version은 `v0.1.0-alpha.3`로 고정되어 있습니다. `latest`를
+Script가 설치할 version은 `v0.1.0-alpha.4`로 고정되어 있습니다. `latest`를
 조회하거나 임의의 version을 입력받지 않습니다. 다음 파일을 내려받습니다.
 
 ```text
-acrelay_0.1.0-alpha.3_darwin_arm64.tar.gz
-acrelay_0.1.0-alpha.3_checksums.txt
+acrelay_0.1.0-alpha.4_darwin_arm64.tar.gz
+acrelay_0.1.0-alpha.4_checksums.txt
 ```
 
 Archive의 SHA-256 값이 공개된 checksum 항목과 정확히 일치하는지 확인한 뒤에만
 압축을 풀고 binary를 실행합니다. Archive에는 최상위 directory 하나가 있습니다.
 
 ```text
-acrelay_0.1.0-alpha.3_darwin_arm64/
+acrelay_0.1.0-alpha.4_darwin_arm64/
 ├── acrelay
 ├── LICENSE
-└── README.md
+├── README.md
+└── skills/
+    └── acrelay/
 ```
 
 기본 설치 경로는 `~/.local/bin/acrelay`입니다. 사용자가 소유한 다른 directory에
@@ -82,7 +87,10 @@ Installer는 `sudo`를 사용하지 않습니다. 설치 directory가 `PATH`에 
 - 같은 version: 교체하지 않고 성공으로 종료합니다.
 - 다른 version 또는 version을 확인할 수 없음: 설치를 바꾸지 않고 중단하며 현재
   version과 설치하려던 version을 표시합니다.
-- 명시적인 교체: 교체 의도를 확인한 뒤 `--replace`로 다시 실행합니다.
+- 같은 Skill: 바꾸지 않습니다. 로컬 Skill 내용이 다르면 engine이나 요청한 다른
+  host를 바꾸기 전에 중단합니다.
+- 명시적인 교체: engine 및/또는 Skill 교체 의도를 확인한 뒤 `--replace`로 다시
+  실행합니다.
 - 기존 경로의 파일을 실행할 수 없음: 덮어쓰지 않고 실패합니다.
 
 `--replace`는 downgrade 가능성을 포함해 교체를 명시적으로 허용합니다.
@@ -91,7 +99,7 @@ Installer가 semantic version을 비교해 어느 쪽이 최신인지 판단하�
 ## 고정 version으로 Go install
 
 ```sh
-go install github.com/kyungseo/acrelay/cmd/acrelay@v0.1.0-alpha.3
+go install github.com/kyungseo/acrelay/cmd/acrelay@v0.1.0-alpha.4
 ```
 
 Module의 `go` directive에 필요한 toolchain version이 선언되어 있습니다. Go의
@@ -117,14 +125,14 @@ acrelay version --short
 이번 release의 short output은 다음과 같아야 합니다.
 
 ```text
-v0.1.0-alpha.3
+v0.1.0-alpha.4
 ```
 
 Release file이 어떤 source와 환경에서 만들어졌는지 확인할 수 있도록 다음 파일도
 게시합니다.
 
 ```text
-acrelay_0.1.0-alpha.3_provenance.json
+acrelay_0.1.0-alpha.4_provenance.json
 ```
 
 이 파일에는 source commit, build 환경, Go version, target `GOOS/GOARCH`, CGO
@@ -147,13 +155,14 @@ attribute를 기록하고 중단하세요. Gatekeeper를 전역으로 끄거나 
 
 ## 업데이트
 
-Installer는 release마다 version이 고정되어 있습니다. Update하려면 새 release
-tag의 installer를 내려받아 내용을 확인하고, 현재 version과 설치할 version을
-확인한 뒤 `--replace`로 실행합니다.
+Installer는 release마다 version이 고정되어 있습니다. Engine과 설치한 Skill을
+함께 update하려면 새 release tag의 installer를 내려받아 내용을 확인하고, 현재
+version과 설치할 version을 확인한 뒤 같은 `--skill-host`와 `--replace`를 함께
+사용합니다. `--skill-host`를 생략하면 engine만 update합니다.
 
-Update는 binary만 교체합니다. `~/.acrelay`, reviewer session 식별자, 비공개
-working directory, canonical review record, 복구 journal 또는 quarantine data를
-옮기거나 삭제하지 않습니다.
+Update는 `~/.acrelay`, reviewer session 식별자, 비공개 working directory,
+canonical review record, 복구 journal 또는 quarantine data를 옮기거나 삭제하지
+않습니다.
 
 ## Binary 제거
 
@@ -172,6 +181,11 @@ rm "$HOME/.local/bin/acrelay"
 Binary를 제거해도 비공개 review 정보는 그대로 보존됩니다. Uninstall 과정에서
 `~/.acrelay`를 삭제하지 마세요.
 
+공식 Skill을 global로 설치했다면 Codex는
+`$HOME/.agents/skills/acrelay`, Claude Code는
+`$HOME/.claude/skills/acrelay` exact directory만 제거합니다. 로컬 수정이 있을
+수 있으므로 먼저 내용을 확인하세요.
+
 완료된 review의 acRelay session data도 정리하려면 binary를 제거하기 전에 cleanup
 계획을 확인하세요. 정확한 canonical record와 session reference를 지정해야 합니다.
 
@@ -189,7 +203,7 @@ Raw canonical record는 owner가 계속 보관합니다. acRelay는 reviewer ven
 
 Maintainer용 release workflow는 다음 순서를 따릅니다.
 
-1. Exact approved tag `v0.1.0-alpha.3`을 요구합니다.
+1. Exact approved tag `v0.1.0-alpha.4`을 요구합니다.
 2. Tag가 checkout commit을 가리키는지 확인합니다.
 3. `darwin/arm64` builder와 정확한 Go toolchain을 확인합니다.
 4. Deterministic/race test, vet, build와 module verification을 실행합니다.

@@ -107,6 +107,15 @@ func fail(err error) {
 	os.Exit(1)
 }
 
+func boundedUserText(value string, limit int) string {
+	normalized := strings.Join(strings.Fields(value), " ")
+	runes := []rune(normalized)
+	if len(runes) <= limit {
+		return normalized
+	}
+	return string(runes[:limit]) + "…"
+}
+
 func parseOptionalFormalRoundBound(raw string) (int, error) {
 	if raw == "" {
 		return 0, nil
@@ -188,7 +197,7 @@ func runBriefing(args []string, stdout io.Writer) (int, error) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, `usage: acrelay <init|review|confirm|disposition|request-approval|respond-approval|withdraw-approval|advance|close|terminate|reconcile|abandon-transaction|cleanup|status|briefing|version> [flags]
+		fmt.Fprintln(os.Stderr, `usage: acrelay <init|review|confirm|driver-response|disposition|request-approval|respond-approval|withdraw-approval|advance|close|terminate|reconcile|abandon-transaction|cleanup|status|briefing|version> [flags]
 The canonical record is private local storage: keep it outside shared/synced/
 published paths. Raw canonical sharing is unsupported; redacted export is not provided in v1.`)
 		os.Exit(2)
@@ -201,11 +210,15 @@ published paths. Raw canonical sharing is unsupported; redacted export is not pr
 		question := fs.String("question", "", "review objective question")
 		target := fs.String("target", "", "single-file subject shorthand")
 		targetSpec := fs.String("target-spec", "", "JSON subject spec (file|files|subtree; mutually exclusive with -target)")
+		contextSpecPath := fs.String("context-spec", "", "optional JSON selector for non-authoritative local context")
+		reviewProfile := fs.String("review-profile", adapter.ReviewProfileContained, "contained|contextual|research")
 		prior := fs.String("prior", "", "prior objective ID (same-target follow-up)")
 		diff := fs.String("material-diff", "", "material difference vs prior objective")
 		seen := fs.Bool("seen-before", false, "target manifest was reviewed before")
 		approvalActor := fs.String("approval-actor", "", "declared owner identity for trust approvals")
 		ackEgress := fs.Bool("ack-vendor-egress", false, "approve vendor processing of content, absolute/resolved paths, and metadata")
+		ackResearchEgress := fs.Bool("ack-research-egress", false, "approve research-profile search queries and external URL retrieval")
+		ackBroadScope := fs.Bool("ack-broad-scope", false, "approve the displayed broad member/byte scope")
 		inTargetWorkdir := fs.Bool("allow-in-target-workdir", false, "approve unsafe reviewer cwd inside subject (code-execution/read/egress risk)")
 		executionSurface := fs.String("execution-surface", "", "reviewer execution surface (external-cli; host-subagent is explicitly unsupported)")
 		driverVendor := fs.String("driver-vendor", "", "operator-declared driver agent vendor (claude|codex|other; omitted records undeclared)")
@@ -220,9 +233,18 @@ published paths. Raw canonical sharing is unsupported; redacted export is not pr
 		if err != nil {
 			fail(err)
 		}
-		policy, err := adapter.NewTrustPolicy(*approvalActor, *ackEgress, *inTargetWorkdir)
+		policy, err := adapter.NewTrustPolicyForReview(*approvalActor, *ackEgress, *inTargetWorkdir,
+			*reviewProfile, *ackResearchEgress)
 		if err != nil {
 			fail(err)
+		}
+		var contextSpec *subject.Spec
+		if *contextSpecPath != "" {
+			loaded, err := subject.LoadSpec(*contextSpecPath)
+			if err != nil {
+				fail(err)
+			}
+			contextSpec = &loaded
 		}
 		topology, err := relay.NewTopologyPolicy(*executionSurface, *driverVendor, *contextRelation)
 		if err != nil {
@@ -235,11 +257,20 @@ published paths. Raw canonical sharing is unsupported; redacted export is not pr
 			}
 			locationOverride = &relay.LocationOverride{Actor: *approvalActor, Rationale: *unsafeLocationReason}
 		}
-		st, err := relay.InitSubjectTopologyWithLocation(*canonical, *question, spec, *prior, *diff, *seen, policy, topology, locationOverride)
+		st, err := relay.InitSubjectTopologyWithOptions(*canonical, *question, spec, *prior, *diff, *seen,
+			policy, topology, relay.InitOptions{
+				LocationOverride: locationOverride, ContextSpec: contextSpec, BroadScopeApproved: *ackBroadScope,
+			})
 		if err != nil {
 			fail(err)
 		}
-		fmt.Printf("objective %s (collaboration %s) initialized\n", st.ObjectiveID, st.CollaborationID)
+		scopeSnapshots := []subject.Snapshot{st.Subject}
+		if st.Context != nil {
+			scopeSnapshots = append(scopeSnapshots, *st.Context)
+		}
+		scope := subject.SummarizeScopes(scopeSnapshots...)
+		fmt.Printf("review initialized: profile=%s members=%d bytes=%d broad=%v\n",
+			st.TrustPolicy.EffectiveReviewProfile(), scope.Members, scope.Bytes, scope.Broad)
 
 	case "review":
 		fs := flag.NewFlagSet("review", flag.ExitOnError)
@@ -250,6 +281,10 @@ published paths. Raw canonical sharing is unsupported; redacted export is not pr
 		model := fs.String("model", "", "explicit model (default: platform default)")
 		effort := fs.String("effort", "", "explicit effort (default: omitted, no flag sent)")
 		roundBound := fs.String("round-bound", "", "objective formal round bound 1..5 (first review default: 3)")
+		findingAppetite := fs.Int("finding-appetite", 8, "preferred maximum actionable findings 1..20; critical/high findings must not be omitted")
+		startupTimeout := fs.Duration("startup-timeout", 0, "dispatch to first observable event (default: 2m)")
+		idleTimeout := fs.Duration("idle-timeout", 0, "maximum silence between observable events (default: 5m)")
+		hardCap := fs.Duration("hard-cap", 0, "absolute invocation bound (default: 30m)")
 		handles := fs.String("handles", "", "session handle store path (default: ~/.acrelay/handles.json, fail-closed)")
 		workdir := fs.String("workdir", "", "reviewer cwd (default: private neutral temp root; in-target requires init approval)")
 		resetMode := fs.String("session-reset", "", "second-opinion|context-reset|resume-failure|unrelated")
@@ -296,7 +331,13 @@ published paths. Raw canonical sharing is unsupported; redacted export is not pr
 		dispatchCtx, cancelDispatch := newDispatchContext()
 		defer cancelDispatch()
 		st, outcome, err := s.Review(dispatchCtx, p,
-			adapter.Request{Model: *model, Effort: *effort, WorkingDir: *workdir})
+			adapter.Request{
+				Model: *model, Effort: *effort, WorkingDir: *workdir,
+				FindingAppetite: *findingAppetite,
+				Timeouts: adapter.Timeouts{
+					Startup: *startupTimeout, Idle: *idleTimeout, HardCap: *hardCap,
+				},
+			})
 		if err != nil {
 			fail(err) // the "failed"/"unknown" progress line was already emitted
 		}
@@ -304,9 +345,32 @@ published paths. Raw canonical sharing is unsupported; redacted export is not pr
 		fmt.Printf("round R%d: outcome=%s verdict=%s governance=%s\n", last.Index, outcome, last.Verdict, st.Governance)
 		for _, f := range st.Findings {
 			if f.Disposition == "" {
-				fmt.Printf("  finding %s [blocking=%v]: %s\n", f.ID, f.Blocking, f.Summary)
+				fmt.Printf("  finding %s [severity=%s blocking=%v evidence=%s]: %s\n",
+					f.ID, f.ReviewerSeverity, f.Blocking,
+					boundedUserText(strings.Join(f.Evidence, ","), 300),
+					boundedUserText(f.Summary, 800))
+				fmt.Printf("    recommendation: %s\n", boundedUserText(f.Recommendation, 1200))
 			}
 		}
+
+	case "driver-response":
+		fs := flag.NewFlagSet("driver-response", flag.ExitOnError)
+		canonical := fs.String("canonical", "", "canonical record path")
+		responseFile := fs.String("response-file", "", "strict JSON driver response file")
+		fs.Parse(args)
+		if *canonical == "" || *responseFile == "" {
+			fail(fmt.Errorf("driver-response requires -canonical and -response-file"))
+		}
+		var response review.DriverResponseInput
+		if err := decodeJSONFile(*responseFile, &response); err != nil {
+			fail(fmt.Errorf("invalid driver response file: %w", err))
+		}
+		st, err := relay.ApplyDriverResponse(*canonical, response)
+		if err != nil {
+			fail(err)
+		}
+		fmt.Printf("driver response recorded: dispositions=%d governance=%s\n",
+			len(response.Dispositions), st.Governance)
 
 	case "disposition":
 		fs := flag.NewFlagSet("disposition", flag.ExitOnError)

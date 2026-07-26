@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -37,6 +39,55 @@ func (CodexAdapter) Capability() Capability {
 
 func (a CodexAdapter) Preflight(req Request) error {
 	return validateCommonRequest(a.Capability(), req)
+}
+
+// codexSkillDisableConfig prevents a reviewer from recursively invoking local
+// workflow Skills (especially acRelay itself). Codex's --ignore-user-config
+// intentionally leaves Skill discovery available, so the documented
+// per-skill override is required for a bounded reviewer invocation.
+func codexSkillDisableConfig() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	var candidates []string
+	for _, root := range []string{
+		filepath.Join(home, ".agents", "skills"),
+		filepath.Join(home, ".codex", "skills"),
+		filepath.Join(string(filepath.Separator), "etc", "codex", "skills"),
+	} {
+		for _, pattern := range []string{
+			filepath.Join(root, "*", "SKILL.md"),
+			filepath.Join(root, ".system", "*", "SKILL.md"),
+		} {
+			matches, _ := filepath.Glob(pattern)
+			candidates = append(candidates, matches...)
+		}
+	}
+	seen := map[string]bool{}
+	var entries []string
+	for _, candidate := range candidates {
+		for _, skillPath := range []string{candidate, resolvedPath(candidate)} {
+			if skillPath == "" || seen[skillPath] {
+				continue
+			}
+			seen[skillPath] = true
+			entries = append(entries,
+				fmt.Sprintf("{path=%s,enabled=false}", strconv.Quote(skillPath)))
+		}
+	}
+	if len(entries) == 0 {
+		return ""
+	}
+	return "skills.config=[" + strings.Join(entries, ",") + "]"
+}
+
+func resolvedPath(candidate string) string {
+	resolved, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return ""
+	}
+	return resolved
 }
 
 // codexCapture is the parse result of one JSONL stream.
@@ -105,13 +156,19 @@ func detectCodexVersion(ctx context.Context) (string, string, error) {
 	return firstNonEmptyLineField(banner, 1), strings.TrimSpace(banner), nil
 }
 
-func probeCodexCapabilities(ctx context.Context) (string, string) {
+func probeCodexCapabilities(ctx context.Context, research bool) (string, string) {
 	execOut, execTruncated, execErr := runBoundedProbe(ctx, 15*time.Second, "codex", "exec", "--help")
 	execState, execDiag := assessHelpProbe(execOut, execTruncated, execErr,
 		"--json", "--output-schema", "--ignore-user-config", "--ignore-rules", "--strict-config", "--sandbox", "--skip-git-repo-check")
 	resumeOut, resumeTruncated, resumeErr := runBoundedProbe(ctx, 15*time.Second, "codex", "exec", "resume", "--help")
 	resumeState, resumeDiag := assessHelpProbe(resumeOut, resumeTruncated, resumeErr, "resume")
-	return combineProbeResults([]string{execState, resumeState}, []string{execDiag, resumeDiag})
+	states, diagnostics := []string{execState, resumeState}, []string{execDiag, resumeDiag}
+	if research {
+		rootOut, rootTruncated, rootErr := runBoundedProbe(ctx, 15*time.Second, "codex", "--help")
+		rootState, rootDiag := assessHelpProbe(rootOut, rootTruncated, rootErr, "--search")
+		states, diagnostics = append(states, rootState), append(diagnostics, rootDiag)
+	}
+	return combineProbeResults(states, diagnostics)
 }
 
 type codexModelObservation struct {
@@ -217,7 +274,8 @@ func (a CodexAdapter) Prepare(ctx context.Context, req Request, handles *HandleS
 	if err := VerifyRestrictionEvidence(a.Capability(), observed); err != nil {
 		return nil, err
 	}
-	probeState, probeDiagnostic := probeCodexCapabilities(ctx)
+	research := normalizedReviewProfile(req.TrustPolicy.ReviewProfile) == ReviewProfileResearch
+	probeState, probeDiagnostic := probeCodexCapabilities(ctx, research)
 	if probeState != ProbeObserved {
 		return nil, fmt.Errorf("codex CLI %s does not expose the required restricted command surface: %s; review not started",
 			observed, probeDiagnostic)
@@ -250,14 +308,21 @@ func (a CodexAdapter) Prepare(ctx context.Context, req Request, handles *HandleS
 		return nil, err
 	}
 	req = preparedReq
-	args := []string{
-		"exec",
+	args := []string{}
+	if research {
+		args = append(args, "--search")
+	}
+	args = append(args, "exec",
 		"--ignore-user-config",
 		"--ignore-rules",
 		"--strict-config",
 		"--sandbox", "read-only",
 		"--skip-git-repo-check",
 		"--json",
+	)
+	if skillConfig := codexSkillDisableConfig(); skillConfig != "" {
+		args = append(args, "-c", skillConfig)
+		probeDiagnostic = joinDiagnostics(probeDiagnostic, "local Skill discovery disabled for reviewer")
 	}
 	if req.Model != "" {
 		args = append(args, "-m", req.Model)
@@ -308,7 +373,7 @@ func (p *preparedCodex) Dispatch(ctx context.Context) (*Result, error) {
 	defer tcancel(nil)
 	cmd := newGroupCmd(tctx, p.timeouts.Grace, "codex", p.args...)
 	cmd.Dir = req.WorkingDir
-	stdout := newWatchdogBuffer()
+	stdout := newWatchdogBuffer(req.Progress)
 	var stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = stdout, &stderr
 	cmd.Stdin = bytes.NewReader([]byte(req.Prompt))
@@ -359,7 +424,11 @@ func (p *preparedCodex) Dispatch(ctx context.Context) (*Result, error) {
 		}
 	}
 	if capd.TurnFailed {
-		res.Termination.Cause = &FailureCause{Code: CauseVendorTurnFailed, Source: CauseSourceVendorDeclared}
+		cause := &FailureCause{Code: CauseVendorTurnFailed, Source: CauseSourceVendorDeclared}
+		if inferredNetworkFailure(capd.FailReason, stderr.String()) {
+			cause = &FailureCause{Code: CauseVendorNetwork, Source: CauseSourceInferred}
+		}
+		res.Termination.Cause = cause
 		return res, fmt.Errorf("codex turn failed (exit=%d, reason=%.120s): FAILED", res.ExitCode, capd.FailReason)
 	}
 	// A conclusive turn.completed is authoritative (R1-CX-F1): a nonzero exit

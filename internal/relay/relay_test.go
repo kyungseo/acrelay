@@ -176,7 +176,7 @@ func TestReviewProfileSchemasAreValidJSON(t *testing.T) {
 		}
 		assertStrictObjectRequirements(t, name, parsed)
 	}
-	if ProfileVersion != "review-profile v0.2" || StoreVersion != "store-md v0.9" {
+	if ProfileVersion != "review-profile v0.2" || StoreVersion != "store-md v0.10" {
 		t.Fatalf("unexpected format contract: %s / %s", ProfileVersion, StoreVersion)
 	}
 }
@@ -392,7 +392,7 @@ func TestReviewPromptOwnsApprovalRequestProtocol(t *testing.T) {
 		t.Fatal(err)
 	}
 	protocol := reviewerApprovalProtocol()
-	gotReview := reviewPrompt(st, "Review the subject.")
+	gotReview := reviewPrompt(st, "Review the subject.", 0)
 	gotConfirmation := subjectPrompt(st, "Confirm whether the submitted finding is fixed.")
 	if strings.Count(gotReview, protocol) != 1 {
 		t.Fatalf("review prompt must contain the approval-request protocol exactly once:\n%s", gotReview)
@@ -613,6 +613,41 @@ func TestCRLFNormalizationDoesNotHideContentMismatch(t *testing.T) {
 	}
 }
 
+func TestTrailingEmptyLineBoundaryNormalization(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "status.md")
+	if err := os.WriteFile(target, []byte("alpha\nbravo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := adapter.FakeResult{Structured: map[string]any{
+		"verdict": "approve",
+		"examined": []any{map[string]any{
+			"id": "E1", "member": "status.md",
+			"location": map[string]any{"kind": "text-lines", "start": 1, "end": 3},
+			"excerpt":  "alpha\nbravo", "claim": "examined through the terminal empty boundary",
+		}},
+		"findings": []any{}, "approval_requests": []any{},
+	}}
+	fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "trailing-empty-fixture", Script: []adapter.FakeResult{result}}
+	s := &Session{
+		Adapter: fake, Handles: &adapter.HandleStore{Path: filepath.Join(dir, "handles.json")},
+		Canonical: filepath.Join(dir, "canonical.md"),
+	}
+	spec, err := subject.SingleFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InitSubject(s.Canonical, "terminal boundary review", spec, "", "", false, approvedPolicy(t)); err != nil {
+		t.Fatal(err)
+	}
+	st, outcome, err := s.Review(context.Background(), "review", adapter.Request{})
+	if err != nil || outcome != review.OutcomeResultValid || len(st.Evidence) != 1 ||
+		st.Evidence[0].Assurance != review.AssuranceContentMatchNormalized ||
+		st.Evidence[0].Normalization != review.NormalizationTrailingEmptyLine {
+		t.Fatalf("terminal empty boundary must normalize narrowly: outcome=%s evidence=%+v err=%v", outcome, st.Evidence, err)
+	}
+}
+
 func TestApproveWithRuntimeBlockingFindingIsContradiction(t *testing.T) {
 	result := changesRequested("critical defect")
 	result.Structured["verdict"] = "approve"
@@ -753,6 +788,65 @@ func TestTrustPolicyPersistsAndProfileMismatchBlocksSessionCarry(t *testing.T) {
 	}
 }
 
+func TestBroadScopeRequiresAcknowledgmentAndContextIsExplicit(t *testing.T) {
+	dir := t.TempDir()
+	subjectRoot := filepath.Join(dir, "subject")
+	contextRoot := filepath.Join(dir, "context")
+	if err := os.MkdirAll(subjectRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(contextRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	members := make([]string, 0, subject.BroadScopeMemberThreshold+1)
+	for i := 0; i <= subject.BroadScopeMemberThreshold; i++ {
+		name := fmt.Sprintf("member-%02d.txt", i)
+		if err := os.WriteFile(filepath.Join(subjectRoot, name), []byte("bounded fixture"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		members = append(members, name)
+	}
+	if err := os.WriteFile(filepath.Join(contextRoot, "guide.md"), []byte("auxiliary guidance"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	subjectSpec, err := subject.Normalize(subject.Spec{
+		Version: subject.SpecVersion, Kind: subject.KindFiles, Root: subjectRoot, Members: members,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextSpec, err := subject.Normalize(subject.Spec{
+		Version: subject.SpecVersion, Kind: subject.KindFiles, Root: contextRoot, Members: []string{"guide.md"},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := adapter.NewTrustPolicyForReview("owner", true, false, adapter.ReviewProfileContextual, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical := filepath.Join(dir, "canonical.md")
+	if _, err := InitSubjectTopologyWithOptions(canonical, "review?", subjectSpec, "", "", false,
+		policy, DefaultTopologyPolicy(), InitOptions{ContextSpec: &contextSpec}); err == nil ||
+		!strings.Contains(err.Error(), "broad review scope") {
+		t.Fatalf("broad subject must stop before init without acknowledgment: %v", err)
+	}
+	st, err := InitSubjectTopologyWithOptions(canonical, "review?", subjectSpec, "", "", false,
+		policy, DefaultTopologyPolicy(), InitOptions{ContextSpec: &contextSpec, BroadScopeApproved: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Context == nil || st.ContextSpec == nil || len(st.Context.Members) != 1 {
+		t.Fatalf("explicit auxiliary context was not persisted: %+v", st.Context)
+	}
+	prompt := subjectPrompt(st, "review")
+	if !strings.Contains(prompt, "Review access profile: contextual") ||
+		!strings.Contains(prompt, "Auxiliary local context") ||
+		!strings.Contains(prompt, "guide.md") {
+		t.Fatalf("context declaration missing from reviewer prompt: %s", prompt)
+	}
+}
+
 // E2E happy path: init → review(approve) → close.
 func TestE2EApproveAndClose(t *testing.T) {
 	s, _, _ := newSession(t, []adapter.FakeResult{approve()})
@@ -819,6 +913,44 @@ func TestE2EChangesRequestedClosureGate(t *testing.T) {
 	}
 	if st3, err := Close(s.Canonical, "owner", "owner", ""); err != nil || st3.Governance != string(kernel.GovClosed) {
 		t.Fatalf("close after full disposition must succeed: %v", err)
+	}
+}
+
+func TestDriverResponseBatchIsAtomic(t *testing.T) {
+	s, _, _ := newSession(t, []adapter.FakeResult{changesRequested("finding one", "finding two")})
+	if _, _, err := s.Review(context.Background(), "review", adapter.Request{}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.Revision(s.Canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyDriverResponse(s.Canonical, review.DriverResponseInput{
+		Dispositions: []review.DriverDispositionInput{
+			{FindingID: "R0-F1", Decision: review.DispositionRevise, Rationale: "will fix", FollowUp: "update target"},
+			{FindingID: "R0-F9", Decision: review.DispositionRevise, Rationale: "invalid item", FollowUp: "none"},
+		},
+	}); err == nil {
+		t.Fatal("batch with an unknown finding must fail")
+	}
+	after, err := store.Revision(s.Canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatal("invalid batch must not partially mutate the canonical")
+	}
+	st, err := ApplyDriverResponse(s.Canonical, review.DriverResponseInput{
+		Dispositions: []review.DriverDispositionInput{
+			{FindingID: "R0-F1", Decision: review.DispositionRevise, Rationale: "will fix", FollowUp: "update target"},
+			{FindingID: "R0-F2", Decision: review.DispositionDefend, Rationale: "current behavior is intentional", FollowUp: ""},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Governance != string(kernel.GovClosable) {
+		t.Fatalf("complete atomic response must make the objective closable: %s", st.Governance)
 	}
 }
 
