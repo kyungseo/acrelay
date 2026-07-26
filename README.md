@@ -18,6 +18,28 @@ and records the review; it does not make those decisions for the owner.
 
 [![A user asks Codex to bring Claude into a bounded acRelay review; Claude exits after the round, and the user decides what changes](./skills/acrelay/assets/acrelay-review-flow@2x.png)](./skills/acrelay/assets/acrelay-review-flow.svg)
 
+## Quick Start
+
+On macOS, open Terminal and confirm that `uname -m` prints `arm64`. Then install
+and verify the exact preview:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.2/scripts/install.sh | bash
+~/.local/bin/acrelay version
+```
+
+Add the optional [acRelay Skill](#prefer-natural-language-add-the-acrelay-skill),
+restart Codex App, Codex CLI, or Claude Code if the Skill is not discovered,
+and ask:
+
+> Use acRelay to have Claude challenge this plan. Summarize the decisions I
+> need to make at the end.
+
+This preview accepts one file, explicit files, or a declared subtree as the
+review target. It does not directly accept a PR URL, staged patch, commit
+range, or branch comparison. To review a PR, check out the intended revision
+first, then select its files or a declared subtree.
+
 ## Before You Start
 
 This preview is for people who already work with Codex App, Codex CLI, or
@@ -46,6 +68,8 @@ findings remained open.
 | Track rounds, revisions, and findings by hand | Keep them together in one review record on your computer |
 | Decide informally when the agents are done | Show a closeout summary and leave the final decision to the owner |
 
+[![acRelay automatically starts and stops the reviewer CLI, allows 1–5 rounds, keeps the final decision with the user, and accepts one file, explicit files, or a declared subtree](./docs/assets/social/acrelay-summary-cards@2x.png)](./docs/assets/social/acrelay-summary-cards.svg)
+
 Each review objective is bounded to 1–5 formal rounds; the default is 3. The
 limit prevents an open-ended argument and helps the user control reviewer
 token and model costs. Long review loops also accumulate fatigue, repeated
@@ -61,9 +85,10 @@ completion.
 ## One Executable, No acRelay Daemon
 
 acRelay is distributed as one executable. It does not run its own daemon,
-server, database, queue, or background network service. When asked to review,
+server, database, queue, or background network service. For each formal round,
 it starts a separately installed and authenticated Claude Code or Codex CLI,
-checks the returned structure, and records the result.
+checks the returned structure, records the result, and lets that reviewer
+process exit.
 
 The reviewer CLI may use its provider’s network and consume model tokens.
 “Local record” means acRelay keeps its review history locally; it does not mean
@@ -82,7 +107,9 @@ A different tool can challenge assumptions that the driver may not notice. If
 you use only Codex or only Claude Code, you can still run a review through a
 separate CLI session of the same tool, but the driver and reviewer may share
 blind spots. This preview uses a CLI reviewer; it does not directly accept a
-result produced by the driver tool's built-in subagent.
+result produced by the driver tool's built-in subagent. The completed
+same-vendor live evidence is a Claude Code host with a separate Claude Code
+reviewer session; the same-vendor path on a Codex host remains unverified.
 
 [![How acRelay moves a review between the driver, the record on your computer, the owner, and the reviewer service](./docs/assets/acrelay-architecture-trust@2x.png)](./docs/assets/acrelay-architecture-trust.svg)
 

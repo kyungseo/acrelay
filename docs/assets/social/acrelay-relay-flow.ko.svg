@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1350" width="1080" height="1350" role="img" style="font-family:Pretendard,'Apple SD Gothic Neo','Malgun Gothic','Noto Sans KR',sans-serif">
+<title>acRelay — 리뷰는 자동으로, 판단은 사람이</title>
+<desc>작업 중인 agent가 acRelay를 통해 별도 reviewer session에 리뷰를 넘기고, 라운드를 1~5회(기본 3) 반복한 뒤 owner checkpoint에서 사용자가 최종 판단한다. 검증 범위는 macOS Apple Silicon이며 바이너리는 unsigned, 현재 Validation pending 단계다.</desc>
+
+<style>
+  svg{ --bg:#FFFFFF; --ink:#1F2733; --muted:#5B6675; --hair:#D6E0EC; --primary:#1F6FB2;
+    --agent-fill:#ECEBFB; --agent-line:#534AB7; --agent-ink:#3C3489;
+    --relay-fill:#E3EEF8; --relay-line:#1F6FB2; --relay-ink:#124267;
+    --gate-fill:#E7F5EF;  --gate-line:#0F7A5F;  --gate-ink:#085041;
+    --panel:#F4F8FC; --card:#FFFFFF; }
+  .on-accent{ fill:#FFFFFF }
+</style>
+
+<defs>
+  <marker id="ah-primary" viewBox="0 0 12 12" refX="9" refY="6" markerWidth="11.25" markerHeight="11.25"
+    markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+    <path d="M2 2 L10 6 L2 10" fill="none" stroke="#1F6FB2" stroke-width="2" stroke-linecap="round"/>
+  </marker>
+  <marker id="ah-loop" viewBox="0 0 12 12" refX="9" refY="6" markerWidth="11.25" markerHeight="11.25"
+    markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+    <path d="M2 2 L10 6 L2 10" fill="none" stroke="#534AB7" stroke-width="2" stroke-linecap="round"/>
+  </marker>
+
+  <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+    <feDropShadow dx="0" dy="2" stdDeviation="2.5" flood-color="#1F2733" flood-opacity="0.10"/>
+  </filter>
+
+  <symbol id="ic-terminal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M7 9l3 3-3 3"/><path d="M13 15h4"/></symbol>
+  <symbol id="ic-loop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12a7.5 7.5 0 0 1 12.8-5.3L20 9"/><path d="M20 3.5V9h-5.5"/><path d="M19.5 12a7.5 7.5 0 0 1-12.8 5.3L4 15"/><path d="M4 20.5V15h5.5"/></symbol>
+  <symbol id="ic-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/><path d="M9 12l2 2 4-4"/></symbol>
+  <symbol id="ic-owner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M3 20c0-3.3 2.7-6 6-6h1.5"/><path d="M13.5 17l2.5 2.5L20.5 15"/></symbol>
+</defs>
+
+<rect width="1080" height="1350" fill="var(--bg)"/>
+
+<!-- ============ header ============ -->
+<rect x="48" y="64" width="6" height="56" rx="3" fill="var(--primary)"/>
+<text x="70" y="92" font-size="46" font-weight="700" fill="var(--ink)" dominant-baseline="central">리뷰는 자동으로, 판단은 사람이</text>
+<text x="70" y="138" font-size="20" fill="var(--muted)" dominant-baseline="central">Public Validation Preview · Experimental · Validation pending</text>
+
+<!-- ============ band 1 — relay ============ -->
+<rect x="48" y="196" width="984" height="624" rx="20" fill="var(--panel)" stroke="var(--hair)"/>
+<rect x="76" y="176" width="170" height="40" rx="20" fill="var(--primary)"/>
+<text x="161" y="196" font-size="20" font-weight="600" text-anchor="middle" dominant-baseline="central" class="on-accent">① 자동 relay</text>
+
+<!-- card A : driver -->
+<rect x="200" y="272" width="560" height="110" rx="14" fill="var(--card)" stroke="var(--agent-line)" stroke-width="1.5" filter="url(#soft)"/>
+<circle cx="276" cy="327" r="38" fill="var(--agent-fill)"/>
+<use href="#ic-terminal" x="256" y="307" width="40" height="40" style="color:#534AB7"/>
+<text x="340" y="313" font-size="25" font-weight="700" fill="var(--agent-ink)" dominant-baseline="central">작업 중인 agent</text>
+<text x="340" y="342" font-size="19" fill="var(--muted)" dominant-baseline="central">Codex 또는 Claude Code</text>
+
+<path d="M480 390 L480 432" fill="none" stroke="var(--primary)" stroke-width="2.5" marker-end="url(#ah-primary)"/>
+
+<!-- card B : acRelay engine (emphasis) -->
+<rect x="200" y="442" width="560" height="110" rx="14" fill="var(--card)" stroke="var(--relay-line)" stroke-width="2.5" filter="url(#soft)"/>
+<circle cx="276" cy="497" r="38" fill="var(--relay-fill)"/>
+<use href="#ic-loop" x="256" y="477" width="40" height="40" style="color:#1F6FB2"/>
+<text x="340" y="483" font-size="25" font-weight="700" fill="var(--relay-ink)" dominant-baseline="central">acRelay engine</text>
+<text x="340" y="512" font-size="19" fill="var(--muted)" dominant-baseline="central">reviewer CLI 기동 · 결과 중계</text>
+
+<path d="M480 560 L480 602" fill="none" stroke="var(--primary)" stroke-width="2.5" marker-end="url(#ah-primary)"/>
+
+<!-- card C : reviewer -->
+<rect x="200" y="612" width="560" height="110" rx="14" fill="var(--card)" stroke="var(--agent-line)" stroke-width="1.5" filter="url(#soft)"/>
+<circle cx="276" cy="667" r="38" fill="var(--agent-fill)"/>
+<use href="#ic-shield" x="256" y="647" width="40" height="40" style="color:#534AB7"/>
+<text x="340" y="653" font-size="25" font-weight="700" fill="var(--agent-ink)" dominant-baseline="central">reviewer session</text>
+<text x="340" y="682" font-size="19" fill="var(--muted)" dominant-baseline="central">red-team 관점으로 점검</text>
+
+<!-- feedback loop : reviewer → driver -->
+<path d="M760 667 H950 V327 H770" fill="none" stroke="var(--agent-line)" stroke-width="2.5" stroke-dasharray="5 4" marker-end="url(#ah-loop)"/>
+<rect x="790" y="480" width="140" height="34" rx="17" fill="var(--card)" stroke="var(--agent-line)" stroke-width="1.2"/>
+<text x="860" y="497" font-size="16" font-weight="600" text-anchor="middle" dominant-baseline="central" fill="var(--agent-ink)">round 1~5</text>
+
+<text x="80" y="750" font-size="17" fill="var(--muted)" dominant-baseline="central">라운드 수는 첫 review에서 1~5 중 선택하고, 생략하면 3입니다.</text>
+<text x="80" y="776" font-size="17" fill="var(--muted)" dominant-baseline="central">점선 = 다음 라운드로 되돌아가는 경로 · objective 안에서는 바뀌지 않습니다.</text>
+
+<!-- ============ band 2 — owner gate ============ -->
+<rect x="48" y="860" width="984" height="220" rx="20" fill="var(--panel)" stroke="var(--hair)"/>
+<rect x="76" y="840" width="245" height="40" rx="20" fill="var(--gate-line)"/>
+<text x="198" y="860" font-size="20" font-weight="600" text-anchor="middle" dominant-baseline="central" class="on-accent">② owner checkpoint</text>
+
+<rect x="88" y="912" width="904" height="108" rx="14" fill="var(--card)" stroke="var(--gate-line)" stroke-width="2.5" filter="url(#soft)"/>
+<circle cx="164" cy="966" r="38" fill="var(--gate-fill)"/>
+<use href="#ic-owner" x="144" y="946" width="40" height="40" style="color:#0F7A5F"/>
+<text x="228" y="952" font-size="25" font-weight="700" fill="var(--gate-ink)" dominant-baseline="central">최종 판단은 사용자</text>
+<text x="228" y="981" font-size="19" fill="var(--muted)" dominant-baseline="central">선택한 라운드에 도달하면 멈추고 사용자에게 넘깁니다</text>
+
+<!-- ============ footer — 검증 범위 ============ -->
+<rect x="51" y="1116" width="306" height="104" rx="14" fill="var(--card)" stroke="var(--hair)" filter="url(#soft)"/>
+<text x="204" y="1152" font-size="16" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">검증 범위</text>
+<text x="204" y="1182" font-size="19" font-weight="700" text-anchor="middle" dominant-baseline="central" fill="var(--ink)">macOS Apple Silicon</text>
+
+<rect x="387" y="1116" width="306" height="104" rx="14" fill="var(--card)" stroke="var(--hair)" filter="url(#soft)"/>
+<text x="540" y="1152" font-size="16" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">바이너리</text>
+<text x="540" y="1182" font-size="19" font-weight="700" text-anchor="middle" dominant-baseline="central" fill="var(--ink)">unsigned · not notarized</text>
+
+<rect x="723" y="1116" width="306" height="104" rx="14" fill="var(--card)" stroke="var(--hair)" filter="url(#soft)"/>
+<text x="876" y="1152" font-size="16" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">현재 단계</text>
+<text x="876" y="1182" font-size="19" font-weight="700" text-anchor="middle" dominant-baseline="central" fill="var(--ink)">Validation pending</text>
+
+<text x="540" y="1262" font-size="17" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">라운드마다 reviewer CLI를 기동하고 종료합니다 · 최종 판단과 Close는 사용자 몫입니다</text>
+<text x="540" y="1292" font-size="17" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">github.com/kyungseo/acrelay</text>
+</svg>

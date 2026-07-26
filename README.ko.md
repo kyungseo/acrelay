@@ -16,6 +16,28 @@ Claude Code 또는 Codex CLI에 파일 하나나 지정한 파일 묶음을 검�
 
 [![사용자가 Codex에게 Claude를 제한된 acRelay review에 참여시키도록 요청하고, Claude는 회차 뒤 종료되며, 사용자가 변경 여부를 결정하는 흐름](./skills/acrelay/assets/acrelay-review-flow.ko@2x.png)](./skills/acrelay/assets/acrelay-review-flow.ko.svg)
 
+## 빠르게 시작하기
+
+macOS에서 Terminal을 열고 `uname -m` 결과가 `arm64`인지 확인합니다. 그다음 exact
+preview를 설치하고 version을 확인합니다.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.2/scripts/install.sh | bash
+~/.local/bin/acrelay version
+```
+
+Optional [acRelay Skill](#자연어로-사용하려면-acrelay-skill-추가)을 추가하고, Skill을
+찾지 못하면 Codex App·Codex CLI 또는 Claude Code를 재시작한 뒤 다음과 같이
+요청합니다.
+
+> acRelay로 Claude에게 이 계획을 비판적으로 검토해 달라고 해줘. 마지막에 내가
+> 결정해야 할 내용만 정리해줘.
+
+이번 preview의 review 대상은 파일 하나, 명시적 파일 목록 또는 선언된 subtree입니다.
+PR URL, staged patch, commit range 또는 branch comparison을 직접 받지는 않습니다.
+PR을 검토하려면 의도한 revision을 먼저 checkout한 뒤 파일이나 subtree를
+지정하세요.
+
 ## 시작 전 준비
 
 이 preview는 Codex App, Codex CLI 또는 Claude Code로 파일 작업을 하는 사용자를
@@ -44,6 +66,8 @@ revision을 검토했는지와 어떤 finding이 남았는지도 사용자가 �
 | 회차, revision과 finding을 직접 관리 | 사용자 컴퓨터의 review 기록 하나에 함께 보관 |
 | 두 agent가 끝났는지 대화로 판단 | 종료 준비 요약을 확인하고 owner가 최종 결정 |
 
+[![acRelay가 reviewer CLI를 자동으로 시작하고 종료하며, 1–5회차 뒤 최종 판단은 사용자에게 남기고, 파일 하나·명시적 파일 목록·선언된 subtree를 review 대상으로 받는 방식](./docs/assets/social/acrelay-summary-cards.ko@2x.png)](./docs/assets/social/acrelay-summary-cards.ko.svg)
+
 Review objective별 formal round는 1–5회이며 기본값은 3회입니다. 제한된 회차는
 끝없는 논쟁을 막고 reviewer token과 model 비용을 사용자가 통제하도록 돕습니다.
 회차가 길어지면 피로, 반복 prompt와 context drift가 쌓여 새로운 검토 없이 승인
@@ -57,9 +81,9 @@ Review objective별 formal round는 1–5회이며 기본값은 3회입니다. �
 ## 실행 파일 하나, acRelay daemon 없음
 
 acRelay는 실행 파일 하나로 배포합니다. 자체 daemon, server, database, queue
-또는 백그라운드 network service를 실행하지 않습니다. Review를 요청하면 별도로
-설치하고 인증한 Claude Code 또는 Codex CLI를 그때 시작하고, 응답 형식을 확인해
-결과를 기록합니다.
+또는 백그라운드 network service를 실행하지 않습니다. Formal round마다 별도로
+설치하고 인증한 Claude Code 또는 Codex CLI를 시작하고, 응답 형식을 확인해
+결과를 기록한 뒤 reviewer process를 종료합니다.
 
 Reviewer CLI는 provider network를 사용하고 model token을 소비할 수 있습니다.
 “로컬 기록”은 acRelay의 review 이력이 로컬에 남는다는 뜻이지 reviewer model이
@@ -78,7 +102,9 @@ Reviewer CLI는 provider network를 사용하고 model token을 소비할 수 �
 있습니다. Codex나 Claude Code 중 하나만 사용하더라도 같은 도구의 별도 CLI
 session을 reviewer로 둘 수 있지만, driver와 reviewer가 같은 맹점을 공유할 수
 있습니다. 이 preview는 CLI reviewer를 사용하며, driver 도구가 만든 내장
-subagent 결과를 직접 받지는 않습니다.
+subagent 결과를 직접 받지는 않습니다. 완료된 same-vendor live evidence는 Claude
+Code host와 별도 Claude Code reviewer session 조합이며, Codex host의 same-vendor
+경로는 아직 unverified입니다.
 
 [![Driver, 사용자 컴퓨터의 기록, owner와 reviewer service 사이에서 acRelay가 review를 전달하는 방식](./docs/assets/acrelay-architecture-trust.ko@2x.png)](./docs/assets/acrelay-architecture-trust.ko.svg)
 

@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1350" width="1080" height="1350" role="img" style="font-family:Pretendard,'Apple SD Gothic Neo','Malgun Gothic','Noto Sans KR',sans-serif">
+<title>acRelay v0.1.0-alpha.2 — 다른 agent의 리뷰를, 복붙 없이</title>
+<desc>acRelay는 reviewer CLI를 자동으로 띄워 리뷰를 중계하고, 라운드를 1~5회(기본 3) 돌린 뒤 사용자에게 최종 판단을 넘긴다. 리뷰 대상은 단일 파일, 명시적 파일 목록 또는 선언된 subtree이며, agent를 하나만 쓰는 경우 같은 vendor의 별도 reviewer session으로 self red-team이 가능하다. 검증 범위는 macOS Apple Silicon, 바이너리는 unsigned, 현재 Experimental·Validation pending 단계다.</desc>
+
+<style>
+  svg{ --bg:#FFFFFF; --ink:#1F2733; --muted:#5B6675; --hair:#D6E0EC; --primary:#1F6FB2;
+    --relay-fill:#E3EEF8; --relay-line:#1F6FB2; --relay-ink:#124267;
+    --agent-fill:#ECEBFB; --agent-line:#534AB7; --agent-ink:#3C3489;
+    --gate-fill:#E7F5EF;  --gate-line:#0F7A5F;  --gate-ink:#085041;
+    --data-fill:#F1F1EE;  --data-line:#7A8398;  --data-ink:#3F4453;
+    --panel:#F4F8FC; --card:#FFFFFF; }
+  .on-accent{ fill:#FFFFFF }
+</style>
+
+<defs>
+  <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+    <feDropShadow dx="0" dy="2" stdDeviation="2.5" flood-color="#1F2733" flood-opacity="0.10"/>
+  </filter>
+
+  <symbol id="ic-loop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12a7.5 7.5 0 0 1 12.8-5.3L20 9"/><path d="M20 3.5V9h-5.5"/><path d="M19.5 12a7.5 7.5 0 0 1-12.8 5.3L4 15"/><path d="M4 20.5V15h5.5"/></symbol>
+  <symbol id="ic-range" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8h17M3.5 16h17"/><circle cx="9" cy="8" r="2.6"/><circle cx="15" cy="16" r="2.6"/></symbol>
+  <symbol id="ic-owner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M3 20c0-3.3 2.7-6 6-6h1.5"/><path d="M13.5 17l2.5 2.5L20.5 15"/></symbol>
+  <symbol id="ic-doc" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/><path d="M9 13h6M9 16.5h6M9 9.5h2"/></symbol>
+  <symbol id="ic-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/><path d="M9 12l2 2 4-4"/></symbol>
+</defs>
+
+<rect width="1080" height="1350" fill="var(--bg)"/>
+
+<!-- ============ header ============ -->
+<rect x="48" y="64" width="6" height="56" rx="3" fill="var(--primary)"/>
+<text x="70" y="92" font-size="46" font-weight="700" fill="var(--ink)" dominant-baseline="central">다른 agent의 리뷰를, 복붙 없이</text>
+<text x="70" y="138" font-size="20" fill="var(--muted)" dominant-baseline="central">Public Validation Preview · Experimental · Validation pending</text>
+
+<!-- ============ band 1 — 무엇을 하나 ============ -->
+<rect x="48" y="196" width="984" height="580" rx="20" fill="var(--panel)" stroke="var(--hair)"/>
+<rect x="76" y="176" width="185" height="40" rx="20" fill="var(--primary)"/>
+<text x="168" y="196" font-size="20" font-weight="600" text-anchor="middle" dominant-baseline="central" class="on-accent">① 무엇을 하나</text>
+
+<!-- card 1 : 자동 relay -->
+<rect x="88" y="252" width="436" height="216" rx="14" fill="var(--card)" stroke="var(--relay-line)" stroke-width="2.5" filter="url(#soft)"/>
+<circle cx="306" cy="314" r="38" fill="var(--relay-fill)"/>
+<use href="#ic-loop" x="286" y="294" width="40" height="40" style="color:#1F6FB2"/>
+<text x="306" y="382" font-size="25" font-weight="700" text-anchor="middle" dominant-baseline="central" fill="var(--relay-ink)">자동 relay</text>
+<text x="306" y="418" font-size="19" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">reviewer CLI를 자동으로 띄우고</text>
+<text x="306" y="444" font-size="19" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">라운드가 끝나면 종료합니다</text>
+
+<!-- card 2 : 라운드 -->
+<rect x="556" y="252" width="436" height="216" rx="14" fill="var(--card)" stroke="var(--agent-line)" stroke-width="1.5" filter="url(#soft)"/>
+<circle cx="774" cy="314" r="38" fill="var(--agent-fill)"/>
+<use href="#ic-range" x="754" y="294" width="40" height="40" style="color:#534AB7"/>
+<text x="774" y="382" font-size="25" font-weight="700" text-anchor="middle" dominant-baseline="central" fill="var(--agent-ink)">라운드 1~5</text>
+<text x="774" y="418" font-size="19" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">첫 review에서 고르고</text>
+<text x="774" y="444" font-size="19" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">생략하면 기본 3입니다</text>
+
+<!-- card 3 : owner -->
+<rect x="88" y="498" width="436" height="216" rx="14" fill="var(--card)" stroke="var(--gate-line)" stroke-width="2.5" filter="url(#soft)"/>
+<circle cx="306" cy="560" r="38" fill="var(--gate-fill)"/>
+<use href="#ic-owner" x="286" y="540" width="40" height="40" style="color:#0F7A5F"/>
+<text x="306" y="628" font-size="25" font-weight="700" text-anchor="middle" dominant-baseline="central" fill="var(--gate-ink)">최종 판단은 사용자</text>
+<text x="306" y="664" font-size="19" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">선택한 라운드에 도달하면</text>
+<text x="306" y="690" font-size="19" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">멈추고 사용자에게 넘깁니다</text>
+
+<!-- card 4 : 리뷰 대상 -->
+<rect x="556" y="498" width="436" height="216" rx="14" fill="var(--card)" stroke="var(--data-line)" stroke-width="1.5" filter="url(#soft)"/>
+<circle cx="774" cy="560" r="38" fill="var(--data-fill)"/>
+<use href="#ic-doc" x="754" y="540" width="40" height="40" style="color:#7A8398"/>
+<text x="774" y="628" font-size="25" font-weight="700" text-anchor="middle" dominant-baseline="central" fill="var(--data-ink)">리뷰 대상</text>
+<text x="774" y="664" font-size="19" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">파일 · 명시적 파일 목록</text>
+<text x="774" y="690" font-size="19" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">또는 선언된 subtree</text>
+
+<!-- ============ band 2 — 단일 agent 경로 ============ -->
+<rect x="48" y="816" width="984" height="268" rx="20" fill="var(--panel)" stroke="var(--hair)"/>
+<rect x="76" y="796" width="215" height="40" rx="20" fill="var(--agent-line)"/>
+<text x="183" y="816" font-size="20" font-weight="600" text-anchor="middle" dominant-baseline="central" class="on-accent">② 단일 agent 경로</text>
+
+<rect x="88" y="868" width="904" height="112" rx="14" fill="var(--card)" stroke="var(--agent-line)" stroke-width="2.5" filter="url(#soft)"/>
+<circle cx="164" cy="924" r="38" fill="var(--agent-fill)"/>
+<use href="#ic-shield" x="144" y="904" width="40" height="40" style="color:#534AB7"/>
+<text x="228" y="910" font-size="25" font-weight="700" fill="var(--agent-ink)" dominant-baseline="central">agent를 하나만 쓴다면</text>
+<text x="228" y="939" font-size="19" fill="var(--muted)" dominant-baseline="central">같은 vendor의 별도 reviewer session으로 self red-team</text>
+
+<text x="88" y="1006" font-size="16" fill="var(--muted)" dominant-baseline="central">같은 모델끼리는 blind spot이 겹칠 수 있어 briefing에 caution으로 표시됩니다.</text>
+<text x="88" y="1030" font-size="16" fill="var(--muted)" dominant-baseline="central">Live evidence: Claude host · Codex host same-vendor 경로는 아직 unverified</text>
+<text x="88" y="1054" font-size="16" fill="var(--muted)" dominant-baseline="central">host 자체 subagent를 reviewer로 부르는 방식은 이번 preview에서 지원하지 않습니다.</text>
+
+<!-- ============ footer — 검증 범위 ============ -->
+<rect x="51" y="1120" width="296" height="104" rx="14" fill="var(--card)" stroke="var(--hair)" filter="url(#soft)"/>
+<text x="204" y="1156" font-size="16" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">검증 범위</text>
+<text x="204" y="1186" font-size="19" font-weight="700" text-anchor="middle" dominant-baseline="central" fill="var(--ink)">macOS Apple Silicon</text>
+
+<rect x="392" y="1120" width="296" height="104" rx="14" fill="var(--card)" stroke="var(--hair)" filter="url(#soft)"/>
+<text x="540" y="1156" font-size="16" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">바이너리</text>
+<text x="540" y="1186" font-size="19" font-weight="700" text-anchor="middle" dominant-baseline="central" fill="var(--ink)">unsigned · not notarized</text>
+
+<rect x="733" y="1120" width="296" height="104" rx="14" fill="var(--card)" stroke="var(--hair)" filter="url(#soft)"/>
+<text x="876" y="1156" font-size="16" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">현재 단계</text>
+<text x="876" y="1186" font-size="19" font-weight="700" text-anchor="middle" dominant-baseline="central" fill="var(--ink)">Validation pending</text>
+
+<text x="540" y="1280" font-size="17" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">github.com/kyungseo/acrelay</text>
+</svg>
