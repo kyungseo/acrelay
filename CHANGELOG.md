@@ -6,6 +6,20 @@ This file records changes that matter to acRelay users. The project is in
 Alpha, so commands and file formats may change between prereleases. Once a tag
 is published, however, it is never reused or rewritten.
 
+## v0.1.0-alpha.3 — Runtime Compatibility And Calmer Skill UX
+
+- Admit Claude Code `2.1.217+` and Codex CLI `0.144.1+` on the verified
+  `darwin/arm64` platform when their required restricted command options remain
+  available.
+- Check handle-store compatibility before reviewer execution. A fresh session
+  preserves a v1 store as a private backup and starts v2; an unsafe v1 resume
+  stops with explicit reset guidance.
+- Accept an exact final line ending when a reviewer quotes a range that reaches
+  the end of a text file, avoiding a false `excerpt-mismatch`.
+- Make the official Skill quiet by default: infer safe defaults, consolidate
+  owner questions, hide protocol diagnostics, and forbid improvised raw CLI
+  recovery.
+
 ## v0.1.0-alpha.2 — First Public Validation Preview
 
 This release is **Experimental** and broader validation is still

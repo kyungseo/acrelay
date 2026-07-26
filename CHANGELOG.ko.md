@@ -6,6 +6,18 @@
 단계이므로 prerelease 사이에 command와 file format이 달라질 수 있습니다.
 하지만 한 번 게시한 tag는 재사용하거나 rewrite하지 않습니다.
 
+## v0.1.0-alpha.3 — Runtime 호환성과 간결한 Skill UX
+
+- 검증된 `darwin/arm64`에서 제한 실행에 필요한 option이 유지되는 경우 Claude
+  Code `2.1.217+`와 Codex CLI `0.144.1+`를 허용합니다.
+- Reviewer 실행 전에 handle store 호환성을 확인합니다. 새 session은 v1 store를
+  private backup으로 보존하고 v2를 시작하며, 안전하게 이어갈 수 없는 v1
+  resume은 explicit reset 안내와 함께 중단합니다.
+- Text file 끝까지 인용한 reviewer가 마지막 line ending을 포함해도 exact
+  evidence로 인정해 잘못된 `excerpt-mismatch`를 막습니다.
+- 공식 Skill이 안전한 기본값을 추론하고 owner 질문을 합치며 protocol 진단을
+  숨기도록 대화 UX를 줄였습니다. 임의 raw CLI 복구도 금지합니다.
+
 ## v0.1.0-alpha.2 — 첫 Public Validation Preview
 
 이번 release는 **Experimental** 단계이며 더 넓은 환경의 검증은 **Validation

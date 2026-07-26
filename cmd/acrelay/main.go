@@ -300,7 +300,6 @@ published paths. Raw canonical sharing is unsupported; redacted export is not pr
 		if err != nil {
 			fail(err) // the "failed"/"unknown" progress line was already emitted
 		}
-		fmt.Fprintf(os.Stderr, "progress: terminal session_ref=%s\n", st.SessionRef)
 		last := st.Rounds[len(st.Rounds)-1]
 		fmt.Printf("round R%d: outcome=%s verdict=%s governance=%s\n", last.Index, outcome, last.Verdict, st.Governance)
 		for _, f := range st.Findings {

@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,7 +35,9 @@ const (
 )
 
 // Capability is the adapter contract and its known-good regression reference.
-// KnownGoodCLIVersion is evidence, never an admission allowlist (DR-811 §7).
+// KnownGoodCLIVersion is also the minimum supported version. Newer observable
+// versions are admitted only when the required restricted command surface is
+// still present (DR-811 §7).
 type Capability struct {
 	Vendor              string
 	ContractVersion     string
@@ -170,37 +173,91 @@ func (p TrustPolicy) Validate() error {
 	return nil
 }
 
-// PreflightVersion enforces version observability only. Compatibility is
-// established by the actual command and post-start validators, not equality
-// with the known-good regression version.
+// PreflightVersion enforces an observable numeric version at or above the
+// adapter's tested compatibility floor. Newer versions are admitted here and
+// must still pass the required capability probe before dispatch.
 func PreflightVersion(cap Capability, observed string) error {
 	if strings.TrimSpace(observed) == "" {
 		return fmt.Errorf("%s CLI version unobservable: fail-closed", cap.Vendor)
 	}
+	cmp, err := compareNumericVersions(observed, cap.KnownGoodCLIVersion)
+	if err != nil {
+		return fmt.Errorf("%s CLI version %q is not comparable with supported minimum %s: fail-closed: %w",
+			cap.Vendor, observed, cap.KnownGoodCLIVersion, err)
+	}
+	if cmp < 0 {
+		return fmt.Errorf("%s CLI %s is below supported minimum %s: update the CLI before review",
+			cap.Vendor, observed, cap.KnownGoodCLIVersion)
+	}
 	return nil
+}
+
+func compareNumericVersions(left, right string) (int, error) {
+	parse := func(raw string) ([]int, error) {
+		raw = strings.TrimPrefix(strings.TrimSpace(raw), "v")
+		parts := strings.Split(raw, ".")
+		if len(parts) < 2 {
+			return nil, fmt.Errorf("expected dot-separated numeric components")
+		}
+		out := make([]int, len(parts))
+		for i, part := range parts {
+			if part == "" {
+				return nil, fmt.Errorf("empty component")
+			}
+			n, err := strconv.Atoi(part)
+			if err != nil || n < 0 {
+				return nil, fmt.Errorf("component %q is not a non-negative integer", part)
+			}
+			out[i] = n
+		}
+		return out, nil
+	}
+	a, err := parse(left)
+	if err != nil {
+		return 0, err
+	}
+	b, err := parse(right)
+	if err != nil {
+		return 0, err
+	}
+	width := len(a)
+	if len(b) > width {
+		width = len(b)
+	}
+	for i := 0; i < width; i++ {
+		var av, bv int
+		if i < len(a) {
+			av = a[i]
+		}
+		if i < len(b) {
+			bv = b[i]
+		}
+		switch {
+		case av < bv:
+			return -1, nil
+		case av > bv:
+			return 1, nil
+		}
+	}
+	return 0, nil
 }
 
 var extraRestrictionPlatforms []string // test-only; see verifyRestrictionEvidenceFor
 
 // VerifyRestrictionEvidence binds security-critical restriction semantics to
-// the exact CLI version AND the exact GOOS/GOARCH exercised by the positive
-// behavioral spike (FEAT-20260722-002 R0-CX-F1): evidence observed on one
-// platform is never promoted to another. Version or platform drift is an
-// owner gate; there is no unrestricted fallback.
+// the supported version floor and the exact GOOS/GOARCH exercised by the
+// positive behavioral spike. Newer versions must separately pass the required
+// capability probe; evidence observed on one platform is never promoted to
+// another.
 func VerifyRestrictionEvidence(cap Capability, observed string) error {
 	return verifyRestrictionEvidenceFor(cap, observed, runtime.GOOS, runtime.GOARCH)
 }
 
-// verifyRestrictionEvidenceFor is the pure evidence-key check
-// (vendor + CLI version + GOOS + GOARCH), split out so platform-mismatch
-// paths are unit-testable on any host.
+// verifyRestrictionEvidenceFor is the pure version-floor + platform check,
+// split out so platform-mismatch paths are unit-testable on any host.
 func verifyRestrictionEvidenceFor(cap Capability, observed, goos, goarch string) error {
 	if err := PreflightVersion(cap, observed); err != nil {
 		return err
-	}
-	if observed != cap.KnownGoodCLIVersion {
-		return fmt.Errorf("%s CLI %s has no verified restriction evidence (verified %s): owner gate required, unrestricted fallback forbidden",
-			cap.Vendor, observed, cap.KnownGoodCLIVersion)
 	}
 	host := goos + "/" + goarch
 	for _, p := range cap.KnownGoodPlatforms {
@@ -277,9 +334,9 @@ func assessHelpProbe(output string, truncated bool, runErr error, required ...st
 		}
 	}
 	if runErr == nil && !truncated && len(missing) == 0 {
-		return ProbeObserved, "required help tokens observed (advisory only)"
+		return ProbeObserved, "required restricted command surface observed"
 	}
-	parts := []string{"advisory help probe inconclusive"}
+	parts := []string{"required capability probe failed"}
 	if runErr != nil {
 		parts = append(parts, "command error="+runErr.Error())
 	}

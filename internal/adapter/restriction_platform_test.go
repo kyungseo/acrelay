@@ -10,9 +10,8 @@ import (
 	"testing"
 )
 
-// FEAT-20260722-002 R0-CX-F1: restriction evidence is bound to
-// vendor+version+GOOS+GOARCH. Evidence from one platform never admits
-// another platform's real vendor dispatch.
+// Restriction evidence is platform-bound, while supported CLI versions use a
+// minimum floor and must pass their required capability probe in Prepare.
 func TestRestrictionEvidenceIsPlatformBound(t *testing.T) {
 	cap := ClaudeAdapter{}.Capability()
 	if err := verifyRestrictionEvidenceFor(cap, cap.KnownGoodCLIVersion, "darwin", "arm64"); err != nil {
@@ -27,9 +26,11 @@ func TestRestrictionEvidenceIsPlatformBound(t *testing.T) {
 			t.Fatalf("diagnostic must forbid fallback: %v", err)
 		}
 	}
-	// Version mismatch stays fail-closed independent of platform.
-	if err := verifyRestrictionEvidenceFor(cap, "9.9.9", "darwin", "arm64"); err == nil {
-		t.Fatal("version drift must fail closed")
+	if err := verifyRestrictionEvidenceFor(cap, "2.1.220", "darwin", "arm64"); err != nil {
+		t.Fatalf("newer version must pass the floor on a verified platform: %v", err)
+	}
+	if err := verifyRestrictionEvidenceFor(cap, "2.1.216", "darwin", "arm64"); err == nil {
+		t.Fatal("version below the supported floor must fail closed")
 	}
 	codex := CodexAdapter{}.Capability()
 	if err := verifyRestrictionEvidenceFor(codex, codex.KnownGoodCLIVersion, "windows", "amd64"); err == nil {

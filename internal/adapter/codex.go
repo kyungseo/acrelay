@@ -108,7 +108,7 @@ func detectCodexVersion(ctx context.Context) (string, string, error) {
 func probeCodexCapabilities(ctx context.Context) (string, string) {
 	execOut, execTruncated, execErr := runBoundedProbe(ctx, 15*time.Second, "codex", "exec", "--help")
 	execState, execDiag := assessHelpProbe(execOut, execTruncated, execErr,
-		"--json", "--output-schema", "--ignore-user-config", "--ignore-rules", "--strict-config", "--sandbox")
+		"--json", "--output-schema", "--ignore-user-config", "--ignore-rules", "--strict-config", "--sandbox", "--skip-git-repo-check")
 	resumeOut, resumeTruncated, resumeErr := runBoundedProbe(ctx, 15*time.Second, "codex", "exec", "resume", "--help")
 	resumeState, resumeDiag := assessHelpProbe(resumeOut, resumeTruncated, resumeErr, "resume")
 	return combineProbeResults([]string{execState, resumeState}, []string{execDiag, resumeDiag})
@@ -218,6 +218,15 @@ func (a CodexAdapter) Prepare(ctx context.Context, req Request, handles *HandleS
 		return nil, err
 	}
 	probeState, probeDiagnostic := probeCodexCapabilities(ctx)
+	if probeState != ProbeObserved {
+		return nil, fmt.Errorf("codex CLI %s does not expose the required restricted command surface: %s; review not started",
+			observed, probeDiagnostic)
+	}
+	storeDiagnostic, err := handles.PrepareForDispatch(req.ResumeRef)
+	if err != nil {
+		return nil, err
+	}
+	probeDiagnostic = joinDiagnostics(probeDiagnostic, storeDiagnostic)
 	modelObservation := observeCodexModel(ctx, req.Model)
 	resumeHandle := ""
 	resumeWorkingDir := ""

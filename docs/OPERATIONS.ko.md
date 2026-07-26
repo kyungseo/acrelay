@@ -2,7 +2,7 @@
 
 [English](./OPERATIONS.md) · **한국어**
 
-이 문서는 `v0.1.0-alpha.2` **Public Validation Preview**의 설치, update, 제거와
+이 문서는 `v0.1.0-alpha.3` **Public Validation Preview**의 설치, update, 제거와
 복구 방법을 설명합니다. 아직 **Experimental** 단계이며, 더 넓은 환경의 검증은
 **Validation pending**입니다.
 
@@ -31,10 +31,10 @@ pending이며 일반적인 `Supported` 상태를 주장하지 않습니다.
 ## 한 줄 installer
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.2/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.3/scripts/install.sh | bash
 ```
 
-Script는 `v0.1.0-alpha.2`에 고정돼 있고, 내려받은 binary archive를 실행하기 전에
+Script는 `v0.1.0-alpha.3`에 고정돼 있고, 내려받은 binary archive를 실행하기 전에
 release checksum과 대조합니다. Script를 `bash`로 바로 보내면 installer 자체를
 실행 전에 읽을 수는 없습니다. 이 차이가 중요하면 아래의 tag 고정·사전 확인
 경로를 사용하세요.
@@ -44,24 +44,24 @@ release checksum과 대조합니다. Script를 `bash`로 바로 보내면 instal
 정확한 release tag에서 script를 내려받아 내용을 확인한 뒤 실행합니다.
 
 ```sh
-curl -fLO https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.2/scripts/install.sh
+curl -fLO https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.3/scripts/install.sh
 less install.sh
 bash install.sh
 ```
 
-Script가 설치할 version은 `v0.1.0-alpha.2`로 고정되어 있습니다. `latest`를
+Script가 설치할 version은 `v0.1.0-alpha.3`로 고정되어 있습니다. `latest`를
 조회하거나 임의의 version을 입력받지 않습니다. 다음 파일을 내려받습니다.
 
 ```text
-acrelay_0.1.0-alpha.2_darwin_arm64.tar.gz
-acrelay_0.1.0-alpha.2_checksums.txt
+acrelay_0.1.0-alpha.3_darwin_arm64.tar.gz
+acrelay_0.1.0-alpha.3_checksums.txt
 ```
 
 Archive의 SHA-256 값이 공개된 checksum 항목과 정확히 일치하는지 확인한 뒤에만
 압축을 풀고 binary를 실행합니다. Archive에는 최상위 directory 하나가 있습니다.
 
 ```text
-acrelay_0.1.0-alpha.2_darwin_arm64/
+acrelay_0.1.0-alpha.3_darwin_arm64/
 ├── acrelay
 ├── LICENSE
 └── README.md
@@ -91,7 +91,7 @@ Installer가 semantic version을 비교해 어느 쪽이 최신인지 판단하�
 ## 고정 version으로 Go install
 
 ```sh
-go install github.com/kyungseo/acrelay/cmd/acrelay@v0.1.0-alpha.2
+go install github.com/kyungseo/acrelay/cmd/acrelay@v0.1.0-alpha.3
 ```
 
 Module의 `go` directive에 필요한 toolchain version이 선언되어 있습니다. Go의
@@ -103,8 +103,9 @@ automatic toolchain selection이 켜져 있으면 `go` command가 해당 toolcha
 확인하며 GitHub Release archive는 사용하지 않습니다.
 
 다른 platform에서 build에 성공했다는 사실만으로 그 platform의 Claude Code 또는
-Codex reviewer 경로가 활성화되지는 않습니다. Dispatch 전에는 계속
-`vendor + version + GOOS + GOARCH` 조합의 기록된 근거가 필요합니다.
+Codex reviewer 경로가 활성화되지는 않습니다. Platform 근거는 계속
+GOOS/GOARCH별로 분리합니다. 검증된 platform에서도 reviewer CLI는 문서화한 최소
+version 이상이어야 하며, 제한 실행에 필요한 option을 모두 노출해야 합니다.
 
 ## 설치 확인
 
@@ -116,14 +117,14 @@ acrelay version --short
 이번 release의 short output은 다음과 같아야 합니다.
 
 ```text
-v0.1.0-alpha.2
+v0.1.0-alpha.3
 ```
 
 Release file이 어떤 source와 환경에서 만들어졌는지 확인할 수 있도록 다음 파일도
 게시합니다.
 
 ```text
-acrelay_0.1.0-alpha.2_provenance.json
+acrelay_0.1.0-alpha.3_provenance.json
 ```
 
 이 파일에는 source commit, build 환경, Go version, target `GOOS/GOARCH`, CGO
@@ -188,7 +189,7 @@ Raw canonical record는 owner가 계속 보관합니다. acRelay는 reviewer ven
 
 Maintainer용 release workflow는 다음 순서를 따릅니다.
 
-1. Exact approved tag `v0.1.0-alpha.2`을 요구합니다.
+1. Exact approved tag `v0.1.0-alpha.3`을 요구합니다.
 2. Tag가 checkout commit을 가리키는지 확인합니다.
 3. `darwin/arm64` builder와 정확한 Go toolchain을 확인합니다.
 4. Deterministic/race test, vet, build와 module verification을 실행합니다.

@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -70,6 +71,7 @@ type handleEntry struct {
 }
 
 const handleFileVersion = 2
+const legacyHandleFileVersion = 1
 
 const neutralRuntimeDir = "runtime"
 
@@ -161,6 +163,80 @@ func (h *HandleStore) load() (*handleFile, error) {
 		f.Entries = map[string]handleEntry{}
 	}
 	return &f, nil
+}
+
+// PrepareForDispatch validates the private handle store before reviewer
+// execution. A v1 store cannot preserve resume safety because its entries did
+// not bind a trust profile or working directory. For a fresh reviewer session,
+// acRelay therefore preserves the exact v1 bytes in a private backup and
+// starts an empty v2 store. A resume attempt fails closed and asks for an
+// explicit session reset instead of silently discarding continuity.
+func (h *HandleStore) PrepareForDispatch(resumeRef string) (string, error) {
+	diagnostic := ""
+	err := h.withExclusiveLock(func() error {
+		b, err := os.ReadFile(h.Path)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if err := platform.VerifyPrivateFile(h.Path); err != nil {
+			return fmt.Errorf("handle store %s %v: fail-closed", h.Path, err)
+		}
+		var header struct {
+			Version int `json:"version"`
+		}
+		if err := json.Unmarshal(b, &header); err != nil {
+			return fmt.Errorf("handle store corrupt (%s): fail-closed, refusing to overwrite: %w", h.Path, err)
+		}
+		switch header.Version {
+		case handleFileVersion:
+			_, err := h.load()
+			return err
+		case legacyHandleFileVersion:
+			var legacy struct {
+				Version int `json:"version"`
+				Entries map[string]struct {
+					Vendor string `json:"vendor"`
+					Handle string `json:"handle"`
+				} `json:"entries"`
+			}
+			if err := json.Unmarshal(b, &legacy); err != nil {
+				return fmt.Errorf("legacy handle store corrupt (%s): fail-closed: %w", h.Path, err)
+			}
+			for ref, entry := range legacy.Entries {
+				if strings.TrimSpace(ref) == "" || strings.TrimSpace(entry.Vendor) == "" || strings.TrimSpace(entry.Handle) == "" {
+					return fmt.Errorf("legacy handle store contains an incomplete entry: fail-closed")
+				}
+			}
+			if strings.TrimSpace(resumeRef) != "" {
+				return fmt.Errorf("session_ref %s belongs to legacy handle store v1 and cannot be resumed safely: use an explicit session reset; review not started",
+					resumeRef)
+			}
+			backup := h.Path + ".v1.backup"
+			if existing, readErr := os.ReadFile(backup); readErr == nil {
+				if err := platform.VerifyPrivateFile(backup); err != nil {
+					return fmt.Errorf("legacy handle backup %s %v: fail-closed", backup, err)
+				}
+				if !bytes.Equal(existing, b) {
+					return fmt.Errorf("legacy handle backup %s already exists with different content: fail-closed", backup)
+				}
+			} else if !os.IsNotExist(readErr) {
+				return readErr
+			} else if _, err := store.WritePrivateAtomic(backup, b); err != nil {
+				return fmt.Errorf("preserve legacy handle backup: %w", err)
+			}
+			if _, err := store.WritePrivateAtomic(h.Path, []byte("{\n \"version\": 2,\n \"entries\": {}\n}")); err != nil {
+				return fmt.Errorf("initialize handle store v2 after backup: %w", err)
+			}
+			diagnostic = fmt.Sprintf("legacy handle store v1 preserved at %s; fresh v2 store initialized", backup)
+			return nil
+		default:
+			return fmt.Errorf("handle store version %d unsupported (want %d): fail-closed", header.Version, handleFileVersion)
+		}
+	})
+	return diagnostic, err
 }
 
 func (h *HandleStore) save(f *handleFile) error {

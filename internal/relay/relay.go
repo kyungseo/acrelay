@@ -44,7 +44,7 @@ const reviewEvidenceSchema = `{"type":"object","properties":{"id":{"type":"strin
 func reviewerEvidenceProtocol() string {
 	return fmt.Sprintf(`Evidence output protocol (mandatory; the relay validates this after schema validation):
 - Give every examined[] item a short unique local id such as E1 or E2.
-- For a UTF-8 text member, use location.kind "text-lines" only. Set start and end to the exact examined line range, and copy the complete text from every line in that range into excerpt joined by newline. Do not abbreviate, summarize, omit lines, or use ellipses.
+- For a UTF-8 text member, use location.kind "text-lines" only. Set start and end to the exact examined line range, and copy the complete text from every line in that range into excerpt joined by newline. A single final line ending may be included only when the range reaches the end of a file that has that line ending. Do not abbreviate, summarize, omit lines, or use ellipses.
 - Keep each text excerpt within %d lines and %d bytes. Use multiple examined[] items when needed.
 - Use location.kind "opaque" only for a binary or otherwise non-text member, and set excerpt to the exact empty string.
 - Use location.kind "empty-member" only for a zero-byte member, and set excerpt to the exact empty string.
@@ -893,7 +893,9 @@ func normalizeEvidenceInputs(inputs []review.EvidenceInput, st *State, roundInde
 				continue
 			}
 			expected := strings.Join(lines[input.Location.Start-1:input.Location.End], "\n")
-			if input.Excerpt == expected {
+			terminalLFMatch := strings.HasSuffix(string(raw), "\n") &&
+				input.Location.End == len(lines)-1 && input.Excerpt == expected+"\n"
+			if input.Excerpt == expected || terminalLFMatch {
 				anchor.Assurance = review.AssuranceContentMatch
 			} else {
 				normalizedMatch := false

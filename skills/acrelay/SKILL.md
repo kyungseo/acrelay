@@ -2,190 +2,158 @@
 name: acrelay
 description: >
   Start, continue, inspect, or close a tracked code or artifact review through
-  an installed acRelay v0.1.0-alpha.2 command, using Claude Code or Codex as the
-  reviewer. Keep the review record private, leave approvals and Close with the
-  owner, and stop when the command is missing or incompatible.
+  an installed acRelay command, using Claude Code or Codex as the reviewer.
+  Keep the review record private, leave approvals and Close with the owner,
+  and stop when the command is missing or incompatible.
 ---
 
 # acRelay
 
-Use the local acRelay command as the single authority for review state,
-evidence, reviewer runs, recovery, and closure. This Skill translates a user’s
-request into acRelay operations; do not recreate the acRelay state machine in
-prose or host memory.
+Use the installed `acrelay` command as the authority for review state,
+reviewer execution, recovery, and closure. Keep the normal conversation
+focused on the user's work, not on acRelay's protocol.
 
-## Terms To Explain In Plain Language
+## Conversation Contract
 
-When these terms first matter to the user, explain them instead of presenting
-them as unexplained protocol vocabulary:
+Default to a quiet, progressive-disclosure experience.
 
-- **objective:** one tracked review from `init` until the owner closes or
-  terminates it
-- **canonical record:** the private Markdown file that contains the official
-  review history
-- **session reference (`ref`):** the identifier acRelay uses to resume or clean
-  up one specific reviewer session
-- **vendor egress:** review files, resolved paths, and metadata sent to the
-  selected Claude Code or Codex reviewer
-- **disposition:** the driver’s response to a finding—accept, revise, defend,
-  or ask the owner—plus the reason
-- **briefing:** a read-only summary of whether the review appears ready to close
-- **fail closed:** stop without silently changing the review or bypassing
-  acRelay
+- Ask only for information that cannot be inferred safely.
+- Do not narrate command discovery, version probes, temporary files, objective
+  IDs, session references, topology labels, provenance, or canonical paths.
+- Do not print command output unless the user asks for diagnostics.
+- Do not summarize the review subject again merely because dispatch failed.
+- Translate failures into plain language: what happened, whether a round was
+  consumed, and the one safe next action.
+- Explain protocol terms only when the user asks or must make a related
+  decision.
 
 ## Compatibility Gate
 
-This package is compatible only with:
+Before an acRelay operation, resolve `acrelay` from `PATH` and run
+`acrelay version --short` silently. Continue only with the engine version this
+Skill was packaged for: `v0.1.0-alpha.3`. If the command is missing or
+incompatible, stop with one short message containing the installed and
+required versions and the installation guide:
 
 ```text
-acRelay v0.1.0-alpha.2
+https://github.com/kyungseo/acrelay/blob/v0.1.0-alpha.3/docs/OPERATIONS.md
 ```
 
-Before any `init`, `review`, `confirm`, mutation, or Close:
+Never install or update automatically. Never fall back to a raw Claude Code or
+Codex invocation.
 
-1. Resolve `acrelay` from `PATH`.
-2. Run `acrelay version --short`.
-3. Continue only when the exact output is `v0.1.0-alpha.2`.
-
-If the command is missing, show the user the public installation guide:
-
-```text
-https://github.com/kyungseo/acrelay/blob/v0.1.0-alpha.2/docs/OPERATIONS.md
-```
-
-Do not install or update the binary automatically. If the version is different
-or unobservable, stop with the installed and required versions. Never fall
-back to raw reviewer invocation or a different workflow.
+Reviewer CLI patch updates are expected. Let the engine apply its supported
+minimum-version and required-capability checks; do not implement a second
+reviewer-version allowlist in the Skill.
 
 ## Establish The Review
 
-Before `init`, obtain or confirm:
+Infer these values from the request and current task:
 
-- the exact review subject: one file, explicit files, or a declared subtree,
-- the review question,
-- the private canonical path,
-- the declared owner/approval actor,
-- whether vendor egress is acknowledged,
-- reviewer vendor: `claude` or `codex`,
-- driver vendor and whether driver/reviewer context is separate or shared,
-- whether the formal-round bound should remain at the default 3 or use another
-  value from 1 through 5.
+- subject and review question,
+- reviewer vendor,
+- driver vendor and separate/shared context,
+- owner label,
+- formal-round bound.
 
-The canonical path must be private and outside shared, synced, or repository
-paths. Do not infer that a location is safe from the absence of a warning. Do
-not use `-allow-unsafe-location` unless the owner explicitly approves the exact
-detected location and supplies a reason.
+Use these defaults without asking:
 
-Explain that vendor egress may include subject content, absolute and resolved
-paths, and metadata. Local canonical storage does not mean local model
-inference.
+- owner label: `owner`,
+- round bound: 3,
+- private canonical: a collision-safe file below
+  `~/.acrelay/records/`,
+- external reviewer context: separate unless the user explicitly says
+  otherwise.
 
-If the user asks for a host-native subagent, explain that v0.1.0-alpha.2 cannot
-ingest a host-created subagent result. Offer a separate external Claude Code or
-Codex CLI reviewer only when its platform tuple is supported and the user
-accepts that topology. Never describe the external CLI session as a subagent.
+Ask about the round bound only when the user wants to change it. Ask for a
+canonical path only when the default private location cannot be used.
 
-## Start
+Vendor egress is the one ordinary first-use consent gate. If the user has not
+already acknowledged it in the current conversation, ask once:
 
-Prefer the shortest single-file form when it matches the user’s subject:
+> 리뷰 대상 내용과 경로 정보가 선택한 Claude Code 또는 Codex CLI로
+> 전달됩니다. 진행할까요?
 
-```sh
-acrelay init \
-  -canonical <private-canonical-path> \
-  -question <review-question> \
-  -target <subject-file> \
-  -approval-actor <owner> \
-  -ack-vendor-egress \
-  -execution-surface external-cli \
-  -driver-vendor <claude|codex|other> \
-  -context-relation <separate|shared>
-```
+Do not expand this into a checklist. Local record storage does not mean local
+model inference.
 
-For explicit files or a subtree, prepare a `subject-spec v0.1` JSON file and
-use `-target-spec`. Do not select the canonical, its lock, dispatch journals,
-or quarantine files as review members.
+If the user asks for a host-native subagent, explain briefly that this version
+uses a separate external CLI reviewer. Never describe that CLI process as a
+subagent.
 
-Then dispatch one round:
+## Start And Continue
 
-```sh
-acrelay review \
-  -canonical <private-canonical-path> \
-  -reviewer <claude|codex> \
-  -prompt-file <review-prompt-path>
-```
+Use `acrelay init` with the inferred/default values, then `acrelay review`.
+Prefer `-target` for one file and `-target-spec` only for explicit file sets or
+a subtree. Keep prompt/spec scratch files private and remove only host-created
+scratch files after use.
 
-Use `-round-bound` only when the user selected a non-default objective bound.
-The first successful preflight binds it immutably. Do not change it later.
+The default conversation needs at most one progress line:
 
-## Handle Results
+> 선택한 reviewer에게 검토를 맡겼습니다.
 
 After a valid round:
 
-1. Summarize the verdict and open findings without treating reviewer output as
-   owner authority.
-2. For every finding, ask the driver to choose `accept`, `revise`, `defend`, or
-   `needs-user` and record a non-empty rationale through `acrelay disposition`.
-3. Use the typed approval-request commands when a decision belongs to the
-   owner. Preserve the exact owner response; ambiguity remains unresolved.
-4. After the target changes, use `acrelay advance` with a factual delta note.
-5. Continue the same reviewer session unless an explicit, reasoned
-   `-session-reset` mode is required.
+1. Summarize the verdict and actionable findings.
+2. As driver, choose and record `accept`, `revise`, or `defend` with a factual
+   rationale when the disposition is within the task's approved scope.
+3. Use `needs-user` and the typed approval-request flow only for a real owner
+   decision. Ask one consolidated question, not one question per finding.
+4. After changing the subject, use `acrelay advance` with a factual delta.
+5. Continue the same reviewer session unless a documented, reasoned session
+   reset is necessary.
 
-Never describe `content-match`, `reviewer-declared`, or topology labels as
-proof of understanding, completeness, correctness, or independence.
+Reviewer approval is evidence, not owner authority. Never auto-apply a finding
+that changes product direction or exceeds the user's approved scope.
 
-## Failure And Reconciliation
+## Failure And Recovery
 
-- A preflight failure does not consume a round. Correct the stated cause and
-  retry only after the user agrees.
-- A pending journal blocks mutation. Use `acrelay reconcile`.
-- `UNKNOWN` means execution was ambiguous and must never be retried
-  automatically.
-- Use `abandon-transaction` only when normal reconciliation is impossible and
-  the owner or arbiter declares the exact transaction and reason.
-- Do not delete canonical, journal, quarantine, handle, cwd, or vendor state as
-  an improvised recovery step.
+Do not improvise recovery.
 
-## Briefing And Close
+- Do not run the reviewer CLI directly.
+- Do not create a Git repository to change reviewer trust behavior.
+- Do not supply a caller-selected neutral cwd.
+- Do not probe unrelated `--help` commands or guess approval payloads.
+- Do not delete or edit canonical, journal, handle, cwd, quarantine, or vendor
+  state.
 
-Use:
+For a preflight failure, no round was consumed. Correct a clearly mechanical,
+in-scope issue and retry once when the existing user request already
+authorizes the review. Otherwise stop and report the blocker.
 
-```sh
-acrelay briefing -canonical <private-canonical-path>
+A pending journal uses `acrelay reconcile`. `UNKNOWN` is never retried
+automatically. `abandon-transaction`, `terminate`, cleanup, and Close require
+the exact owner decision defined by the engine.
+
+Default failure response:
+
+```text
+리뷰를 시작하지 못했습니다. 라운드는 소모되지 않았습니다.
+원인: <plain-language cause>
+다음 조치: <one safe action>
 ```
 
-`briefing` is read-only. It is not approval and does not authorize Close.
+If a started attempt was consumed, say so accurately instead. Keep technical
+details available on request rather than printing them by default.
 
-Only the explicit Close command changes the objective to closed:
+## Briefing, Close, And Cleanup
 
-```sh
-acrelay close \
-  -canonical <private-canonical-path> \
-  -actor <owner> \
-  -role owner
-```
+`acrelay briefing` is read-only. It is not approval.
 
-Do not run Close unless the user acting as owner explicitly asks to close the
-exact objective after reviewing current readiness.
-
-## Cleanup Boundary
-
-Binary uninstall and private-state cleanup are separate. Never remove
-`~/.acrelay` automatically. Session cleanup must use the exact
-canonical/ref-scoped `acrelay cleanup` flow and requires an eligible terminal
-objective plus the owner’s continuity-abandon declaration. Raw canonicals and
-vendor-owned state remain outside automatic cleanup.
+Run `acrelay close` only when the user explicitly asks to close the exact
+objective after reviewing readiness. Binary uninstall, private-state cleanup,
+and objective closure are separate decisions. Never remove `~/.acrelay`
+automatically.
 
 ## User-Facing Completion
 
-Report:
+On success, report only:
 
-- canonical path without exposing it to public output,
-- reviewer vendor and declared topology boundary,
-- current objective/governance/readiness state,
-- open findings or approval requests,
-- whether dispatch was completed, failed, or `UNKNOWN`,
-- exactly what the owner must decide or run next.
+- reviewer verdict,
+- findings or changes that still need attention,
+- decisions that genuinely belong to the user,
+- whether another round is useful.
 
-Do not call a review complete merely because the reviewer approved it. Close is
-a separate owner action.
+On failure, use the three-line failure form above. Show canonical paths,
+session references, detailed governance state, provenance, or raw reviewer
+output only when the user explicitly requests diagnostics.

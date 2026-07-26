@@ -5,21 +5,21 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/acrelay-release-test.XXXXXX")
 trap 'rm -rf "$test_root"' EXIT
 
-version="v0.1.0-alpha.2"
+version="v0.1.0-alpha.3"
 dist="$test_root/dist"
 bin_dir="$test_root/bin"
 "$repo_root/scripts/package-release.sh" "$version" "$dist"
 
-archive="$dist/acrelay_0.1.0-alpha.2_darwin_arm64.tar.gz"
-provenance="$dist/acrelay_0.1.0-alpha.2_provenance.json"
-checksums="$dist/acrelay_0.1.0-alpha.2_checksums.txt"
+archive="$dist/acrelay_0.1.0-alpha.3_darwin_arm64.tar.gz"
+provenance="$dist/acrelay_0.1.0-alpha.3_provenance.json"
+checksums="$dist/acrelay_0.1.0-alpha.3_checksums.txt"
 for path in "$archive" "$provenance" "$checksums"; do
   [[ -f "$path" ]] || { echo "missing release output: $path" >&2; exit 1; }
 done
 
-tar -tzf "$archive" | grep -Fx "acrelay_0.1.0-alpha.2_darwin_arm64/acrelay" >/dev/null
-tar -tzf "$archive" | grep -Fx "acrelay_0.1.0-alpha.2_darwin_arm64/LICENSE" >/dev/null
-tar -tzf "$archive" | grep -Fx "acrelay_0.1.0-alpha.2_darwin_arm64/README.md" >/dev/null
+tar -tzf "$archive" | grep -Fx "acrelay_0.1.0-alpha.3_darwin_arm64/acrelay" >/dev/null
+tar -tzf "$archive" | grep -Fx "acrelay_0.1.0-alpha.3_darwin_arm64/LICENSE" >/dev/null
+tar -tzf "$archive" | grep -Fx "acrelay_0.1.0-alpha.3_darwin_arm64/README.md" >/dev/null
 
 base_url="file://$dist"
 ACRELAY_INSTALL_TESTING=1 \
