@@ -148,6 +148,7 @@ func TestReviewAccessProfilesAndResearchApproval(t *testing.T) {
 func TestCodexSkillDisableConfigCoversLegacyAndCurrentUserRoots(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	for _, skillPath := range []string{
 		filepath.Join(home, ".agents", "skills", "current", "SKILL.md"),
 		filepath.Join(home, ".codex", "skills", "legacy", "SKILL.md"),
