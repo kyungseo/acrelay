@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1350" width="1080" height="1350" role="img" style="font-family:Pretendard,'Apple SD Gothic Neo','Malgun Gothic','Noto Sans KR',sans-serif">
+<title>acRelay v0.1.0-alpha.2 — Cross-agent review, without the copy-paste loop</title>
+<desc>acRelay starts a reviewer CLI, relays the review, and returns the final decision to the user after 1–5 rounds, default 3. A review target can be one file, explicit files, or a declared subtree. A single-agent user can use a separate same-vendor reviewer session for self red-teaming. The validated scope is macOS Apple Silicon; the binary is unsigned and not notarized. This release is Experimental and Validation pending.</desc>
+
+<style>
+  svg{ --bg:#FFFFFF; --ink:#1F2733; --muted:#5B6675; --hair:#D6E0EC; --primary:#1F6FB2;
+    --relay-fill:#E3EEF8; --relay-line:#1F6FB2; --relay-ink:#124267;
+    --agent-fill:#ECEBFB; --agent-line:#534AB7; --agent-ink:#3C3489;
+    --gate-fill:#E7F5EF;  --gate-line:#0F7A5F;  --gate-ink:#085041;
+    --data-fill:#F1F1EE;  --data-line:#7A8398;  --data-ink:#3F4453;
+    --panel:#F4F8FC; --card:#FFFFFF; }
+  .on-accent{ fill:#FFFFFF }
+</style>
+
+<defs>
+  <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+    <feDropShadow dx="0" dy="2" stdDeviation="2.5" flood-color="#1F2733" flood-opacity="0.10"/>
+  </filter>
+
+  <symbol id="ic-loop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12a7.5 7.5 0 0 1 12.8-5.3L20 9"/><path d="M20 3.5V9h-5.5"/><path d="M19.5 12a7.5 7.5 0 0 1-12.8 5.3L4 15"/><path d="M4 20.5V15h5.5"/></symbol>
+  <symbol id="ic-range" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8h17M3.5 16h17"/><circle cx="9" cy="8" r="2.6"/><circle cx="15" cy="16" r="2.6"/></symbol>
+  <symbol id="ic-owner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M3 20c0-3.3 2.7-6 6-6h1.5"/><path d="M13.5 17l2.5 2.5L20.5 15"/></symbol>
+  <symbol id="ic-doc" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/><path d="M9 13h6M9 16.5h6M9 9.5h2"/></symbol>
+  <symbol id="ic-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/><path d="M9 12l2 2 4-4"/></symbol>
+</defs>
+
+<rect width="1080" height="1350" fill="var(--bg)"/>
+
+<!-- ============ header ============ -->
+<rect x="48" y="64" width="6" height="56" rx="3" fill="var(--primary)"/>
+<text x="70" y="92" font-size="42" font-weight="700" fill="var(--ink)" dominant-baseline="central">Cross-agent review, without the copy-paste loop</text>
+<text x="70" y="138" font-size="20" fill="var(--muted)" dominant-baseline="central">Public Validation Preview · Experimental · Validation pending</text>
+
+<!-- ============ band 1 — 무엇을 하나 ============ -->
+<rect x="48" y="196" width="984" height="580" rx="20" fill="var(--panel)" stroke="var(--hair)"/>
+<rect x="76" y="176" width="185" height="40" rx="20" fill="var(--primary)"/>
+<text x="168" y="196" font-size="20" font-weight="600" text-anchor="middle" dominant-baseline="central" class="on-accent">① What it does</text>
+
+<!-- card 1 : 자동 relay -->
+<rect x="88" y="252" width="436" height="216" rx="14" fill="var(--card)" stroke="var(--relay-line)" stroke-width="2.5" filter="url(#soft)"/>
+<circle cx="306" cy="314" r="38" fill="var(--relay-fill)"/>
+<use href="#ic-loop" x="286" y="294" width="40" height="40" style="color:#1F6FB2"/>
+<text x="306" y="382" font-size="25" font-weight="700" text-anchor="middle" dominant-baseline="central" fill="var(--relay-ink)">Automatic relay</text>
+<text x="306" y="418" font-size="19" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">Starts the reviewer CLI</text>
+<text x="306" y="444" font-size="19" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">and exits when the round ends</text>
+
+<!-- card 2 : 라운드 -->
+<rect x="556" y="252" width="436" height="216" rx="14" fill="var(--card)" stroke="var(--agent-line)" stroke-width="1.5" filter="url(#soft)"/>
+<circle cx="774" cy="314" r="38" fill="var(--agent-fill)"/>
+<use href="#ic-range" x="754" y="294" width="40" height="40" style="color:#534AB7"/>
+<text x="774" y="382" font-size="25" font-weight="700" text-anchor="middle" dominant-baseline="central" fill="var(--agent-ink)">1–5 rounds</text>
+<text x="774" y="418" font-size="19" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">Chosen on the first review</text>
+<text x="774" y="444" font-size="19" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">Default: 3</text>
+
+<!-- card 3 : owner -->
+<rect x="88" y="498" width="436" height="216" rx="14" fill="var(--card)" stroke="var(--gate-line)" stroke-width="2.5" filter="url(#soft)"/>
+<circle cx="306" cy="560" r="38" fill="var(--gate-fill)"/>
+<use href="#ic-owner" x="286" y="540" width="40" height="40" style="color:#0F7A5F"/>
+<text x="306" y="628" font-size="25" font-weight="700" text-anchor="middle" dominant-baseline="central" fill="var(--gate-ink)">User decides</text>
+<text x="306" y="664" font-size="19" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">Stops after the selected rounds</text>
+<text x="306" y="690" font-size="19" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">and hands control back</text>
+
+<!-- card 4 : 리뷰 대상 -->
+<rect x="556" y="498" width="436" height="216" rx="14" fill="var(--card)" stroke="var(--data-line)" stroke-width="1.5" filter="url(#soft)"/>
+<circle cx="774" cy="560" r="38" fill="var(--data-fill)"/>
+<use href="#ic-doc" x="754" y="540" width="40" height="40" style="color:#7A8398"/>
+<text x="774" y="628" font-size="25" font-weight="700" text-anchor="middle" dominant-baseline="central" fill="var(--data-ink)">Review target</text>
+<text x="774" y="664" font-size="19" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">One file · explicit files</text>
+<text x="774" y="690" font-size="19" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">or a declared subtree</text>
+
+<!-- ============ band 2 — 단일 agent 경로 ============ -->
+<rect x="48" y="816" width="984" height="268" rx="20" fill="var(--panel)" stroke="var(--hair)"/>
+<rect x="76" y="796" width="215" height="40" rx="20" fill="var(--agent-line)"/>
+<text x="183" y="816" font-size="20" font-weight="600" text-anchor="middle" dominant-baseline="central" class="on-accent">② Single-agent path</text>
+
+<rect x="88" y="868" width="904" height="112" rx="14" fill="var(--card)" stroke="var(--agent-line)" stroke-width="2.5" filter="url(#soft)"/>
+<circle cx="164" cy="924" r="38" fill="var(--agent-fill)"/>
+<use href="#ic-shield" x="144" y="904" width="40" height="40" style="color:#534AB7"/>
+<text x="228" y="910" font-size="25" font-weight="700" fill="var(--agent-ink)" dominant-baseline="central">If you use only one agent</text>
+<text x="228" y="939" font-size="19" fill="var(--muted)" dominant-baseline="central">Use a separate same-vendor reviewer session for self red-teaming</text>
+
+<text x="88" y="1006" font-size="16" fill="var(--muted)" dominant-baseline="central">Same-model blind spots can overlap, so the briefing shows a caution.</text>
+<text x="88" y="1030" font-size="16" fill="var(--muted)" dominant-baseline="central">Live evidence: Claude host · same-vendor path on a Codex host is unverified</text>
+<text x="88" y="1054" font-size="16" fill="var(--muted)" dominant-baseline="central">A host calling its own subagent as reviewer is unsupported in this preview.</text>
+
+<!-- ============ footer — 검증 범위 ============ -->
+<rect x="51" y="1120" width="296" height="104" rx="14" fill="var(--card)" stroke="var(--hair)" filter="url(#soft)"/>
+<text x="204" y="1156" font-size="16" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">Validated platform</text>
+<text x="204" y="1186" font-size="19" font-weight="700" text-anchor="middle" dominant-baseline="central" fill="var(--ink)">macOS Apple Silicon</text>
+
+<rect x="392" y="1120" width="296" height="104" rx="14" fill="var(--card)" stroke="var(--hair)" filter="url(#soft)"/>
+<text x="540" y="1156" font-size="16" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">Binary</text>
+<text x="540" y="1186" font-size="19" font-weight="700" text-anchor="middle" dominant-baseline="central" fill="var(--ink)">unsigned · not notarized</text>
+
+<rect x="733" y="1120" width="296" height="104" rx="14" fill="var(--card)" stroke="var(--hair)" filter="url(#soft)"/>
+<text x="876" y="1156" font-size="16" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">Current stage</text>
+<text x="876" y="1186" font-size="19" font-weight="700" text-anchor="middle" dominant-baseline="central" fill="var(--ink)">Validation pending</text>
+
+<text x="540" y="1280" font-size="17" text-anchor="middle" dominant-baseline="central" fill="var(--muted)">github.com/kyungseo/acrelay</text>
+</svg>
