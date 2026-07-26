@@ -1,5 +1,7 @@
 # acRelay
 
+Agent Collaboration Relay for bounded cross-agent review.
+
 **English** · [한국어](./README.ko.md)
 
 Reviewing a plan or implementation with another coding agent can sharpen the
