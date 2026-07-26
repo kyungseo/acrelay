@@ -3,7 +3,7 @@
 **English** · [한국어](./OPERATIONS.ko.md)
 
 This guide explains how to install, update, remove, and recover the
-`v0.1.0-alpha.2` **Public Validation Preview**. It is **Experimental**, and
+`v0.1.0-alpha.3` **Public Validation Preview**. It is **Experimental**, and
 its broader validation status is **Validation pending**.
 
 Its only prebuilt binary is for macOS Apple Silicon (`darwin/arm64`). Windows
@@ -32,10 +32,10 @@ and not a general `Supported` claim.
 ## One-Command Installer
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.2/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.3/scripts/install.sh | bash
 ```
 
-The script is pinned to `v0.1.0-alpha.2`, and the downloaded binary archive is
+The script is pinned to `v0.1.0-alpha.3`, and the downloaded binary archive is
 checked against the release checksum before execution. Piping the script to
 `bash` does not let you inspect the installer itself. Use the tagged,
 review-first path below when that distinction matters.
@@ -45,17 +45,17 @@ review-first path below when that distinction matters.
 Download the script from the exact tag, inspect it, and run it:
 
 ```sh
-curl -fLO https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.2/scripts/install.sh
+curl -fLO https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.3/scripts/install.sh
 less install.sh
 bash install.sh
 ```
 
-The script is pinned internally to `v0.1.0-alpha.2`. It does not call a
+The script is pinned internally to `v0.1.0-alpha.3`. It does not call a
 `latest` endpoint or accept an arbitrary version override. It downloads:
 
 ```text
-acrelay_0.1.0-alpha.2_darwin_arm64.tar.gz
-acrelay_0.1.0-alpha.2_checksums.txt
+acrelay_0.1.0-alpha.3_darwin_arm64.tar.gz
+acrelay_0.1.0-alpha.3_checksums.txt
 ```
 
 The installer checks that the archive’s SHA-256 value exactly matches the
@@ -63,7 +63,7 @@ published checksum entry before it extracts or runs the binary. The archive
 contains one top-level directory:
 
 ```text
-acrelay_0.1.0-alpha.2_darwin_arm64/
+acrelay_0.1.0-alpha.3_darwin_arm64/
 ├── acrelay
 ├── LICENSE
 └── README.md
@@ -94,7 +94,7 @@ The installer does not try to decide which semantic version is newer.
 ## Pinned Go Install
 
 ```sh
-go install github.com/kyungseo/acrelay/cmd/acrelay@v0.1.0-alpha.2
+go install github.com/kyungseo/acrelay/cmd/acrelay@v0.1.0-alpha.3
 ```
 
 The module’s `go` directive is the required toolchain contract. With Go’s
@@ -106,8 +106,9 @@ This path verifies module content through the user’s configured Go module
 proxy/checksum policy. It does not use the GitHub Release archive.
 
 Building successfully on another platform does not enable its Claude Code or
-Codex reviewer path. acRelay still requires recorded
-`vendor + version + GOOS + GOARCH` evidence before dispatch.
+Codex reviewer path. Platform evidence remains GOOS/GOARCH-bound. On a verified
+platform, reviewer CLI versions at or above the documented minimum must still
+expose every option required by the restricted adapter command.
 
 ## Verify
 
@@ -119,13 +120,13 @@ acrelay version --short
 The short output for this release must be:
 
 ```text
-v0.1.0-alpha.2
+v0.1.0-alpha.3
 ```
 
 The release archive also publishes:
 
 ```text
-acrelay_0.1.0-alpha.2_provenance.json
+acrelay_0.1.0-alpha.3_provenance.json
 ```
 
 This file records the source commit, build environment, Go version, target
@@ -190,7 +191,7 @@ delete session or configuration data owned by the reviewer vendor.
 
 For maintainers, the release workflow:
 
-1. Requires the exact approved tag `v0.1.0-alpha.2`.
+1. Requires the exact approved tag `v0.1.0-alpha.3`.
 2. Confirms that the tag resolves to the checked-out commit.
 3. Confirms a `darwin/arm64` builder and the exact Go toolchain.
 4. Runs deterministic and race tests, vet, build, and module verification.

@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -296,6 +297,59 @@ func TestHandleStoreCorruptFailsClosed(t *testing.T) {
 	}
 }
 
+func TestHandleStoreV1FreshSessionMigratesWithPrivateBackup(t *testing.T) {
+	dir := t.TempDir()
+	h := &HandleStore{Path: filepath.Join(dir, "handles.json")}
+	legacy := []byte(`{"version":1,"entries":{"legacy":{"vendor":"claude","handle":"11111111-2222-3333-4444-555555555555"}}}`)
+	if err := platform.WritePrivateFile(h.Path, legacy); err != nil {
+		t.Fatal(err)
+	}
+	diagnostic, err := h.PrepareForDispatch("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(diagnostic, "fresh v2 store initialized") {
+		t.Fatalf("migration diagnostic missing: %q", diagnostic)
+	}
+	backup := h.Path + ".v1.backup"
+	if got, err := os.ReadFile(backup); err != nil || !bytes.Equal(got, legacy) {
+		t.Fatalf("legacy backup mismatch: err=%v got=%q", err, got)
+	}
+	if err := platform.VerifyPrivateFile(backup); err != nil {
+		t.Fatalf("legacy backup must stay private: %v", err)
+	}
+	current, err := h.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Version != handleFileVersion || len(current.Entries) != 0 {
+		t.Fatalf("migrated store = %+v, want empty v2", current)
+	}
+	if diagnostic, err := h.PrepareForDispatch(""); err != nil || diagnostic != "" {
+		t.Fatalf("repeat preflight must be a no-op: diagnostic=%q err=%v", diagnostic, err)
+	}
+}
+
+func TestHandleStoreV1ResumeFailsWithoutMutation(t *testing.T) {
+	dir := t.TempDir()
+	h := &HandleStore{Path: filepath.Join(dir, "handles.json")}
+	legacy := []byte(`{"version":1,"entries":{"legacy":{"vendor":"codex","handle":"thread-legacy-001"}}}`)
+	if err := platform.WritePrivateFile(h.Path, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.PrepareForDispatch("legacy"); err == nil ||
+		!strings.Contains(err.Error(), "explicit session reset") ||
+		!strings.Contains(err.Error(), "review not started") {
+		t.Fatalf("legacy resume must fail before dispatch with recovery guidance: %v", err)
+	}
+	if got, _ := os.ReadFile(h.Path); !bytes.Equal(got, legacy) {
+		t.Fatal("blocked legacy resume must not mutate the store")
+	}
+	if _, err := os.Stat(h.Path + ".v1.backup"); !os.IsNotExist(err) {
+		t.Fatalf("blocked legacy resume must not create a backup: %v", err)
+	}
+}
+
 func TestLegacyTempCwdIsDiagnosedWithoutMigration(t *testing.T) {
 	h := &HandleStore{Path: filepath.Join(t.TempDir(), "handles.json")}
 	legacy, err := platform.MkdirTempPrivate("acrelay-review-root-")
@@ -420,15 +474,24 @@ func TestDefaultTimeoutsStructure(t *testing.T) {
 	}
 }
 
-// PATCH-002: version equality is evidence-only; observability remains the
-// pre-dispatch hard gate.
-func TestPreflightVersionObservability(t *testing.T) {
+func TestPreflightVersionFloor(t *testing.T) {
 	cap := ClaudeAdapter{}.Capability()
 	if err := PreflightVersion(cap, "2.1.217"); err != nil {
 		t.Fatal(err)
 	}
-	if err := PreflightVersion(cap, "9.9.9"); err != nil {
-		t.Fatalf("changed observable version must not be an admission gate: %v", err)
+	if err := PreflightVersion(cap, "2.1.220"); err != nil {
+		t.Fatalf("newer observable version must pass the compatibility floor: %v", err)
+	}
+	if err := PreflightVersion(cap, "2.2.0"); err != nil {
+		t.Fatalf("newer minor version must pass the compatibility floor: %v", err)
+	}
+	if err := PreflightVersion(cap, "2.1.216"); err == nil ||
+		!strings.Contains(err.Error(), "below supported minimum") {
+		t.Fatalf("older version must fail with the minimum: %v", err)
+	}
+	if err := PreflightVersion(cap, "rolling"); err == nil ||
+		!strings.Contains(err.Error(), "not comparable") {
+		t.Fatalf("nonnumeric version must fail closed: %v", err)
 	}
 	if err := PreflightVersion(cap, ""); err == nil {
 		t.Fatal("unobservable version must fail closed")
@@ -529,7 +592,7 @@ exit 99
 			script: `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
 if [ "$1" = "doctor" ]; then echo '{"checks":{"config.load":{"status":"ok","details":{"model":"test-model","provider":"test"}}}}'; exit 0; fi
-if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config --ignore-rules --strict-config --sandbox'; exit 0; fi
+if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config --ignore-rules --strict-config --sandbox --skip-git-repo-check'; exit 0; fi
 if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
 exit 99
 `,
@@ -615,7 +678,7 @@ exit 99
 	}
 }
 
-func TestRestrictionVersionDriftBlocksBeforeDispatch(t *testing.T) {
+func TestRequiredCapabilityDriftBlocksBeforeDispatch(t *testing.T) {
 	tests := []struct {
 		name    string
 		script  string
@@ -654,13 +717,13 @@ printf '%s\n' '{"type":"turn.completed"}'
 			prepared, err := tc.adapter.Prepare(context.Background(), approvedTestRequest(t, Request{
 				Prompt: "review", SchemaJSON: `{"type":"object"}`, WorkingDir: dir,
 			}), &HandleStore{Path: filepath.Join(dir, "handles.json")})
-			if err == nil || prepared != nil || !strings.Contains(err.Error(), "owner gate required") ||
-				!strings.Contains(err.Error(), "unrestricted fallback forbidden") {
-				t.Fatalf("version drift must fail before dispatch: prepared=%v err=%v", prepared, err)
+			if err == nil || prepared != nil || !strings.Contains(err.Error(), "required restricted command surface") ||
+				!strings.Contains(err.Error(), "review not started") {
+				t.Fatalf("capability drift must fail before dispatch: prepared=%v err=%v", prepared, err)
 			}
 			calls, _ := os.ReadFile(logPath)
 			if !strings.Contains(string(calls), "--version") || strings.Contains(string(calls), "--output-schema") || strings.Contains(string(calls), "--json-schema") {
-				t.Fatalf("version drift must stop before reviewer dispatch: %q", calls)
+				t.Fatalf("capability drift must stop before reviewer dispatch: %q", calls)
 			}
 		})
 	}
@@ -670,7 +733,7 @@ func TestCodexDoctorFailureIsUnverifiedAndNonblocking(t *testing.T) {
 	script := `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
 if [ "$1" = "doctor" ]; then echo 'not-json'; exit 1; fi
-if [ "$2" = "--help" ]; then echo '--json --output-schema'; exit 0; fi
+if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config --ignore-rules --strict-config --sandbox --skip-git-repo-check'; exit 0; fi
 if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
 printf '%s\n' '{"type":"thread.started","thread_id":"thread-doctor-fail"}'
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"verdict\":\"approve\",\"findings\":[]}"}}'
@@ -698,7 +761,7 @@ func TestCodexDoctorTimeoutIsUnverifiedAndNonblocking(t *testing.T) {
 	script := `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
 if [ "$1" = "doctor" ]; then sleep 2; exit 0; fi
-if [ "$2" = "--help" ]; then echo '--json --output-schema'; exit 0; fi
+if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config --ignore-rules --strict-config --sandbox --skip-git-repo-check'; exit 0; fi
 if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
 printf '%s\n' '{"type":"thread.started","thread_id":"thread-doctor-timeout"}'
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"verdict\":\"approve\",\"findings\":[]}"}}'
@@ -746,7 +809,7 @@ exit 2
 			script: `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
 if [ "$1" = "doctor" ]; then echo '{}'; exit 0; fi
-if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config --ignore-rules --strict-config --sandbox'; exit 0; fi
+if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config --ignore-rules --strict-config --sandbox --skip-git-repo-check'; exit 0; fi
 if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
 echo 'unknown option --output-schema' >&2
 exit 2
@@ -785,7 +848,7 @@ func TestMissingOrMalformedStructuredOutputFailsAfterStart(t *testing.T) {
 			name: "claude",
 			script: `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi
-if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume'; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
 echo '{"type":"result","subtype":"success","is_error":false,"session_id":"session-no-output","modelUsage":{"claude-default":{}}}'
 `,
 			adapter: ClaudeAdapter{},
@@ -795,7 +858,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"session_id":"sessio
 			script: `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
 if [ "$1" = "doctor" ]; then echo '{}'; exit 0; fi
-if [ "$2" = "--help" ]; then echo '--json --output-schema'; exit 0; fi
+if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config --ignore-rules --strict-config --sandbox --skip-git-repo-check'; exit 0; fi
 if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
 printf '%s\n' '{"type":"thread.started","thread_id":"thread-bad-output"}'
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"not-json"}}'
@@ -849,6 +912,9 @@ func TestPreparedInvocationDoesNotRepeatPreflight(t *testing.T) {
 			script: `#!/bin/sh
 echo "$@" >> "$ACRELAY_TEST_LOG"
 if [ "$1" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
+if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config --ignore-rules --strict-config --sandbox --skip-git-repo-check'; exit 0; fi
+if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
+if [ "$1" = "doctor" ]; then echo '{}'; exit 0; fi
 printf '%s\n' '{"type":"thread.started","thread_id":"thread-1"}'
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"verdict\":\"approve\",\"findings\":[]}"}}'
 printf '%s\n' '{"type":"turn.completed"}'
@@ -860,6 +926,7 @@ printf '%s\n' '{"type":"turn.completed"}'
 			script: `#!/bin/sh
 echo "$@" >> "$ACRELAY_TEST_LOG"
 if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"11111111-2222-3333-4444-555555555555","structured_output":{"verdict":"approve","findings":[]},"modelUsage":{"claude-test":{}}}'
 `,
 			make: func() Adapter { return ClaudeAdapter{} },
@@ -1334,7 +1401,7 @@ exit 0
 		res, err := run(t, "codex", `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
 if [ "$1" = "doctor" ]; then echo '{"checks":{"config.load":{"status":"ok","details":{"model":"m","provider":"p"}}}}'; exit 0; fi
-if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config --ignore-rules --strict-config --sandbox'; exit 0; fi
+if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config --ignore-rules --strict-config --sandbox --skip-git-repo-check'; exit 0; fi
 if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
 printf '%s\n' '{"type":"thread.started","thread_id":"thread-fixture-1"}'
 kill -KILL $$
@@ -1349,7 +1416,7 @@ kill -KILL $$
 		res, err := run(t, "codex", `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
 if [ "$1" = "doctor" ]; then echo '{"checks":{"config.load":{"status":"ok","details":{"model":"m","provider":"p"}}}}'; exit 0; fi
-if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config --ignore-rules --strict-config --sandbox'; exit 0; fi
+if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config --ignore-rules --strict-config --sandbox --skip-git-repo-check'; exit 0; fi
 if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
 printf '%s\n' '{"type":"thread.started","thread_id":"thread-fixture-1"}'
 exit 0
@@ -1404,7 +1471,7 @@ func TestTerminalMarkerWinsOverLaterSignal(t *testing.T) {
 	dir, _ := installAdapterCLI(t, "codex", `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
 if [ "$1" = "doctor" ]; then echo '{"checks":{"config.load":{"status":"ok","details":{"model":"m","provider":"p"}}}}'; exit 0; fi
-if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config --ignore-rules --strict-config --sandbox'; exit 0; fi
+if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config --ignore-rules --strict-config --sandbox --skip-git-repo-check'; exit 0; fi
 if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
 printf '%s\n' '{"type":"thread.started","thread_id":"thread-fixture-1"}'
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"verdict\":\"approve\",\"examined\":[],\"findings\":[],\"approval_requests\":[]}"}}'
@@ -1448,7 +1515,7 @@ func TestTerminationPrecedenceConflictMatrix(t *testing.T) {
 	}
 	codexHead := `if [ "$1" = "--version" ]; then echo "codex-cli 0.144.1"; exit 0; fi
 if [ "$1" = "doctor" ]; then echo '{"checks":{"config.load":{"status":"ok","details":{"model":"m","provider":"p"}}}}'; exit 0; fi
-if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config --ignore-rules --strict-config --sandbox'; exit 0; fi
+if [ "$2" = "--help" ]; then echo '--json --output-schema --ignore-user-config --ignore-rules --strict-config --sandbox --skip-git-repo-check'; exit 0; fi
 if [ "$3" = "--help" ]; then echo 'resume'; exit 0; fi
 printf '%s\n' '{"type":"thread.started","thread_id":"thread-fixture-1"}'
 `

@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1350" width="1080" height="1350" role="img" style="font-family:Pretendard,'Apple SD Gothic Neo','Malgun Gothic','Noto Sans KR',sans-serif">
-<title>acRelay v0.1.0-alpha.2 — 다른 agent의 리뷰를, 복붙 없이</title>
+<title>acRelay v0.1.0-alpha.3 — 다른 agent의 리뷰를, 복붙 없이</title>
 <desc>acRelay는 reviewer CLI를 자동으로 띄워 리뷰를 중계하고, 라운드를 1~5회(기본 3) 돌린 뒤 사용자에게 최종 판단을 넘긴다. 리뷰 대상은 단일 파일, 명시적 파일 목록 또는 선언된 subtree이며, agent를 하나만 쓰는 경우 같은 vendor의 별도 reviewer session으로 self red-team이 가능하다. 검증 범위는 macOS Apple Silicon, 바이너리는 unsigned, 현재 Experimental·Validation pending 단계다.</desc>
 
 <style>

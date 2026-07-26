@@ -2,7 +2,7 @@
 
 [English](./REFERENCE.md) · **한국어**
 
-이 문서는 acRelay `v0.1.0-alpha.2`의 상세 동작 계약을 설명합니다. 설치와 가장
+이 문서는 acRelay `v0.1.0-alpha.3`의 상세 동작 계약을 설명합니다. 설치와 가장
 짧은 review 흐름은 [root README](../README.ko.md)에서 시작하세요.
 
 ## 이 문서를 읽기 전에
@@ -71,8 +71,10 @@ data만 사용해야 합니다.
 `~/.acrelay/handles.json`은 private session handle store입니다. POSIX에서는
 `0600`, Windows에서는 current-user-only protected DACL을 사용합니다. Handle
 store v2는 vendor, native handle, trust-profile identity와 reviewer working
-directory를 결속합니다. Profile이나 cwd가 없는 entry 또는 v1 store는
-fail-closed합니다.
+directory를 결속합니다. V1 entry에는 profile과 cwd가 없으므로 안전하게 resume할
+수 없습니다. 새 reviewer session을 시작할 때는 원본 v1 파일을
+`handles.json.v1.backup`으로 보존하고 빈 v2 store를 시작합니다. V1 session
+resume은 reviewer 실행 전에 중단하고 explicit session reset을 요구합니다.
 
 Neutral reviewer cwd는 handle store의 private `runtime/` 아래에 만들어지고 같은
 session resume에서 재사용됩니다. 기존 temp-bound handle은 자동으로 이동하거나
@@ -375,9 +377,11 @@ closure를 차단합니다.
 ## CLI compatibility와 build 출처
 
 acRelay는 Claude Code CLI와 Codex CLI의 actual command, structured output,
-terminal/session contract를 capability-first로 검사합니다. Version 문자열은
-provenance이지만 exact restriction evidence는
-`vendor + version + GOOS + GOARCH`에 결속됩니다. Help probe는 advisory이며
+terminal/session contract를 capability-first로 검사합니다. 현재 darwin/arm64의
+최소 지원 version은 Claude Code `2.1.217+`, Codex CLI `0.144.1+`입니다. 더
+높은 version은 제한 실행에 필요한 option을 모두 노출하는지 확인한 뒤
+허용합니다. 낮거나 관측할 수 없거나 숫자로 비교할 수 없는 version은 reviewer
+실행 전에 중단합니다. Platform 근거는 계속 GOOS/GOARCH별로 분리하며,
 platform-default model을 override하지 않습니다.
 
 `acrelay version --short`는 release installer가 exact binary version을 확인하기

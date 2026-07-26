@@ -124,6 +124,15 @@ func (a ClaudeAdapter) Prepare(ctx context.Context, req Request, handles *Handle
 		return nil, err
 	}
 	probeState, probeDiagnostic := probeClaudeCapabilities(ctx)
+	if probeState != ProbeObserved {
+		return nil, fmt.Errorf("claude CLI %s does not expose the required restricted command surface: %s; review not started",
+			observed, probeDiagnostic)
+	}
+	storeDiagnostic, err := handles.PrepareForDispatch(req.ResumeRef)
+	if err != nil {
+		return nil, err
+	}
+	probeDiagnostic = joinDiagnostics(probeDiagnostic, storeDiagnostic)
 	resumeHandle := ""
 	resumeWorkingDir := ""
 	if req.ResumeRef != "" {

@@ -2,7 +2,7 @@
 
 **English** · [한국어](./REFERENCE.ko.md)
 
-This is the detailed reference for the acRelay `v0.1.0-alpha.2` behavioral
+This is the detailed reference for the acRelay `v0.1.0-alpha.3` behavioral
 contract. Start with the [root README](../README.md) for installation and the
 shortest review path.
 
@@ -79,7 +79,8 @@ the machine. Local storage does not mean local model inference: the selected
 reviewer vendor may still process approved subject content, paths, and metadata,
 and vendor-owned session/config/history retention is outside acrelay's cleanup
 authority. Handle store v2 binds vendor, native handle, trust-profile identity,
-and the reviewer cwd; v1 stores and profile-less/cwd-less entries fail closed.
+and the reviewer cwd. A fresh session preserves and replaces a v1 store before
+dispatch; v1 resume and profile-less/cwd-less v2 entries fail closed.
 A neutral cwd stays owner-only and is reused for that handle because vendor
 resume lookup can be cwd-scoped. New neutral cwd directories live under the
 handle store's private `runtime/` directory, not the OS temp directory. If that
@@ -171,10 +172,11 @@ lifecycle diagnostics; pass the same `-handles` path used for review when it
 was explicit. Status reports durable, legacy, missing, or unavailable state
 without printing the native handle or cwd path and without creating storage.
 
-`store-md v0.9` and handle store v2 are exact-version cutovers. Existing v0.8
-canonicals and handle store v1 files are not silently migrated. Finish an old
-objective with its prior binary or initialize a new v0.9 canonical and new
-reviewer session.
+`store-md v0.9` remains an exact-version cutover. Handle store v1 entries lack
+the trust profile and reviewer cwd required for safe v2 resume. Before a fresh
+reviewer session, acRelay preserves the exact v1 file as
+`handles.json.v1.backup` and initializes an empty v2 store. A v1 resume request
+fails before reviewer execution and requires an explicit session reset.
 
 ## Dispatch Reliability And Failure Causes
 
@@ -605,24 +607,20 @@ installer to verify the exact binary version. `acrelay version` displays the
 release version, source commit, and Go runtime version.
 
 Claude Code and Codex CLI versions are observed on every invocation and stored
-in provenance. General transport compatibility remains capability-first, but
-the security-critical restriction profile is bound to positive behavioral
-evidence for an exact CLI version AND an exact GOOS/GOARCH (evidence is never
-promoted across platforms). The current verified references are Claude Code
-`2.1.217` and Codex CLI `0.144.1`, both on `darwin/arm64` only (2026-07-22
-restriction spike). A different or unobservable version — or any platform
-absent from the verified list — fails before child start and requires a new
-owner-reviewed, platform-specific capability spike; there is no unrestricted
-fallback.
+in provenance. The current minimum supported versions are Claude Code
+`2.1.217+` and Codex CLI `0.144.1+` on `darwin/arm64`. Newer versions are
+admitted when the CLI still exposes every option required by the restricted
+adapter command. A lower, unobservable, or nonnumeric version fails before
+reviewer execution.
 
-Required help tokens are probed on every invocation as an advisory diagnostic.
-Missing or reformatted help text remains diagnostic-only; help presence alone
-cannot prove that a restriction works. Exact version-bound behavioral evidence,
-the actual command, terminal envelope or JSONL events, session identity, and
-structured output form the compatibility boundary. Command/transport/session failures
-and absent or malformed structured output are recorded as `FAILED` with no
-automatic retry. A captured ReviewResult whose content violates the canonical
-schema remains `needs-input`.
+The platform boundary remains evidence-based and is never promoted across
+GOOS/GOARCH values. Required help tokens are a hard pre-dispatch capability
+gate for newer CLI versions; they do not by themselves prove behavioral
+correctness. The actual restricted command, terminal envelope or JSONL events,
+session identity, and structured output remain post-start validators.
+Command/transport/session failures and absent or malformed structured output
+are recorded as `FAILED` with no automatic retry. A captured ReviewResult whose
+content violates the canonical schema remains `needs-input`.
 
 Platform-default model selection sends no model override flag. Claude records
 the terminal envelope's `modelUsage` as verified. Codex uses the bounded

@@ -291,6 +291,42 @@ func TestReviewEvidenceMismatchNeedsInput(t *testing.T) {
 	}
 }
 
+func TestReviewEvidenceAcceptsTerminalFileNewline(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "subject.md")
+	content := "# Plan\n\nChange the cache TTL.\n"
+	if err := os.WriteFile(target, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := adapter.FakeResult{Structured: map[string]any{
+		"verdict": "approve",
+		"examined": []any{map[string]any{
+			"id": "E1", "member": "subject.md",
+			"location": map[string]any{"kind": "text-lines", "start": 1, "end": 3},
+			"excerpt":  content, "claim": "examined the complete file",
+		}},
+		"findings": []any{}, "approval_requests": []any{},
+	}}
+	fake := &adapter.FakeAdapter{VendorName: "fake", NativeHandle: "terminal-newline-fixture", Script: []adapter.FakeResult{result}}
+	s := &Session{
+		Adapter: fake, Handles: &adapter.HandleStore{Path: filepath.Join(dir, "handles.json")},
+		Canonical: filepath.Join(dir, "canonical.md"),
+	}
+	spec, err := subject.SingleFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InitSubject(s.Canonical, "review whole file", spec, "", "", false, approvedPolicy(t)); err != nil {
+		t.Fatal(err)
+	}
+	st, outcome, err := s.Review(context.Background(), "review", adapter.Request{})
+	if err != nil || outcome != review.OutcomeResultValid || len(st.Evidence) != 1 ||
+		st.Evidence[0].Assurance != review.AssuranceContentMatch {
+		t.Fatalf("terminal newline must preserve exact content-match: outcome=%s evidence=%+v err=%v",
+			outcome, st.Evidence, err)
+	}
+}
+
 func TestReviewEvidenceProtocolViolationsNeedInput(t *testing.T) {
 	result := changesRequested("unsafe rollout")
 	anchor := result.Structured["examined"].([]any)[0].(map[string]any)

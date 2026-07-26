@@ -8,7 +8,7 @@ import (
 
 func TestRunVersionReleaseShort(t *testing.T) {
 	oldVersion, oldCommit := releaseVersion, releaseCommit
-	releaseVersion, releaseCommit = "v0.1.0-alpha.2", "abc123"
+	releaseVersion, releaseCommit = "v0.1.0-alpha.3", "abc123"
 	t.Cleanup(func() {
 		releaseVersion, releaseCommit = oldVersion, oldCommit
 	})
@@ -17,14 +17,14 @@ func TestRunVersionReleaseShort(t *testing.T) {
 	if err := runVersion([]string{"--short"}, &out); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.TrimSpace(out.String()); got != "v0.1.0-alpha.2" {
+	if got := strings.TrimSpace(out.String()); got != "v0.1.0-alpha.3" {
 		t.Fatalf("short version = %q", got)
 	}
 }
 
 func TestRunVersionHumanIncludesProvenance(t *testing.T) {
 	oldVersion, oldCommit := releaseVersion, releaseCommit
-	releaseVersion, releaseCommit = "v0.1.0-alpha.2", "abc123"
+	releaseVersion, releaseCommit = "v0.1.0-alpha.3", "abc123"
 	t.Cleanup(func() {
 		releaseVersion, releaseCommit = oldVersion, oldCommit
 	})
@@ -34,7 +34,7 @@ func TestRunVersionHumanIncludesProvenance(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := out.String()
-	for _, want := range []string{"acRelay v0.1.0-alpha.2", "commit abc123", "go go"} {
+	for _, want := range []string{"acRelay v0.1.0-alpha.3", "commit abc123", "go go"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("version output %q missing %q", got, want)
 		}

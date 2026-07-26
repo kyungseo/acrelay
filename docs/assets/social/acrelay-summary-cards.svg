@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1350" width="1080" height="1350" role="img" style="font-family:Pretendard,'Apple SD Gothic Neo','Malgun Gothic','Noto Sans KR',sans-serif">
-<title>acRelay v0.1.0-alpha.2 — Cross-agent review, without the copy-paste loop</title>
+<title>acRelay v0.1.0-alpha.3 — Cross-agent review, without the copy-paste loop</title>
 <desc>acRelay starts a reviewer CLI, relays the review, and returns the final decision to the user after 1–5 rounds, default 3. A review target can be one file, explicit files, or a declared subtree. A single-agent user can use a separate same-vendor reviewer session for self red-teaming. The validated scope is macOS Apple Silicon; the binary is unsigned and not notarized. This release is Experimental and Validation pending.</desc>
 
 <style>
