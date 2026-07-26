@@ -38,7 +38,7 @@ func TestRealClaudeResumeNotFoundConsumesReviewAttempt(t *testing.T) {
 	// returns the resume-not-found error envelope whenever --resume is passed.
 	script := `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi
-if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--output-format stream-json --verbose --json-schema --resume --safe-mode --add-dir --tools --permission-mode --system-prompt'; exit 0; fi
 for a in "$@"; do
   if [ "$a" = "--resume" ]; then
     printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"No conversation found with session ID","session_id":"11111111-2222-3333-4444-555555555555"}'

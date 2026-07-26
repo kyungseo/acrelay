@@ -3,7 +3,7 @@
 **English** · [한국어](./OPERATIONS.ko.md)
 
 This guide explains how to install, update, remove, and recover the
-`v0.1.0-alpha.3` **Public Validation Preview**. It is **Experimental**, and
+`v0.1.0-alpha.4` **Public Validation Preview**. It is **Experimental**, and
 its broader validation status is **Validation pending**.
 
 Its only prebuilt binary is for macOS Apple Silicon (`darwin/arm64`). Windows
@@ -18,24 +18,26 @@ binary or verified live-review combination in this release.
 
 | Option | When to use it | Important limit |
 | --- | --- | --- |
-| One-command installer | Fastest path to the published binary | The binary archive is checksum-verified, but the installer is not inspected before execution |
-| Tagged installer | Install the published binary in your user account | Not Developer ID signed or notarized; the checksum detects changed bytes but does not prove who published them |
+| One-command installer | Fastest path to the published engine and optional Skill | The archive is checksum-verified, but the installer is not inspected before execution |
+| Tagged installer | Install the published engine and optional Skill in your user account | Not Developer ID signed or notarized; the checksum detects changed bytes but does not prove who published them |
 | Download, read, then run | Inspect the installer before executing it | Installs the same binary and uses the same checksum |
 | Pinned `go install` | Build from source with an existing Go toolchain | Go may download the required toolchain and module data, depending on local settings |
 
-The installer does not install the optional
-[acRelay Skill](../skills/acrelay/README.md). This repository is the canonical
-source for both the engine and that natural-language front door. The Skill is
-also part of the Public Validation Preview: Experimental, validation pending,
-and not a general `Supported` claim.
+This repository is the canonical source for both the engine and the optional
+[acRelay Skill](../skills/acrelay/README.md). Pass `--skill-host codex`,
+`claude`, or `both` to install the exact bundled Skill from the same verified
+archive. Omit the option for an engine-only install. The Skill remains part of
+the Public Validation Preview: Experimental, validation pending, and not a
+general `Supported` claim.
 
 ## One-Command Installer
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.3/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.4/scripts/install.sh |
+  bash -s -- --skill-host both
 ```
 
-The script is pinned to `v0.1.0-alpha.3`, and the downloaded binary archive is
+The script is pinned to `v0.1.0-alpha.4`, and the downloaded binary archive is
 checked against the release checksum before execution. Piping the script to
 `bash` does not let you inspect the installer itself. Use the tagged,
 review-first path below when that distinction matters.
@@ -45,17 +47,17 @@ review-first path below when that distinction matters.
 Download the script from the exact tag, inspect it, and run it:
 
 ```sh
-curl -fLO https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.3/scripts/install.sh
+curl -fLO https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.4/scripts/install.sh
 less install.sh
 bash install.sh
 ```
 
-The script is pinned internally to `v0.1.0-alpha.3`. It does not call a
+The script is pinned internally to `v0.1.0-alpha.4`. It does not call a
 `latest` endpoint or accept an arbitrary version override. It downloads:
 
 ```text
-acrelay_0.1.0-alpha.3_darwin_arm64.tar.gz
-acrelay_0.1.0-alpha.3_checksums.txt
+acrelay_0.1.0-alpha.4_darwin_arm64.tar.gz
+acrelay_0.1.0-alpha.4_checksums.txt
 ```
 
 The installer checks that the archive’s SHA-256 value exactly matches the
@@ -63,10 +65,12 @@ published checksum entry before it extracts or runs the binary. The archive
 contains one top-level directory:
 
 ```text
-acrelay_0.1.0-alpha.3_darwin_arm64/
+acrelay_0.1.0-alpha.4_darwin_arm64/
 ├── acrelay
 ├── LICENSE
-└── README.md
+├── README.md
+└── skills/
+    └── acrelay/
 ```
 
 The default destination is `~/.local/bin/acrelay`. Choose another user-owned
@@ -84,8 +88,10 @@ The installer does not use `sudo`. If the destination directory is not on
 - Same version: exits successfully without replacement.
 - Different or unobservable version: stops without changing the installation
   and reports the installed and target versions.
+- Matching Skill: leaves it unchanged. A locally different Skill stops before
+  changing the engine or either requested host.
 - Explicit replacement: rerun with `--replace` after deciding that the
-  replacement is intended.
+  engine and/or Skill replacement is intended.
 - Existing non-executable path: fails without overwriting it.
 
 `--replace` explicitly permits replacement, including a possible downgrade.
@@ -94,7 +100,7 @@ The installer does not try to decide which semantic version is newer.
 ## Pinned Go Install
 
 ```sh
-go install github.com/kyungseo/acrelay/cmd/acrelay@v0.1.0-alpha.3
+go install github.com/kyungseo/acrelay/cmd/acrelay@v0.1.0-alpha.4
 ```
 
 The module’s `go` directive is the required toolchain contract. With Go’s
@@ -120,13 +126,13 @@ acrelay version --short
 The short output for this release must be:
 
 ```text
-v0.1.0-alpha.3
+v0.1.0-alpha.4
 ```
 
 The release archive also publishes:
 
 ```text
-acrelay_0.1.0-alpha.3_provenance.json
+acrelay_0.1.0-alpha.4_provenance.json
 ```
 
 This file records the source commit, build environment, Go version, target
@@ -148,13 +154,14 @@ recommend disabling Gatekeeper globally or assume the dialog's exact wording.
 
 ## Update
 
-Each installer is release-pinned. To update, download the installer from the
-new exact tag, inspect it, and run it with `--replace` after confirming the
-source and target versions.
+Each installer is release-pinned. To update the engine and installed Skill
+together, download the installer from the new exact tag, inspect it, and run
+it with the matching `--skill-host` plus `--replace` after confirming the
+source and target versions. Omitting `--skill-host` updates only the engine.
 
-An update replaces only the binary. It does not move or delete `~/.acrelay`,
-reviewer session identifiers, private working directories, canonical review
-records, recovery journals, or quarantined recovery data.
+An update does not move or delete `~/.acrelay`, reviewer session identifiers,
+private working directories, canonical review records, recovery journals, or
+quarantined recovery data.
 
 ## Remove The Binary
 
@@ -172,6 +179,11 @@ rm "$HOME/.local/bin/acrelay"
 
 Binary removal intentionally leaves private state intact. Do **not** remove
 `~/.acrelay` as part of uninstall.
+
+If the official Skill was installed globally, remove only its exact directory:
+`$HOME/.agents/skills/acrelay` for Codex or
+`$HOME/.claude/skills/acrelay` for Claude Code. Review the directory first if
+it contains local changes.
 
 If you also intend to retire a finished review’s acRelay session data, inspect
 the cleanup plan while the binary is still installed. You must name the exact
@@ -191,7 +203,7 @@ delete session or configuration data owned by the reviewer vendor.
 
 For maintainers, the release workflow:
 
-1. Requires the exact approved tag `v0.1.0-alpha.3`.
+1. Requires the exact approved tag `v0.1.0-alpha.4`.
 2. Confirms that the tag resolves to the checked-out commit.
 3. Confirms a `darwin/arm64` builder and the exact Go toolchain.
 4. Runs deterministic and race tests, vet, build, and module verification.

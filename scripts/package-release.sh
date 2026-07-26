@@ -54,6 +54,8 @@ fi
 )
 cp "$repo_root/LICENSE" "$package_root/LICENSE"
 cp "$repo_root/README.md" "$package_root/README.md"
+mkdir -p "$package_root/skills"
+cp -R "$repo_root/skills/acrelay" "$package_root/skills/"
 tar -C "$stage" -czf "$output_dir/$archive_name" "$archive_base"
 
 cat >"$output_dir/$provenance_name" <<EOF

@@ -18,17 +18,18 @@ Claude Code 또는 Codex CLI에 파일 하나나 지정한 파일 묶음을 검�
 
 ## 빠르게 시작하기
 
-macOS에서 Terminal을 열고 `uname -m` 결과가 `arm64`인지 확인합니다. 그다음 exact
-preview를 설치하고 version을 확인합니다.
+macOS에서 Terminal을 열고 `uname -m` 결과가 `arm64`인지 확인합니다. 그다음
+사용할 host용 exact engine과 Skill을 함께 설치합니다.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.3/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.4/scripts/install.sh |
+  bash -s -- --skill-host codex
 ~/.local/bin/acrelay version
 ```
 
-Optional [acRelay Skill](#자연어로-사용하려면-acrelay-skill-추가)을 추가하고, Skill을
-찾지 못하면 Codex App·Codex CLI 또는 Claude Code를 재시작한 뒤 다음과 같이
-요청합니다.
+`--skill-host`에는 `codex` 대신 `claude` 또는 `both`를 선택할 수 있습니다.
+새 Skill을 찾도록 Codex App·Codex CLI 또는 Claude Code의 새 session을 시작한
+뒤 다음과 같이 요청합니다.
 
 > acRelay로 Claude에게 이 계획을 비판적으로 검토해 달라고 해줘. 마지막에 내가
 > 결정해야 할 내용만 정리해줘.
@@ -110,7 +111,7 @@ Code host와 별도 Claude Code reviewer session 조합이며, Codex host의 sam
 
 ## Public Validation Preview와 platform 지원 확대
 
-`v0.1.0-alpha.3`는 **Public Validation Preview**입니다. 아직
+`v0.1.0-alpha.4`는 **Public Validation Preview**입니다. 아직
 **Experimental** 단계이고 더 넓은 검증은 **Validation pending**이며, 일반적인
 `Supported` 상태를 주장하지 않습니다. 내려받을 수 있는 파일과 live review 검증
 범위는 의도적으로 좁게 시작합니다.
@@ -118,7 +119,7 @@ Code host와 별도 Claude Code reviewer session 조합이며, Codex host의 sam
 - 내려받아 설치할 수 있는 binary: **macOS Apple Silicon (`darwin/arm64`)** 전용
 - Reviewer: 실제로 검증한 reviewer version과 운영체제 조합의 Claude Code CLI와
   Codex CLI
-- Release: Developer ID signing과 notarization을 하지 않은 `v0.1.0-alpha.3`
+- Release: Developer ID signing과 notarization을 하지 않은 `v0.1.0-alpha.4`
 - Review 방식: review마다 reviewer 1개, 정해진 회차 제한, 모든 finding에 대한
   driver의 처리 결정과 owner의 최종 종료 결정
 
@@ -126,15 +127,15 @@ Code host와 별도 Claude Code reviewer session 조합이며, Codex host의 sam
 lane을 통과했으며, 다음 단계에서 Claude Code·Codex review를 검증하고 필요한
 patch를 반영합니다. Linux core runtime CI는 source test matrix에 유지하지만,
 이번 preview에는 Linux artifact와 live-review 지원이 없습니다. 조합을 검증하기
-전까지 `v0.1.0-alpha.3`는 review를 보내기 전에 중단합니다. Intel Mac도 이번
+전까지 `v0.1.0-alpha.4`는 review를 보내기 전에 중단합니다. Intel Mac도 이번
 release에서 내려받을 수 있는 artifact와 검증된 live-review 조합이 없습니다.
 
 ## 설치
 
-정확한 `v0.1.0-alpha.3` preview를 설치합니다. Installer는 unpinned branch나
+정확한 `v0.1.0-alpha.4` preview를 설치합니다. Installer는 unpinned branch나
 `latest` download로 바꾸지 않습니다.
 
-### 한 줄로 binary 설치
+### 한 줄로 engine과 Skill 설치
 
 macOS에서 Terminal을 열고 `uname -m`을 실행하세요. 결과가 `arm64`일 때만 아래
 미리 build한 binary installer를 사용합니다.
@@ -143,8 +144,13 @@ Installer는 정확한 tag에 고정돼 있으며, 내려받은 binary archive�
 release checksum과 대조합니다.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.3/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.4/scripts/install.sh |
+  bash -s -- --skill-host codex
 ```
+
+`codex`, `claude`, `both` 중에서 선택합니다. Engine만 설치하려면
+`--skill-host`를 생략합니다. 검증한 archive에는 engine과 같은 exact version의
+공식 Skill이 함께 들어 있습니다.
 
 Script를 `bash`로 바로 보내면 편리하지만 실행 전에 installer 내용을 읽을 수는
 없습니다. 먼저 내용을 확인하려면 아래 경로를 사용하세요.
@@ -155,19 +161,20 @@ Installer는 release 하나에 고정되며 `latest`를 조회하지 않습니�
 내용을 검토하세요.
 
 ```sh
-curl -fLO https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.3/scripts/install.sh
+curl -fLO https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.4/scripts/install.sh
 less install.sh
 bash install.sh
 ```
 
 기본 설치 경로는 `~/.local/bin`이며 `sudo`를 사용하지 않습니다. Release
 archive의 checksum을 확인하기 전에는 archive 안의 binary를 실행하지 않고,
-설치된 version이 다르면 `--replace` 없이는 교체하지 않습니다.
+설치된 engine이나 로컬 Skill 내용이 다르면 `--replace` 없이는 교체하지
+않습니다.
 
 ### Go install
 
 ```sh
-go install github.com/kyungseo/acrelay/cmd/acrelay@v0.1.0-alpha.3
+go install github.com/kyungseo/acrelay/cmd/acrelay@v0.1.0-alpha.4
 ```
 
 Source install에는 [`go.mod`](./go.mod)에 선언된 Go toolchain이 필요합니다.
@@ -194,30 +201,29 @@ engine이 담당합니다. Skill만으로는 review를 실행할 수 없으므�
 
 이 Skill은 **Public Validation Preview**입니다. 아직 **Experimental** 단계이고,
 더 넓은 환경의 검증은 **Validation pending**이며, 일반적인 `Supported` 상태를
-주장하지 않습니다. Engine을 설치하거나 update하거나 대체하지 않습니다. Engine을
-먼저 설치한 뒤 exact `v0.1.0-alpha.3` tag에서 Skill 폴더 전체를 복사하세요.
+주장하지 않습니다. 권장 installer는 checksum을 검증한 같은 release archive에서
+engine과 exact bundled Skill을 함께 설치합니다.
 
 ```sh
-git clone --depth 1 --branch v0.1.0-alpha.3 https://github.com/kyungseo/acrelay.git /tmp/acrelay-v0.1.0-alpha.3
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.4/scripts/install.sh |
+  bash -s -- --skill-host both
 ```
 
-### Claude Code
+한 host에만 설치하려면 `both` 대신 `codex` 또는 `claude`를 사용합니다. 같은
+내용은 여러 번 실행해도 바뀌지 않습니다. 기존 engine이나 Skill이 다르면
+installer는 보존한 채 중단하고 `--replace`를 안내하므로, 로컬 Skill 수정이
+조용히 덮어써지지 않습니다.
+
+수동 또는 project-local 설치가 필요하면 exact tag에서 전체 폴더를 가져옵니다.
 
 ```sh
-mkdir -p "$HOME/.claude/skills"
-cp -R /tmp/acrelay-v0.1.0-alpha.3/skills/acrelay "$HOME/.claude/skills/"
+git clone --depth 1 --branch v0.1.0-alpha.4 https://github.com/kyungseo/acrelay.git /tmp/acrelay-v0.1.0-alpha.4
 ```
 
-### Codex
-
-```sh
-mkdir -p "$HOME/.agents/skills"
-cp -R /tmp/acrelay-v0.1.0-alpha.3/skills/acrelay "$HOME/.agents/skills/"
-```
-
-특정 repository에서만 사용할 때는 `.claude/skills/acrelay` 또는
-`.agents/skills/acrelay`에 복사하세요. 새 Skill이 보이지 않으면 agent host를
-재시작합니다. Windows PowerShell 설치, Update, 제거와 현재 검증 경계는
+전체 `skills/acrelay` 폴더를 `$HOME/.claude/skills/acrelay`,
+`$HOME/.agents/skills/acrelay` 또는 대응하는 project-local 경로에 복사하세요.
+새로 설치하거나 update한 뒤에는 agent host의 새 session을 시작합니다. 정확한
+수동 명령, Windows PowerShell Skill 설치, update, 제거와 현재 검증 경계는
 [Skill 안내](./skills/acrelay/README.ko.md)를 참고하세요.
 
 요청 예시:
@@ -227,6 +233,24 @@ cp -R /tmp/acrelay-v0.1.0-alpha.3/skills/acrelay "$HOME/.agents/skills/"
 
 별도로 지정하지 않으면 최대 3회차로 진행합니다. 필요하면 1~5회 안에서 원하는
 제한을 요청할 수 있습니다.
+
+## Reviewer가 읽을 수 있는 범위 선택
+
+acRelay는 repository 전체 검색이나 live web research를 보이지 않는 기본값으로
+두지 않고 review 범위를 명시합니다.
+
+- `contained`가 기본값이며 reviewer에게 선언한 subject만 전달합니다.
+- `contextual`은 revision을 확인한 exact local context manifest를 추가합니다.
+  Context는 해석을 돕지만 authoritative evidence는 아닙니다.
+- `research`는 최신 사실 확인을 위한 제한된 reviewer web search와 fetch도
+  허용합니다. 별도 egress 확인이 필요하며 reviewer는 source URL과 확인 날짜를
+  남겨야 합니다. 이 선언은 subject evidence를 대신하지 않습니다.
+
+Command 실행은 계속 read-only이고 일반적인 network 권한이 추가되지 않습니다.
+Subject와 context의 합계가 8개 member 또는 128 KiB를 넘으면, 사용자가 범위를
+줄이거나 token·시간·context 위험을 명시적으로 수락할 때까지 dispatch 전에
+중단합니다. 기본적으로 actionable finding은 최대 8개를 요청하되 critical/high
+finding을 생략하지 않도록 합니다.
 
 ## 직접 CLI 사용: 첫 Review
 
@@ -266,9 +290,11 @@ acrelay review \
 ```
 
 이후 driver는 각 finding을 수용할지, 수정할지, 반론할지, owner의 결정이 필요한지
-선택하고 이유를 기록합니다. Approval request에는 owner가 응답하며, 마지막
-`close` 명령도 owner가 실행합니다. 아무것도 변경하지 않고 종료 준비 상태만
-확인하려면 다음 명령을 사용합니다.
+선택하고 이유를 기록합니다. `acrelay driver-response`는 strict JSON 파일 하나를
+받아 전체 응답을 atomic하게 기록하므로 항목 하나가 잘못되면 어떤 finding도
+바뀌지 않습니다. Approval request에는 owner가 응답하며, 마지막 `close` 명령도
+owner가 실행합니다. 아무것도 변경하지 않고 종료 준비 상태만 확인하려면 다음
+명령을 사용합니다.
 
 ```sh
 acrelay briefing \

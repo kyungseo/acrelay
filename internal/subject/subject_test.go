@@ -54,6 +54,24 @@ func TestSingleFileUsesDomainSeparatedAggregate(t *testing.T) {
 	}
 }
 
+func TestScopeSummaryBroadGuardrails(t *testing.T) {
+	snapshot := Snapshot{}
+	for i := 0; i <= BroadScopeMemberThreshold; i++ {
+		snapshot.Members = append(snapshot.Members, Member{Bytes: 1})
+	}
+	summary := SummarizeScope(snapshot)
+	if !summary.Broad || summary.Members != BroadScopeMemberThreshold+1 ||
+		!strings.Contains(strings.Join(summary.Reasons, ","), "members>") {
+		t.Fatalf("member guardrail summary = %+v", summary)
+	}
+	byteHeavy := Snapshot{Members: []Member{{Bytes: BroadScopeByteThreshold + 1}}}
+	summary = SummarizeScope(byteHeavy)
+	if !summary.Broad || summary.Bytes != BroadScopeByteThreshold+1 ||
+		!strings.Contains(strings.Join(summary.Reasons, ","), "bytes>") {
+		t.Fatalf("byte guardrail summary = %+v", summary)
+	}
+}
+
 func TestExplicitFilesNormalizeOrderAndRejectDuplicates(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "a.txt"), "a")

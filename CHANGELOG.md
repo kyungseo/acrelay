@@ -6,6 +6,33 @@ This file records changes that matter to acRelay users. The project is in
 Alpha, so commands and file formats may change between prereleases. Once a tag
 is published, however, it is never reused or rewritten.
 
+## v0.1.0-alpha.4 — First-Use Reliability And Bounded Research
+
+- Replace Claude's opaque one-shot output with a structured event stream.
+  Startup, idle, and hard-cap supervision now observe real activity and expose
+  only bounded progress messages.
+- Disable discovered standalone Codex reviewer Skills for the invocation, and
+  return bounded evidence IDs and recommendations directly so the host does
+  not need to probe help or reread the raw canonical.
+- Add immutable `contained`, `contextual`, and `research` review profiles.
+  Exact auxiliary context is revision-checked, research requires separate
+  egress consent, and command execution remains read-only.
+- Cut the canonical format to `store-md v0.10`; Alpha.3 canonicals require
+  their matching binary or a fresh Alpha.4 objective.
+- Stop broad reviews before dispatch when subject plus context exceeds 8
+  members or 128 KiB, unless the user explicitly accepts the token, time, and
+  context risk. Reviews consolidate to eight actionable findings by default
+  without omitting critical/high findings.
+- Classify the exact `ENOTFOUND` signature as an inferred DNS/network failure
+  without automatic retry. Accept only the safe trailing-empty-line evidence
+  boundary that caused a real false mismatch.
+- Add atomic JSON driver responses: one invalid disposition leaves the whole
+  batch unchanged.
+- Bundle the exact official Skill in the checksum-verified release archive.
+  The pinned installer can install it for Codex, Claude Code, or both, protects
+  local differences, and supports adding the Skill after the same engine
+  version is already present.
+
 ## v0.1.0-alpha.3 — Runtime Compatibility And Calmer Skill UX
 
 - Admit Claude Code `2.1.217+` and Codex CLI `0.144.1+` on the verified

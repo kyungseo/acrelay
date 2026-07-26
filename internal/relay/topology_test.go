@@ -139,13 +139,13 @@ func TestStateRequiresTopologyPolicy(t *testing.T) {
 	}
 }
 
-// store-md v0.9 is an exact cutover: a digest-valid v0.8 state block is
+// store-md v0.10 is an exact cutover: a digest-valid v0.9 state block is
 // rejected at the load boundary, never migrated.
 func TestLoadRejectsStoreV08Exact(t *testing.T) {
 	dir := t.TempDir()
 	canonical := filepath.Join(dir, "c.md")
 	st := bindValidSubject(t, &State{
-		Seq: 0, KernelVersion: KernelVersion, ProfileVersion: ProfileVersion, StoreVersion: "store-md v0.8",
+		Seq: 0, KernelVersion: KernelVersion, ProfileVersion: ProfileVersion, StoreVersion: "store-md v0.9",
 		CollaborationID: "collab-x", ObjectiveID: "obj-x", Question: "q",
 		Governance: "OPEN",
 	})

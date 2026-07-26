@@ -2,7 +2,7 @@
 
 **English** · [한국어](./REFERENCE.ko.md)
 
-This is the detailed reference for the acRelay `v0.1.0-alpha.3` behavioral
+This is the detailed reference for the acRelay `v0.1.0-alpha.4` behavioral
 contract. Start with the [root README](../README.md) for installation and the
 shortest review path.
 
@@ -43,9 +43,10 @@ machine-readable form.
 - `internal/relay` — prepared one-shot review flow (`Prepare` → snapshots →
   objective-bound append → private dispatch journal → in-memory attempt
   admission → child start/capture → transaction-tagged canonical append), state
-  as sequence-numbered blocks inside the canonical document; `store-md v0.9` /
+  as sequence-numbered blocks inside the canonical document; `store-md v0.10` /
   `dispatch-journal v0.1`
-- `cmd/acrelay` — CLI: `init` / `review` / `confirm` / `disposition` /
+- `cmd/acrelay` — CLI: `init` / `review` / `confirm` / `driver-response` /
+  `disposition` /
   `request-approval` / `respond-approval` / `withdraw-approval` / `advance` /
   `close` / `terminate` / `reconcile` / `abandon-transaction` / `status` /
   `cleanup` / `briefing` / `version`
@@ -172,9 +173,11 @@ lifecycle diagnostics; pass the same `-handles` path used for review when it
 was explicit. Status reports durable, legacy, missing, or unavailable state
 without printing the native handle or cwd path and without creating storage.
 
-`store-md v0.9` remains an exact-version cutover. Handle store v1 entries lack
-the trust profile and reviewer cwd required for safe v2 resume. Before a fresh
-reviewer session, acRelay preserves the exact v1 file as
+`store-md v0.10` is an exact-version cutover because it persists review access
+profiles and optional context manifests. Earlier canonicals require their
+matching binary or a fresh objective. Handle store v1 entries lack the trust
+profile and reviewer cwd required for safe v2 resume. Before a fresh reviewer
+session, acRelay preserves the exact v1 file as
 `handles.json.v1.backup` and initializes an empty v2 store. A v1 resume request
 fails before reviewer execution and requires an explicit session reset.
 
@@ -207,9 +210,11 @@ Owner-remediation categories (`vendor.quota`, `vendor.auth`,
 `vendor.network`, `vendor.service-unavailable`, `vendor.tool-policy`) are
 registered but assigned only from `vendor-declared` or version-bound
 `inferred` evidence. Neither vendor CLI currently exposes a typed
-error-category field, so in this version such failures record the mechanism
-cause or `unknown` rather than a guessed remediation category; populating
-these from live vendor evidence is a separately scoped follow-up.
+error-category field. Alpha.4 recognizes only the exact, case-insensitive
+`ENOTFOUND` signature as inferred `vendor.network`; it does not infer the
+remaining categories from unstructured text. A started attempt remains
+consumed, and this classification never authorizes automatic retry or suggests
+that increasing a timeout will repair DNS resolution.
 
 Persisted native resume handles are validated against vendor-safe formats
 before any child start; a malformed handle fails closed without consuming an
@@ -387,6 +392,39 @@ checkpoint performs an O(N) full enumeration and re-hash; v1 has no subject
 cache, index, or filesystem watcher. Git staged patches, commits, ranges,
 branches, and other change-set selectors are not supported in this version.
 
+### Review access profiles and broad-scope consent
+
+`-review-profile` is immutable for one objective:
+
+- `contained` (default) permits only the authoritative subject.
+- `contextual` requires `-context-spec` and permits that exact,
+  revision-checked local manifest as non-authoritative context.
+- `research` permits the same optional context plus reviewer web search/fetch
+  for current factual verification. It requires
+  `-ack-research-egress` in addition to `-ack-vendor-egress`.
+
+Research does not add a general network-capable command surface. Claude is
+limited to `Read,Glob,Grep,WebSearch,WebFetch`; Codex uses its bounded search
+surface while `exec` remains read-only. The reviewer must include exact source
+URLs and retrieval dates with research findings. Those values are
+reviewer-declared and never replace subject-bound `examined` anchors.
+
+Codex's `--ignore-user-config` does not disable Skill discovery by itself.
+Before dispatch, the adapter enumerates the documented standalone local Skill
+roots and passes per-Skill `enabled=false` overrides, including resolved
+symlink targets. This prevents the reviewer from recursively invoking acRelay
+or another discovered standalone Skill. It is not an OS-level read-isolation
+claim; vendor/system behavior outside those documented roots remains part of
+the convention-only read-scope residual.
+
+The context descriptor uses the same `subject-spec v0.1` schema through
+`-context-spec`. The subject and context manifests are re-resolved before
+dispatch and confirmation; a changed context fails closed. Their combined
+member count and byte size form one visible scope summary. More than 8 members
+or more than 128 KiB is broad and requires `-ack-broad-scope`; otherwise
+`init` stops before creating the canonical record. This is a consent guard,
+not a promise that smaller reviews are fast or inexpensive.
+
 ## Review Input Trust Boundary
 
 Every objective stores an immutable trust policy before any vendor dispatch.
@@ -400,13 +438,14 @@ authentication, RBAC, or Close authority.
 The default reviewer cwd is a fresh owner-only directory in acrelay's durable
 private runtime root outside the subject. It is retained with the opaque session
 reference for resume and removed only by explicitly authorized lifecycle
-cleanup. Claude runs
-with safe mode, an explicit subject `--add-dir`, no project MCP/config hooks,
-and only `Read,Glob,Grep`. Codex runs with user config and rules ignored,
-strict config parsing, and a read-only sandbox. Initial review, resume, and
-confirmation use the same objective trust profile; native handles are resumed
-only when their stored profile identity matches, and resume reuses the exact
-handle-bound cwd instead of creating a different neutral root.
+cleanup. Claude runs with safe mode, explicit declared roots, no project
+MCP/config hooks, and only the tools admitted by the selected review profile.
+Codex runs with user config and rules ignored, strict config parsing, and a
+read-only sandbox; only `research` enables its bounded search surface. Initial
+review, resume, and confirmation use the same objective trust profile; native
+handles are resumed only when their stored profile identity matches, and
+resume reuses the exact handle-bound cwd instead of creating a different
+neutral root.
 
 In-target cwd is an explicitly unsafe objective mode. It must be approved at
 `init` with `-allow-in-target-workdir`; the approval text records repository
@@ -448,9 +487,12 @@ member uses an explicit `empty-member` anchor and also remains
 
 Exact byte comparison runs first. When the captured member contains CRLF and
 exact comparison fails, acrelay may compare the same bounded excerpt after
-canonical CRLF-to-LF normalization. A normalized match records both the
-distinct `content-match-normalized` assurance and the `crlf-to-lf`
-normalization fact; it never becomes exact `content-match`.
+canonical CRLF-to-LF normalization. It may also accept the exact synthetic
+empty-line boundary created by a final LF when the reviewer selects that final
+line but omits only the trailing separator. These are the only safe
+normalizations. A normalized match records the distinct
+`content-match-normalized` assurance plus `crlf-to-lf` or
+`trailing-empty-line`; it never becomes exact `content-match`.
 
 These assurance labels describe different facts:
 
@@ -458,7 +500,7 @@ These assurance labels describe different facts:
 | --- | --- |
 | `dispatch-valid` | The child/session/envelope and structured result were valid. |
 | `content-match` | A bounded returned excerpt exactly matched authoritative captured bytes. It does not prove understanding. |
-| `content-match-normalized` | The exact match failed, but the bounded excerpt matched after declared CRLF-to-LF normalization. It does not prove understanding. |
+| `content-match-normalized` | The exact match failed, but the bounded excerpt matched after `crlf-to-lf` or `trailing-empty-line` normalization. It does not prove understanding. |
 | `reviewer-declared` | The reviewer self-reported a claim, severity, opaque examination, or empty-member examination. |
 | `synthetic-sampled` | A fresh-session synthetic fixture sample observed behavior. It is not a user-target correctness guarantee. |
 
@@ -482,6 +524,33 @@ acrelay disposition \
   -rationale "The evidence is valid." \
   -follow-up "Apply the fix and advance the target."
 ```
+
+For a complete response, prefer one strict JSON batch:
+
+```json
+{
+  "dispositions": [
+    {
+      "finding_id": "R0-F1",
+      "decision": "revise",
+      "rationale": "The evidence is valid.",
+      "follow_up": "Apply the fix and advance the target.",
+      "approval_request_id": ""
+    }
+  ]
+}
+```
+
+```sh
+acrelay driver-response \
+  -canonical review.md \
+  -response-file driver-response.json
+```
+
+All five item fields are required. The engine validates the complete batch and
+then appends one canonical mutation; an invalid or unknown finding, invalid
+approval reference, duplicate finding, or malformed item leaves every finding
+unchanged. The single-finding `disposition` command remains available.
 
 Review-time approval request types are open-ended namespaced strings rather
 than a fixed category enum. A request JSON file contains `type`, exact `scope`,
@@ -586,6 +655,13 @@ successful `review` preflight. Omission resolves to `3`:
 ```
 acrelay review -canonical review.md -reviewer claude -prompt-file packet.md -round-bound 5
 ```
+
+`review` also accepts `-finding-appetite` (`1..20`, default `8`) and
+`-startup-timeout`, `-idle-timeout`, and `-hard-cap` duration overrides.
+Finding appetite is a consolidation request, never permission to omit
+critical/high findings. Claude and Codex emit only bounded
+`activity-observed` progress after structured events; raw reviewer output,
+prompts, paths, and internal identifiers are not progress UI.
 
 The resolved value is appended to the canonical before the reviewer child is
 started and cannot be changed. Later reviews may omit the flag or assert the
