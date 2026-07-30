@@ -65,14 +65,14 @@ identifiers, versions, status values, decision values, and URLs literal.
 
 Before an acRelay operation, resolve `acrelay` from `PATH` and run
 `acrelay version --short` silently. Continue only with the engine version this
-Skill was packaged for: `v0.1.0-alpha.4`. If the command is missing or
+Skill was packaged for: `v0.1.0-alpha.5`. If the command is missing or
 incompatible, do not announce the Skill or probe first. Stop with exactly
 these three user-facing lines, translated to the conversation language:
 
 ```text
 acRelay engine version mismatch. No review round was started.
-Installed: <observed-or-missing> / Required: v0.1.0-alpha.4
-Update guide: https://github.com/kyungseo/acrelay/blob/v0.1.0-alpha.4/docs/OPERATIONS.md
+Installed: <observed-or-missing> / Required: v0.1.0-alpha.5
+Update guide: https://github.com/kyungseo/acrelay/blob/v0.1.0-alpha.5/docs/OPERATIONS.md
 ```
 
 Do not add protocol analysis, an upgrade decision essay, raw paths, command

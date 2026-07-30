@@ -6,6 +6,18 @@
 단계이므로 prerelease 사이에 command와 file format이 달라질 수 있습니다.
 하지만 한 번 게시한 tag는 재사용하거나 rewrite하지 않습니다.
 
+## v0.1.0-alpha.5 — 더 명확해진 공식 Skill 안내
+
+- 공식 Skill 안내를 준비, review 요청, 진행 확인, 결과 검토, owner만 수행하는
+  Close의 첫 사용 흐름에 맞춰 다시 구성했습니다.
+- 사용자가 제공할 정보와 acRelay의 안전한 기본값을 구분했습니다. Review
+  profile, finding appetite, timeout과 formal-round 선택도 이 경계에서 설명합니다.
+- Runtime 계약을 확대하지 않으면서 profile별 egress, broad-scope 동의, prompt
+  요구, `UNKNOWN` 복구, approval과 Close 경계를 더 명확히 안내합니다.
+- 업데이트한 공식 Skill을 checksum으로 검증하는 Alpha.5 archive에 포함하고
+  exact-version installer로 전달합니다. Engine 동작, persisted format과 platform
+  지원 경계는 바뀌지 않았습니다.
+
 ## v0.1.0-alpha.4 — 첫 사용 신뢰성과 제한된 research
 
 - Claude의 불투명한 one-shot output을 structured event stream으로 바꿨습니다.

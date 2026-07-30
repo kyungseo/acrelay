@@ -38,7 +38,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          test "$RELEASE_TAG" = "v0.1.0-alpha.4"
+          test "$RELEASE_TAG" = "v0.1.0-alpha.5"
           test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$(git rev-parse HEAD)"
           test "$(go env GOOS)" = "darwin"
           test "$(go env GOARCH)" = "arm64"
@@ -62,8 +62,8 @@ jobs:
         with:
           name: acrelay-${{ inputs.tag }}-darwin-arm64
           path: |
-            dist/acrelay_0.1.0-alpha.4_darwin_arm64.tar.gz
-            dist/acrelay_0.1.0-alpha.4_provenance.json
-            dist/acrelay_0.1.0-alpha.4_checksums.txt
+            dist/acrelay_0.1.0-alpha.5_darwin_arm64.tar.gz
+            dist/acrelay_0.1.0-alpha.5_provenance.json
+            dist/acrelay_0.1.0-alpha.5_checksums.txt
           if-no-files-found: error
           retention-days: 7

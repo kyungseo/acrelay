@@ -81,14 +81,14 @@ reviewer는 CLI에서 실행됩니다.
 
 ## Engine과 Skill 설치
 
-Terminal에서 exact `v0.1.0-alpha.4` `acrelay` command를 바로 실행할 수 있어야
+Terminal에서 exact `v0.1.0-alpha.5` `acrelay` command를 바로 실행할 수 있어야
 합니다(`PATH`에 있어야 합니다). 현재 미리 build해 제공하는 binary는 macOS Apple
 Silicon(`darwin/arm64`)용입니다. Terminal에서 `uname -m`을 실행하고 결과가
 `arm64`일 때만 이 installer를 사용하세요. Installer는 `latest`로 바꾸지
 않습니다.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.4/scripts/install.sh |
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.5/scripts/install.sh |
   bash -s -- --skill-host codex
 ```
 
@@ -97,7 +97,7 @@ Installer는 release에 고정돼 있으며 engine과 Skill이 함께 담긴 arc
 checksum과 대조합니다. 로컬 Skill 내용이 다르면 `--replace`를 명시하지 않는 한
 보존합니다. 실행 전에 installer 내용을 확인하거나 고정 version의 `go install`을
 사용하려면
-[acRelay 설치 안내](https://github.com/kyungseo/acrelay/blob/v0.1.0-alpha.4/docs/OPERATIONS.ko.md)를
+[acRelay 설치 안내](https://github.com/kyungseo/acrelay/blob/v0.1.0-alpha.5/docs/OPERATIONS.ko.md)를
 따르세요.
 
 다음 platform 지원 대상은 Windows입니다. Windows core runtime lane은 이미
@@ -108,25 +108,25 @@ preview에는 Linux artifact와 live-review 지원이 없습니다. 조합을 �
 
 ## 수동 또는 project-local Skill 설치
 
-Exact acRelay `v0.1.0-alpha.4` tag에서 설치하고, `SKILL.md`만 복사하지 말고
+Exact acRelay `v0.1.0-alpha.5` tag에서 설치하고, `SKILL.md`만 복사하지 말고
 `skills/acrelay` 폴더 전체를 복사합니다.
 
 ```sh
-git clone --depth 1 --branch v0.1.0-alpha.4 https://github.com/kyungseo/acrelay.git /tmp/acrelay-v0.1.0-alpha.4
+git clone --depth 1 --branch v0.1.0-alpha.5 https://github.com/kyungseo/acrelay.git /tmp/acrelay-v0.1.0-alpha.5
 ```
 
 ### Claude Code
 
 ```sh
 mkdir -p "$HOME/.claude/skills"
-cp -R /tmp/acrelay-v0.1.0-alpha.4/skills/acrelay "$HOME/.claude/skills/"
+cp -R /tmp/acrelay-v0.1.0-alpha.5/skills/acrelay "$HOME/.claude/skills/"
 ```
 
 ### Codex
 
 ```sh
 mkdir -p "$HOME/.agents/skills"
-cp -R /tmp/acrelay-v0.1.0-alpha.4/skills/acrelay "$HOME/.agents/skills/"
+cp -R /tmp/acrelay-v0.1.0-alpha.5/skills/acrelay "$HOME/.agents/skills/"
 ```
 
 ### Windows PowerShell
@@ -134,8 +134,8 @@ cp -R /tmp/acrelay-v0.1.0-alpha.4/skills/acrelay "$HOME/.agents/skills/"
 Windows에서는 같은 exact tag를 임시 폴더에 clone합니다.
 
 ```powershell
-$source = Join-Path ([System.IO.Path]::GetTempPath()) "acrelay-v0.1.0-alpha.4"
-git clone --depth 1 --branch v0.1.0-alpha.4 https://github.com/kyungseo/acrelay.git $source
+$source = Join-Path ([System.IO.Path]::GetTempPath()) "acrelay-v0.1.0-alpha.5"
+git clone --depth 1 --branch v0.1.0-alpha.5 https://github.com/kyungseo/acrelay.git $source
 ```
 
 Claude Code에 설치하려면 다음 명령을 사용합니다.
@@ -192,7 +192,7 @@ acRelay로 Codex에게 이 파일을 검토하게 해줘. 확인한 근거와 �
 acRelay로 현재 구현 결과가 승인된 계획과 맞는지 검토하고, 어긋난 점을 정리해줘.
 ```
 
-acRelay v0.1.0-alpha.4는 파일 하나, 명시한 여러 파일 또는 지정한 subtree를
+acRelay v0.1.0-alpha.5는 파일 하나, 명시한 여러 파일 또는 지정한 subtree를
 받습니다. PR URL, staged patch, commit range 또는 branch comparison을 직접
 선택하는 기능은 아직 없습니다. 원하는 revision을 checkout한 뒤 파일이나 subtree를
 지정하세요.

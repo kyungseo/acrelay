@@ -3,7 +3,7 @@ set -euo pipefail
 
 # This installer is pinned to one release. Download the installer from the tag
 # for the version you intend to install; it never resolves "latest".
-VERSION="v0.1.0-alpha.4"
+VERSION="v0.1.0-alpha.5"
 REPOSITORY="kyungseo/acrelay"
 RELEASE_NUMBER="${VERSION#v}"
 ASSET="acrelay_${RELEASE_NUMBER}_darwin_arm64.tar.gz"
