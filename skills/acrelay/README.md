@@ -11,13 +11,13 @@ In this guide, the agent doing the work is the **driver**, the separate CLI
 that challenges the work is the **reviewer**, and the person who makes the
 final decision is the **owner**.
 
-This repository is the canonical source for both this official Skill and the
-standalone [acRelay engine](https://github.com/kyungseo/acrelay). The engine is
-distributed as one executable and does not use a dedicated daemon, server, or database.
-Install the engine, install this Skill, and ask for a review of a plan,
+This official Skill is distributed with the standalone
+[acRelay engine](https://github.com/kyungseo/acrelay). The engine is one
+executable and does not use a dedicated daemon, server, or database. Install
+the engine and the complete Skill package, then ask for a review of a plan,
 document, file, selected implementation files, or a declared directory tree.
 The Skill uses the engine's provided capabilities as-is; it does not
-reimplement or bypass the engine.
+reimplement or bypass them.
 
 The two parts have different jobs:
 
@@ -30,6 +30,19 @@ The two parts have different jobs:
 > itself.
 
 [![A user asks Codex to bring Claude into a bounded acRelay review; Claude exits after the round, and the user decides what changes](./assets/acrelay-review-flow@2x.png)](./assets/acrelay-review-flow.svg)
+
+## Start A First Review
+
+1. Confirm that you are using Codex App, Codex CLI, or Claude Code and that the
+   reviewer CLI you want is already installed and signed in.
+2. [Install the engine and complete Skill package](#install-the-engine-and-skill).
+3. Start a fresh agent session so the newly installed Skill can be discovered.
+4. Ask for a review, naming the file or bounded file set and either Claude Code
+   or Codex as reviewer.
+5. When asked, confirm that acRelay may send the review content, resolved
+   paths, and metadata to the selected reviewer service.
+6. Read the verdict and findings. The reviewer advises; you remain the owner
+   who decides what changes and whether to close the review.
 
 ## What It Replaces
 
@@ -50,15 +63,15 @@ background service.
 ## Publication Status
 
 This Skill is part of the **Public Validation Preview**. It is
-**Experimental**, broader validation is still **Validation pending**, and neither Claude
-Code nor Codex is presented as generally `Supported`. The author completed
-live reviews through both reviewer paths, but an invited non-author still needs
-to validate the experience before the project presents it as generally
-`Supported`.
+**Experimental**, broader validation is still **Validation pending**, and
+neither Claude Code nor Codex is presented as generally `Supported`. The
+author completed live reviews through both reviewer paths, but an invited
+non-author still needs to validate the experience before the project presents
+it as generally `Supported`.
 
-`Pending` does not mean the package is missing. It means this documented
-preview is available to evaluate, but the project does not yet claim general
-runtime support.
+`Validation pending` does not mean the package is missing. It means this
+documented preview is available to evaluate, but the project does not yet
+claim general runtime support.
 
 ## Before You Start
 
@@ -236,18 +249,26 @@ two contexts may share blind spots.
 Summarize the current state of this acRelay review and the decisions I need to make.
 ```
 
-## What The Skill Asks Before Review
+## How The Skill Prepares A Review
+
+The Skill infers what it safely can from your request and the app or CLI
+running it. Unless you request otherwise, it uses `owner` as the owner label,
+stores the private record below `~/.acrelay/records/`, keeps the reviewer
+context separate, and allows up to three rounds.
+
+Before dispatch, it determines:
 
 - the exact file, files, or subtree to review,
 - the review question,
 - Claude Code or Codex as reviewer,
-- who the owner is,
-- where to keep the private Markdown review record,
-- whether review content, resolved paths, and metadata may be sent to the
-  selected reviewer service,
-- whether exact auxiliary context or current external research is needed,
-- how the driver and reviewer contexts are related,
-- and whether the default three-round limit is acceptable.
+- whether the declared subject is enough or exact auxiliary context or current
+  external research is needed,
+- and how the driver and reviewer contexts are related.
+
+It asks only for information that cannot be inferred safely. The ordinary
+first-use question is whether review content, resolved paths, and metadata may
+be sent to the selected reviewer service. Research adds search-query and
+external-URL egress to that same consent question.
 
 The reviewer CLI may use its provider’s network and model tokens. A local
 review record does not mean local model inference.
