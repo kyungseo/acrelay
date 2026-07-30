@@ -2,19 +2,19 @@
 
 [English](./README.md) · **한국어**
 
-계획이나 구현 결과를 다른 coding agent와 함께 검토하면 방향을 더 정교하게
-다듬고, driver가 놓친 결함을 찾고, 결과물의 완성도를 높일 수 있습니다. 이 Skill은
-이런 review를 자연어로 쉽게 시작하도록 돕습니다.
+계획이나 구현 결과를 다른 코딩 에이전트에게 검토받으면 방향을 더 정교하게
+다듬고, 작업자가 놓친 결함을 찾고, 결과물의 완성도를 높일 수 있습니다. 이 Skill은
+이런 검토를 자연어로 쉽게 시작하도록 돕습니다.
 
-이 문서에서는 지금 작업을 진행하는 agent를 **driver**, 별도로 검토하는 CLI를
+이 문서에서는 지금 작업을 진행하는 에이전트를 **driver**, 별도로 검토하는 CLI를
 **reviewer**, 최종 결정을 내리는 사용자를 **owner**라고 부릅니다.
 
-이 repository는 이 공식 Skill과 독립된
-[acRelay engine](https://github.com/kyungseo/acrelay)의 canonical source입니다.
-Engine은 실행 파일 하나로 배포되며, 별도의 acRelay 전용 daemon, server 또는
-database를 사용하지 않습니다. Engine과 이 Skill을 설치한 뒤 계획, 문서, 파일
-하나, 선택한 구현 파일 또는 지정한 directory tree를 review해 달라고 요청하면
-됩니다. Skill은 별도 기능을 만들거나 Engine을 우회하지 않고, 지정된 Engine의
+이 공식 Skill은 독립 실행형
+[acRelay engine](https://github.com/kyungseo/acrelay)과 함께 배포됩니다.
+Engine은 실행 파일 하나이며, 별도의 acRelay 전용 daemon, server 또는 database를
+사용하지 않습니다. Engine과 Skill package 전체를 설치한 뒤 계획, 문서, 파일
+하나, 선택한 구현 파일 또는 지정한 directory tree를 검토해 달라고 요청하면
+됩니다. Skill은 별도 기능을 만들거나 Engine을 우회하지 않고, Engine이 제공하는
 기능을 그대로 사용합니다.
 
 두 구성요소가 맡는 일은 다릅니다.
@@ -28,6 +28,19 @@ database를 사용하지 않습니다. Engine과 이 Skill을 설치한 뒤 계�
 > 없습니다.
 
 [![사용자가 Codex에게 Claude를 제한된 acRelay review에 참여시키도록 요청하고, Claude는 회차 뒤 종료되며, 사용자가 변경 여부를 결정하는 흐름](./assets/acrelay-review-flow.ko@2x.png)](./assets/acrelay-review-flow.ko.svg)
+
+## 첫 검토 시작하기
+
+1. Codex App, Codex CLI 또는 Claude Code를 사용 중인지 확인하고, reviewer로
+   사용할 CLI가 이미 설치되어 로그인까지 완료됐는지 확인합니다.
+2. [Engine과 Skill package 전체를 설치합니다](#engine과-skill-설치).
+3. 새로 설치한 Skill을 찾을 수 있도록 에이전트의 새 세션을 시작합니다.
+4. 검토할 파일이나 범위가 제한된 파일 묶음과 reviewer로 사용할 Claude Code 또는
+   Codex를 지정해 검토를 요청합니다.
+5. 요청을 받으면 검토 내용, 해석된 경로와 메타데이터를 선택한 reviewer
+   서비스로 보내는 데 동의합니다.
+6. 판정과 finding(발견 사항)을 확인합니다. Reviewer는 의견을 제시하고, 어떤 내용을
+   변경할지와 검토를 Close할지는 owner가 결정합니다.
 
 ## 어떤 수작업을 줄이는가
 
@@ -52,8 +65,9 @@ service로 계속 동작하지 않습니다.
 실제 review를 완료했지만, acRelay가 일반적인 `Supported` 상태로 표시하기 전에
 초대된 비작성자 검증이 더 필요합니다.
 
-`검증 대기`는 package가 없다는 뜻이 아닙니다. 문서화된 preview를 평가할 수는
-있지만 acRelay가 아직 일반적인 runtime 지원을 주장하지 않는다는 뜻입니다.
+`Validation pending`은 package가 없다는 뜻이 아닙니다. 문서화된 preview를
+평가할 수는 있지만 acRelay가 아직 일반적인 runtime 지원을 주장하지 않는다는
+뜻입니다.
 
 ## 시작 전 준비
 
@@ -232,20 +246,29 @@ internet이 있다는 이유로 기본 선택하지 않습니다. Subject와 con
 진행 중인 acRelay review의 현재 상태와 내가 결정할 내용을 요약해줘.
 ```
 
-## Review 전에 확인하는 내용
+## Skill이 검토를 준비하는 방식
 
-- Review할 정확한 파일, 파일 묶음 또는 subtree
-- Review 질문
-- Reviewer로 사용할 Claude Code 또는 Codex
-- Owner가 누구인지
-- 비공개 Markdown review 기록을 둘 위치
-- Review 내용, 해석된 경로와 metadata를 선택한 reviewer service로 보내도 되는지
-- Exact auxiliary context 또는 최신 외부 research가 필요한지
-- Driver와 reviewer context의 관계
-- 기본 3회차 제한을 사용할지
+Skill은 요청과 현재 실행 환경에서 안전하게 판단할 수 있는 값을 먼저 추론합니다.
+별도 요청이 없으면 owner는 `owner`, 비공개 기록 위치는
+`~/.acrelay/records/` 아래로 정하고, reviewer context는 분리하며, 회차는 최대
+3회까지 허용합니다.
 
-Reviewer CLI는 provider network와 model token을 사용할 수 있습니다. Review
-기록이 로컬에 있다는 말은 model도 로컬에서 실행된다는 뜻이 아닙니다.
+검토를 시작하기 전에는 다음을 결정합니다.
+
+- 검토할 정확한 파일, 파일 묶음 또는 subtree
+- 검토 질문
+- reviewer로 사용할 Claude Code 또는 Codex
+- 지정한 검토 대상만으로 충분한지, 정확히 지정한 보조 context나 최신 외부
+  research가 필요한지
+- driver와 reviewer context의 관계
+
+안전하게 추론할 수 없는 내용만 사용자에게 묻습니다. 처음 사용할 때 묻는 일반적인
+질문은 검토 내용, 해석된 경로와 메타데이터를 선택한 reviewer 서비스로 보내도
+되는지입니다. Research를 사용하면 검색어와 외부 URL 전달도 같은 동의
+질문에 포함합니다.
+
+Reviewer CLI는 모델 제공업체의 네트워크와 모델 토큰을 사용할 수 있습니다.
+검토 기록이 로컬에 있더라도 모델이 로컬에서 실행되는 것은 아닙니다.
 
 ## 지켜지는 경계
 

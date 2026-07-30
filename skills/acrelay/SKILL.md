@@ -13,9 +13,34 @@ Use the installed `acrelay` command as the authority for review state,
 reviewer execution, recovery, and closure. Keep the normal conversation
 focused on the user's work, not on acRelay's protocol.
 
+## Operating Sequence
+
+Follow the existing sections in this order:
+
+1. Run the [Compatibility Gate](#compatibility-gate).
+2. [Establish The Review](#establish-the-review), including any required
+   vendor-egress consent.
+3. [Run The Review](#run-the-review) with `acrelay init`, then
+   `acrelay review`.
+4. [After A Valid Round](#after-a-valid-round), summarize the result and
+   record one atomic `acrelay driver-response` when findings exist.
+5. After changing the subject, use `acrelay advance` and continue the same
+   reviewer session when another round is useful.
+6. Use `acrelay briefing` or `acrelay close` only under the
+   [Briefing, Close, And Cleanup](#briefing-close-and-cleanup) rules.
+
+The host running this Skill is the **driver**. The separate external CLI is
+the **reviewer**, and the **owner** retains approvals and Close. An objective
+is one bounded review tracked in a private canonical record. The private
+handle store preserves reviewer session handles; it is not disposable scratch
+state.
+
 ## Conversation Contract
 
 Default to a quiet, progressive-disclosure experience.
+
+Render every user-facing template in the conversation language. Keep commands,
+identifiers, versions, status values, decision values, and URLs literal.
 
 - Never narrate Skill loading or say that you will probe, set up, initialize,
   or record the review. The first ordinary progress line, if needed, is the
@@ -73,24 +98,30 @@ Use these defaults without asking:
 
 - owner label: `owner`,
 - round bound: 3,
+- finding appetite: 8,
 - private canonical: a collision-safe file below
   `~/.acrelay/records/`,
+- private handle store: `~/.acrelay/handles.json`,
 - external reviewer context: separate unless the user explicitly says
   otherwise.
 
-Ask about the round bound only when the user wants to change it. Ask for a
-canonical path only when the default private location cannot be used.
+Ask about the round bound only when the user wants to change it before the
+first successful review preflight. That preflight fixes the bound for the
+objective. Later reviews must omit `-round-bound` or assert the same value; a
+different bound requires a new objective. Ask for a canonical path only when
+the default private location cannot be used.
 
 Choose the narrowest review access profile that can answer the question:
 
 - `contained`: the declared subject is sufficient. This is the default for
   code, plans, and artifacts that do not require current external facts.
 - `contextual`: exact auxiliary local files are needed to interpret the
-  subject. Declare them through a separate context spec; do not turn the whole
-  repository into context.
+  subject. Use `-review-profile contextual` with `-context-spec <file>`; do not
+  turn the whole repository into context.
 - `research`: current factual or source verification is material. This enables
-  only the reviewer vendor's bounded web search/fetch surface; command network
-  and write-capable tools remain unavailable.
+  only the reviewer vendor's bounded web search/fetch surface. Use
+  `-review-profile research` with `-ack-research-egress`; `-context-spec` is
+  optional. Command network and write-capable tools remain unavailable.
 
 Do not use `research` merely because network access exists. Do not use
 `contained` when the user explicitly asks to verify current external facts.
@@ -100,21 +131,23 @@ external sources may inform findings but do not become subject evidence.
 Vendor egress is the ordinary first-use consent gate. If the user has not
 already acknowledged it in the current conversation, ask once:
 
-> 리뷰 대상 내용과 경로 정보가 선택한 Claude Code 또는 Codex CLI로
-> 전달됩니다. 진행할까요?
+> Review content, resolved paths, and metadata will be sent to the selected
+> Claude Code or Codex CLI. Proceed?
 
 Do not expand this into a checklist. Local record storage does not mean local
 model inference.
 
 For `research`, include search-query and external-URL egress in the same
-consolidated consent question and pass the separate engine acknowledgment.
-Do not ask twice.
+consolidated consent question and pass `-ack-research-egress` in addition to
+`-ack-vendor-egress`. Do not ask twice.
 
 If the user asks for a host-native subagent, explain briefly that this version
 uses a separate external CLI reviewer. Never describe that CLI process as a
 subagent.
 
-## Start And Continue
+## Run The Review
+
+### Prepare Inputs
 
 Use `acrelay init` with the inferred/default values, then `acrelay review`.
 Prefer `-target` for one file and `-target-spec` only for explicit file sets or
@@ -128,15 +161,20 @@ validates it. A named relative target such as `target.md` is already resolved
 against the current working directory; do not locate it with `find`, `ls`, or
 another discovery command.
 
-The driver is the host running this Skill, not the reviewer. Inside Claude Code
-use `-driver-vendor claude`; inside Codex use `-driver-vendor codex`. Use the
-other vendor only as the `-reviewer` value requested by the user.
+Inside Claude Code use `-driver-vendor claude`; inside Codex use
+`-driver-vendor codex`. Use the other vendor only as the `-reviewer` value
+requested by the user.
 
 Choose a literal collision-safe record suffix in reasoning, such as a UUID-like
 hex token. Do not use shell command substitution, environment expansion, or a
-second command to generate it. After the silent version check, do not narrate
-that the version matches, restate an already supplied vendor-egress consent, or
-announce that you will locate the target.
+second command to generate it.
+
+The engine reports the combined subject-and-context member count and byte size.
+If it refuses a broad scope, do not add `-ack-broad-scope` silently. Narrow the
+selector when the question permits; otherwise ask one user question that
+includes the member/byte summary and expected cost/latency risk.
+
+### Command Forms
 
 Use these exact forms and add only the flags required by the chosen profile:
 
@@ -146,31 +184,45 @@ acrelay review -canonical <record> -reviewer <claude|codex> -round-bound <1..5> 
 acrelay driver-response -canonical <record> -response-file <strict-json-file>
 ```
 
-Use `-prompt` only when passing the literal review request itself. A filesystem
-path must always use `-prompt-file`; never pass a prompt-file path as the value
-of `-prompt`.
+The `init` form above shows the default `contained` profile. For
+`contextual`, replace it with `-review-profile contextual` and add
+`-context-spec <file>`. For `research`, replace it with
+`-review-profile research`, add `-ack-research-egress`, and add
+`-context-spec <file>` only when exact auxiliary local context is needed.
+
+`review` uses these engine defaults when their flags are omitted:
+
+- `-finding-appetite`: 8,
+- `-startup-timeout`: 2 minutes,
+- `-idle-timeout`: 5 minutes,
+- `-hard-cap`: 30 minutes,
+- `-handles`: `~/.acrelay/handles.json`.
+
+A review requires either `-prompt` or `-prompt-file`; neither has a default.
+Use `-prompt` only for the literal review request itself. A filesystem path
+must always use `-prompt-file`; never pass a prompt-file path as the value of
+`-prompt`.
+
+### Dispatch And Progress
 
 The completed `review` output includes each finding's severity, blocking state,
 evidence IDs, summary, and bounded recommendation. Use that output to prepare
 the driver response. Do not read the raw canonical unless the user explicitly
 requests diagnostics or a recovery operation requires it.
 
-Do not run `briefing` immediately after a valid review. Run it only when the
-user explicitly asks about Close readiness or asks to close. An approve result
-with no findings needs no driver-response mutation and no extra status read.
+The default conversation needs at most one progress line, rendered in the
+conversation language:
 
-The engine reports the combined member count and byte size. If it refuses a
-broad scope, do not add `-ack-broad-scope` silently. Narrow the selector when
-the question permits; otherwise ask one user question that includes the
-member/byte summary and expected cost/latency risk.
-
-The default conversation needs at most one progress line:
-
-> 선택한 reviewer에게 검토를 맡겼습니다.
+> The selected reviewer is assessing the subject.
 
 The engine may emit a bounded `activity-observed` progress signal. Do not turn
 each signal into narration; use it only to distinguish a live review from
 silence.
+
+## After A Valid Round
+
+Reviewer approval is evidence, not owner authority. Never auto-apply a finding
+that changes product direction or exceeds the user's approved scope.
 
 After a valid round:
 
@@ -178,37 +230,39 @@ After a valid round:
 2. As driver, choose `accept`, `revise`, or `defend` with a factual rationale
    when the disposition is within the task's approved scope. Put every
    disposition into one strict response file and record it once with
-   `acrelay driver-response`; do not probe help or guess fields.
+   `acrelay driver-response`; do not guess fields.
+
+   The exact driver-response shape is:
+
+   ```json
+   {
+     "dispositions": [
+       {
+         "finding_id": "R0-F1",
+         "decision": "revise",
+         "rationale": "The finding is supported by the declared evidence.",
+         "follow_up": "Update the subject before the next round.",
+         "approval_request_id": ""
+       }
+     ]
+   }
+   ```
+
+   Every object and field shown above is required. `decision` is
+   `accept|revise|defend|needs-user`. Use an empty string for fields that do not
+   apply. `accept` and `revise` require a concrete `follow_up` or `no-action`;
+   `needs-user` requires the exact existing approval request ID. The batch is
+   atomic: one invalid item records nothing.
+
 3. Use `needs-user` and the typed approval-request flow only for a real owner
    decision. Ask one consolidated question, not one question per finding.
 4. After changing the subject, use `acrelay advance` with a factual delta.
 5. Continue the same reviewer session unless a documented, reasoned session
    reset is necessary.
 
-Reviewer approval is evidence, not owner authority. Never auto-apply a finding
-that changes product direction or exceeds the user's approved scope.
-
-The exact driver-response shape is:
-
-```json
-{
-  "dispositions": [
-    {
-      "finding_id": "R0-F1",
-      "decision": "revise",
-      "rationale": "The finding is supported by the declared evidence.",
-      "follow_up": "Update the subject before the next round.",
-      "approval_request_id": ""
-    }
-  ]
-}
-```
-
-Every object and field shown above is required. `decision` is
-`accept|revise|defend|needs-user`. Use an empty string for fields that do not
-apply. `accept` and `revise` require a concrete `follow_up` or `no-action`;
-`needs-user` requires the exact existing approval request ID. The batch is
-atomic: one invalid item records nothing.
+Do not run `briefing` immediately after a valid review. Run it only when the
+user explicitly asks about Close readiness or asks to close. An approve result
+with no findings needs no driver-response mutation and no extra status read.
 
 ## Failure And Recovery
 
@@ -217,7 +271,7 @@ Do not improvise recovery.
 - Do not run the reviewer CLI directly.
 - Do not create a Git repository to change reviewer trust behavior.
 - Do not supply a caller-selected neutral cwd.
-- Do not probe unrelated `--help` commands or guess approval payloads.
+- Do not guess approval payloads.
 - Do not delete or edit canonical, journal, handle, cwd, quarantine, or vendor
   state.
 
@@ -229,18 +283,22 @@ For a started attempt, startup/idle timeout and inferred network failures are
 recorded failures and are never retried automatically. `ENOTFOUND` means DNS
 resolution failed; increasing the model timeout is not a remedy. Ask the user
 to restore connectivity, then use the engine's recorded state to choose a new
-objective or other explicit recovery path. A hard-cap remains `UNKNOWN`.
+objective or other explicit recovery path.
 
-A pending journal uses `acrelay reconcile`. `UNKNOWN` is never retried
-automatically. `abandon-transaction`, `terminate`, cleanup, and Close require
-the exact owner decision defined by the engine.
+If the absolute `-hard-cap` expires after the reviewer child starts, the result
+is `UNKNOWN`: the engine cannot assert whether vendor-side execution
+completed. `UNKNOWN` is never retried automatically.
+
+Use `acrelay reconcile` for a pending journal. `abandon-transaction`,
+`terminate`, cleanup, and Close require the exact owner decision defined by
+the engine.
 
 Default failure response:
 
 ```text
-리뷰를 시작하지 못했습니다. 라운드는 소모되지 않았습니다.
-원인: <plain-language cause>
-다음 조치: <one safe action>
+The review could not start. No round was consumed.
+Cause: <plain-language cause>
+Next action: <one safe action>
 ```
 
 If a started attempt was consumed, say so accurately instead. Keep technical
