@@ -85,13 +85,13 @@ in Terminal. The Skill and engine do not install or sign in to reviewer tools.
 
 ## Install The Engine And Skill
 
-The exact `v0.1.0-alpha.4` `acrelay` command must be available from Terminal
+The exact `v0.1.0-alpha.5` `acrelay` command must be available from Terminal
 (on `PATH`). The current prebuilt binary is for macOS Apple Silicon
 (`darwin/arm64`). In Terminal, run `uname -m` and continue with this installer
 only when the result is `arm64`. The installer never substitutes `latest`.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.4/scripts/install.sh |
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.5/scripts/install.sh |
   bash -s -- --skill-host codex
 ```
 
@@ -100,7 +100,7 @@ is pinned to the release and checks the archive containing both engine and
 Skill against its published checksum. It preserves a locally different Skill
 unless you explicitly add `--replace`. If you prefer to inspect the installer
 before running it, or want the pinned `go install` alternative, follow the
-[acRelay installation guide](https://github.com/kyungseo/acrelay/blob/v0.1.0-alpha.4/docs/OPERATIONS.md).
+[acRelay installation guide](https://github.com/kyungseo/acrelay/blob/v0.1.0-alpha.5/docs/OPERATIONS.md).
 
 Windows is the next platform-support target. Its core runtime lane is already
 verified; platform-specific Claude Code and Codex review validation comes next,
@@ -111,25 +111,25 @@ sending files.
 
 ## Manual Or Project-Local Skill Install
 
-Install from the exact `v0.1.0-alpha.4` acRelay tag and copy the complete
+Install from the exact `v0.1.0-alpha.5` acRelay tag and copy the complete
 `skills/acrelay` folder; do not copy `SKILL.md` by itself.
 
 ```sh
-git clone --depth 1 --branch v0.1.0-alpha.4 https://github.com/kyungseo/acrelay.git /tmp/acrelay-v0.1.0-alpha.4
+git clone --depth 1 --branch v0.1.0-alpha.5 https://github.com/kyungseo/acrelay.git /tmp/acrelay-v0.1.0-alpha.5
 ```
 
 ### Claude Code
 
 ```sh
 mkdir -p "$HOME/.claude/skills"
-cp -R /tmp/acrelay-v0.1.0-alpha.4/skills/acrelay "$HOME/.claude/skills/"
+cp -R /tmp/acrelay-v0.1.0-alpha.5/skills/acrelay "$HOME/.claude/skills/"
 ```
 
 ### Codex
 
 ```sh
 mkdir -p "$HOME/.agents/skills"
-cp -R /tmp/acrelay-v0.1.0-alpha.4/skills/acrelay "$HOME/.agents/skills/"
+cp -R /tmp/acrelay-v0.1.0-alpha.5/skills/acrelay "$HOME/.agents/skills/"
 ```
 
 ### Windows PowerShell
@@ -137,8 +137,8 @@ cp -R /tmp/acrelay-v0.1.0-alpha.4/skills/acrelay "$HOME/.agents/skills/"
 On Windows, clone the same exact tag into a temporary folder:
 
 ```powershell
-$source = Join-Path ([System.IO.Path]::GetTempPath()) "acrelay-v0.1.0-alpha.4"
-git clone --depth 1 --branch v0.1.0-alpha.4 https://github.com/kyungseo/acrelay.git $source
+$source = Join-Path ([System.IO.Path]::GetTempPath()) "acrelay-v0.1.0-alpha.5"
+git clone --depth 1 --branch v0.1.0-alpha.5 https://github.com/kyungseo/acrelay.git $source
 ```
 
 For Claude Code:
@@ -195,7 +195,7 @@ Use acRelay to have Codex review this file. Summarize the evidence it checked an
 Use acRelay to check whether the current implementation matches the approved plan and summarize any gaps.
 ```
 
-acRelay v0.1.0-alpha.4 accepts a file, explicit files, or a declared subtree.
+acRelay v0.1.0-alpha.5 accepts a file, explicit files, or a declared subtree.
 It does not yet accept a PR URL, staged patch, commit range, or branch
 comparison as a first-class selector. Check out the intended revision and name
 the files or subtree instead.

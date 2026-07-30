@@ -24,7 +24,7 @@ macOS에서 Terminal을 열고 `uname -m` 결과가 `arm64`인지 확인합니�
 사용할 host용 exact engine과 Skill을 함께 설치합니다.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.4/scripts/install.sh |
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.5/scripts/install.sh |
   bash -s -- --skill-host codex
 ~/.local/bin/acrelay version
 ```
@@ -113,7 +113,7 @@ Code host와 별도 Claude Code reviewer session 조합이며, Codex host의 sam
 
 ## Public Validation Preview와 platform 지원 확대
 
-`v0.1.0-alpha.4`는 **Public Validation Preview**입니다. 아직
+`v0.1.0-alpha.5`는 **Public Validation Preview**입니다. 아직
 **Experimental** 단계이고 더 넓은 검증은 **Validation pending**이며, 일반적인
 `Supported` 상태를 주장하지 않습니다. 내려받을 수 있는 파일과 live review 검증
 범위는 의도적으로 좁게 시작합니다.
@@ -121,7 +121,7 @@ Code host와 별도 Claude Code reviewer session 조합이며, Codex host의 sam
 - 내려받아 설치할 수 있는 binary: **macOS Apple Silicon (`darwin/arm64`)** 전용
 - Reviewer: 실제로 검증한 reviewer version과 운영체제 조합의 Claude Code CLI와
   Codex CLI
-- Release: Developer ID signing과 notarization을 하지 않은 `v0.1.0-alpha.4`
+- Release: Developer ID signing과 notarization을 하지 않은 `v0.1.0-alpha.5`
 - Review 방식: review마다 reviewer 1개, 정해진 회차 제한, 모든 finding에 대한
   driver의 처리 결정과 owner의 최종 종료 결정
 
@@ -129,12 +129,12 @@ Code host와 별도 Claude Code reviewer session 조합이며, Codex host의 sam
 lane을 통과했으며, 다음 단계에서 Claude Code·Codex review를 검증하고 필요한
 patch를 반영합니다. Linux core runtime CI는 source test matrix에 유지하지만,
 이번 preview에는 Linux artifact와 live-review 지원이 없습니다. 조합을 검증하기
-전까지 `v0.1.0-alpha.4`는 review를 보내기 전에 중단합니다. Intel Mac도 이번
+전까지 `v0.1.0-alpha.5`는 review를 보내기 전에 중단합니다. Intel Mac도 이번
 release에서 내려받을 수 있는 artifact와 검증된 live-review 조합이 없습니다.
 
 ## 설치
 
-정확한 `v0.1.0-alpha.4` preview를 설치합니다. Installer는 unpinned branch나
+정확한 `v0.1.0-alpha.5` preview를 설치합니다. Installer는 unpinned branch나
 `latest` download로 바꾸지 않습니다.
 
 ### 한 줄로 engine과 Skill 설치
@@ -146,7 +146,7 @@ Installer는 정확한 tag에 고정돼 있으며, 내려받은 binary archive�
 release checksum과 대조합니다.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.4/scripts/install.sh |
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.5/scripts/install.sh |
   bash -s -- --skill-host codex
 ```
 
@@ -163,7 +163,7 @@ Installer는 release 하나에 고정되며 `latest`를 조회하지 않습니�
 내용을 검토하세요.
 
 ```sh
-curl -fLO https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.4/scripts/install.sh
+curl -fLO https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.5/scripts/install.sh
 less install.sh
 bash install.sh
 ```
@@ -176,7 +176,7 @@ archive의 checksum을 확인하기 전에는 archive 안의 binary를 실행하
 ### Go install
 
 ```sh
-go install github.com/kyungseo/acrelay/cmd/acrelay@v0.1.0-alpha.4
+go install github.com/kyungseo/acrelay/cmd/acrelay@v0.1.0-alpha.5
 ```
 
 Source install에는 [`go.mod`](./go.mod)에 선언된 Go toolchain이 필요합니다.
@@ -207,7 +207,7 @@ engine이 담당합니다. Skill만으로는 review를 실행할 수 없으므�
 engine과 exact bundled Skill을 함께 설치합니다.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.4/scripts/install.sh |
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.5/scripts/install.sh |
   bash -s -- --skill-host both
 ```
 
@@ -219,7 +219,7 @@ installer는 보존한 채 중단하고 `--replace`를 안내하므로, 로컬 S
 수동 또는 project-local 설치가 필요하면 exact tag에서 전체 폴더를 가져옵니다.
 
 ```sh
-git clone --depth 1 --branch v0.1.0-alpha.4 https://github.com/kyungseo/acrelay.git /tmp/acrelay-v0.1.0-alpha.4
+git clone --depth 1 --branch v0.1.0-alpha.5 https://github.com/kyungseo/acrelay.git /tmp/acrelay-v0.1.0-alpha.5
 ```
 
 전체 `skills/acrelay` 폴더를 `$HOME/.claude/skills/acrelay`,

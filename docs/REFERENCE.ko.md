@@ -2,7 +2,7 @@
 
 [English](./REFERENCE.md) · **한국어**
 
-이 문서는 acRelay `v0.1.0-alpha.4`의 상세 동작 계약을 설명합니다. 설치와 가장
+이 문서는 acRelay `v0.1.0-alpha.5`의 상세 동작 계약을 설명합니다. 설치와 가장
 짧은 review 흐름은 [root README](../README.ko.md)에서 시작하세요.
 
 ## 이 문서를 읽기 전에
@@ -148,7 +148,7 @@ transaction ledger에 가집니다. Cause code는 허용된 source(`observed`,
 `vendor-declared`, `inferred`)와 결속됩니다. Typed cause에는 raw vendor text를
 넣지 않으며 `status`는 allowlisted phrase만 표시합니다. 현재 adapter는
 owner-remediation category를 직접 관측할 typed vendor field가 없습니다.
-Alpha.4는 대소문자와 무관하게 exact `ENOTFOUND` signature만 inferred
+Alpha.5는 대소문자와 무관하게 exact `ENOTFOUND` signature만 inferred
 `vendor.network`로 분류하고, 나머지는 unstructured text로 추측하지 않습니다.
 이미 시작한 attempt는 소비되며, 이 분류는 자동 retry나 timeout 증가를
 허용하지 않습니다. DNS resolution 문제는 timeout을 늘려 해결되지 않습니다.

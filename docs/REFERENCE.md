@@ -2,7 +2,7 @@
 
 **English** · [한국어](./REFERENCE.ko.md)
 
-This is the detailed reference for the acRelay `v0.1.0-alpha.4` behavioral
+This is the detailed reference for the acRelay `v0.1.0-alpha.5` behavioral
 contract. Start with the [root README](../README.md) for installation and the
 shortest review path.
 
@@ -210,7 +210,7 @@ Owner-remediation categories (`vendor.quota`, `vendor.auth`,
 `vendor.network`, `vendor.service-unavailable`, `vendor.tool-policy`) are
 registered but assigned only from `vendor-declared` or version-bound
 `inferred` evidence. Neither vendor CLI currently exposes a typed
-error-category field. Alpha.4 recognizes only the exact, case-insensitive
+error-category field. Alpha.5 recognizes only the exact, case-insensitive
 `ENOTFOUND` signature as inferred `vendor.network`; it does not infer the
 remaining categories from unstructured text. A started attempt remains
 consumed, and this classification never authorizes automatic retry or suggests

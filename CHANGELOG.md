@@ -6,6 +6,20 @@ This file records changes that matter to acRelay users. The project is in
 Alpha, so commands and file formats may change between prereleases. Once a tag
 is published, however, it is never reused or rewritten.
 
+## v0.1.0-alpha.5 — Clearer Official Skill Guidance
+
+- Reorganize the official Skill guidance around the first-review path:
+  preparation, request, progress, result review, and owner-only Close.
+- Distinguish the information a user must provide from acRelay's safe defaults,
+  including the review profile, finding appetite, timeout, and formal-round
+  choices.
+- Clarify profile-specific egress, broad-scope consent, prompt requirements,
+  `UNKNOWN` recovery, approval, and Close boundaries without expanding the
+  underlying runtime contract.
+- Bundle the updated official Skill in the checksum-verified Alpha.5 archive
+  and deliver it through the exact-version installer. Engine behavior,
+  persisted formats, and platform support boundaries are unchanged.
+
 ## v0.1.0-alpha.4 — First-Use Reliability And Bounded Research
 
 - Replace Claude's opaque one-shot output with a structured event stream.

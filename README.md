@@ -26,7 +26,7 @@ On macOS, open Terminal and confirm that `uname -m` prints `arm64`. Then install
 the exact engine and Skill for the host you use:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.4/scripts/install.sh |
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.5/scripts/install.sh |
   bash -s -- --skill-host codex
 ~/.local/bin/acrelay version
 ```
@@ -118,7 +118,7 @@ reviewer session; the same-vendor path on a Codex host remains unverified.
 
 ## Public Validation Preview And Platform Expansion
 
-`v0.1.0-alpha.4` is a **Public Validation Preview**. It is
+`v0.1.0-alpha.5` is a **Public Validation Preview**. It is
 **Experimental**, broader validation is still **Validation pending**, and it does not
 claim general `Supported` status. The download and live-review evidence scope
 is deliberately narrow:
@@ -126,7 +126,7 @@ is deliberately narrow:
 - downloadable binary: **macOS Apple Silicon (`darwin/arm64`)** only
 - reviewers: Claude Code CLI and Codex CLI, but only for combinations of
   reviewer version and operating system that were tested explicitly
-- release: not Developer ID signed or notarized, version `v0.1.0-alpha.4`
+- release: not Developer ID signed or notarized, version `v0.1.0-alpha.5`
 - review model: one reviewer for each review, a fixed round limit, a recorded
   driver response to every finding, and a final decision by the owner
 
@@ -135,12 +135,12 @@ recorded test lanes; platform-specific Claude Code and Codex review validation
 comes next, followed by any patches that evidence requires. Linux core runtime
 CI remains part of the source test matrix, but this preview does not provide a
 Linux artifact or live-review support. Until a combination is verified,
-`v0.1.0-alpha.4` stops before sending a review. Intel Mac likewise has no
+`v0.1.0-alpha.5` stops before sending a review. Intel Mac likewise has no
 downloadable artifact or verified live-review combination in this release.
 
 ## Install
 
-Install the exact `v0.1.0-alpha.4` preview. The installer never substitutes an
+Install the exact `v0.1.0-alpha.5` preview. The installer never substitutes an
 unpinned branch or a `latest` download.
 
 ### One-command engine and Skill install
@@ -152,7 +152,7 @@ The installer is pinned to the exact tag and verifies the downloaded binary
 archive against the release checksum before executing it:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.4/scripts/install.sh |
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.5/scripts/install.sh |
   bash -s -- --skill-host codex
 ```
 
@@ -170,7 +170,7 @@ The installer is pinned to one release and never resolves `latest`. Review it
 before running:
 
 ```sh
-curl -fLO https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.4/scripts/install.sh
+curl -fLO https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.5/scripts/install.sh
 less install.sh
 bash install.sh
 ```
@@ -182,7 +182,7 @@ different engine or locally different Skill without `--replace`.
 ### Go install
 
 ```sh
-go install github.com/kyungseo/acrelay/cmd/acrelay@v0.1.0-alpha.4
+go install github.com/kyungseo/acrelay/cmd/acrelay@v0.1.0-alpha.5
 ```
 
 This source-install path requires the Go toolchain declared in
@@ -215,7 +215,7 @@ gets the engine and the exact bundled Skill from the same checksum-verified
 release archive:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.4/scripts/install.sh |
+curl -fsSL https://raw.githubusercontent.com/kyungseo/acrelay/v0.1.0-alpha.5/scripts/install.sh |
   bash -s -- --skill-host both
 ```
 
@@ -228,7 +228,7 @@ To install the Skill manually or project-locally, copy the complete folder
 from the exact tag:
 
 ```sh
-git clone --depth 1 --branch v0.1.0-alpha.4 https://github.com/kyungseo/acrelay.git /tmp/acrelay-v0.1.0-alpha.4
+git clone --depth 1 --branch v0.1.0-alpha.5 https://github.com/kyungseo/acrelay.git /tmp/acrelay-v0.1.0-alpha.5
 ```
 
 Copy it to `$HOME/.claude/skills/acrelay`, `$HOME/.agents/skills/acrelay`, or
