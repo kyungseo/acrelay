@@ -63,6 +63,72 @@ ACRELAY_INSTALL_TESTING=1 ACRELAY_RELEASE_BASE_URL="$base_url" HOME="$test_home"
   "$repo_root/scripts/install.sh" --bin-dir "$bin_dir" --skill-host codex --replace
 ! grep -F "local edit" "$test_home/.agents/skills/acrelay/SKILL.md" >/dev/null
 
+# Managed Skill symlinks must fail before either the engine or another host changes.
+assert_skill_symlink_rejected() {
+  local host=$1
+  local link_kind=$2
+  local case_root="$test_root/skill-symlink-$host-$link_kind"
+  local case_home="$case_root/home"
+  local case_bin="$case_root/bin"
+  local managed_skill="$case_root/managed-skill"
+  local skill_parent="$case_home/.agents/skills"
+  if [[ "$host" == "claude" || "$host" == "both" ]]; then
+    skill_parent="$case_home/.claude/skills"
+  fi
+  mkdir -p "$case_bin" "$skill_parent"
+  cat >"$case_bin/acrelay" <<'ENGINE'
+#!/usr/bin/env sh
+if [ "$1" = "version" ]; then echo "v9.9.9"; exit 0; fi
+exit 1
+ENGINE
+  chmod 0755 "$case_bin/acrelay"
+  cp "$case_bin/acrelay" "$case_root/engine.before"
+  if [[ "$link_kind" == "live" ]]; then
+    mkdir -p "$managed_skill"
+    printf 'managed Skill must survive\n' >"$managed_skill/SKILL.md"
+    cp "$managed_skill/SKILL.md" "$case_root/managed.before"
+  fi
+  ln -s "$managed_skill" "$skill_parent/acrelay"
+  if [[ "$host" == "both" ]]; then
+    mkdir -p "$case_home/.agents/skills/acrelay"
+    printf 'other host must survive\n' >"$case_home/.agents/skills/acrelay/SKILL.md"
+    cp "$case_home/.agents/skills/acrelay/SKILL.md" "$case_root/peer.before"
+  fi
+
+  # --replace permits ordinary upgrades, but never replacing a managed symlink.
+  if ACRELAY_INSTALL_TESTING=1 ACRELAY_RELEASE_BASE_URL="$base_url" HOME="$case_home" \
+    "$repo_root/scripts/install.sh" --bin-dir "$case_bin" --skill-host "$host" --replace \
+    >"$case_root/install.log" 2>&1; then
+    echo "installer accepted a $link_kind Skill symlink for $host with --replace" >&2
+    return 1
+  fi
+  grep -F "$skill_parent/acrelay exists but is not a plain directory" "$case_root/install.log" >/dev/null
+  [[ -L "$skill_parent/acrelay" ]]
+  [[ "$(readlink "$skill_parent/acrelay")" == "$managed_skill" ]]
+  if ! cmp -s "$case_root/engine.before" "$case_bin/acrelay"; then
+    echo "installer changed the engine before rejecting a Skill symlink for $host" >&2
+    return 1
+  fi
+  [[ -x "$case_bin/acrelay" ]]
+  if [[ "$link_kind" == "live" ]]; then
+    cmp "$case_root/managed.before" "$managed_skill/SKILL.md"
+    [[ "$(ls -A "$managed_skill")" == "SKILL.md" ]]
+  else
+    [[ ! -e "$managed_skill" && ! -L "$managed_skill" ]]
+  fi
+  if [[ "$host" == "both" ]]; then
+    cmp "$case_root/peer.before" "$case_home/.agents/skills/acrelay/SKILL.md"
+    [[ "$(ls -A "$case_home/.agents/skills/acrelay")" == "SKILL.md" ]]
+  fi
+  echo "managed Skill symlink rejected without mutation: $host/$link_kind"
+}
+
+for skill_host_case in codex claude both; do
+  for link_kind_case in live dangling; do
+    assert_skill_symlink_rejected "$skill_host_case" "$link_kind_case"
+  done
+done
+
 # A different executable is not replaced without explicit owner intent.
 cat >"$bin_dir/acrelay" <<'EOF'
 #!/usr/bin/env sh
